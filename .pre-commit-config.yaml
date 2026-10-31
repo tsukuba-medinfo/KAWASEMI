@@ -1,0 +1,61 @@
+# commit / push 時の検証はすべて pre-commit に集約する。
+# 有効化: make hooks
+#   = uv run pre-commit install --hook-type pre-commit --hook-type pre-push
+# 以前は Makefile の hooks ターゲットが core.hooksPath を scripts/git-hooks に
+# 向けていたが、その設定下では pre-commit が .git/hooks/ へインストールできず、
+# commit 時の lint / 型チェックが動かなかった。core.hooksPath は使わない。
+#
+# ruff-check / ruff-format はパス指定なし（= ステージされた全 Python ファイル）。
+# CI（.github/workflows/ci.yml）の `ruff check .` / `ruff format --check .` と同じく
+# リポジトリ全体を対象にする。
+#
+# mypy は kawasemi/ と scripts/ を見る（CI の `mypy kawasemi/ scripts/` と同一）。
+# `scripts/` も DB を読み書きする保守用スクリプトを置く場所なので、型検査の外に置かない。
+# 対象を広げる場合は CI 側の対象も同時に広げる。
+#
+# ruff の版が二重管理になる理由:
+#   ruff-pre-commit の rev（下記）と pyproject.toml の dev 依存 `ruff>=0.7.4` の
+#   2箇所で版を持つ。pre-commit の公式フックは自身が管理する隔離環境に ruff を
+#   インストールする仕様で、プロジェクトの .venv を参照しないため rev の指定が必須。
+#   local フック（`entry: uv run ruff`）にすれば1箇所にできるが、
+#   `pre-commit autoupdate` による版追随と、venv 未構築でもフックが動く利点を失う。
+#   ここでは rev を単一の真実とし、pyproject.toml 側は CI / 手動実行用の下限指定
+#   （版固定ではない）と位置づける。rev を上げたときに CI の結果と乖離したら
+#   pyproject.toml の下限を rev に合わせて引き上げる。
+
+# lint / 型チェックは commit 時のみ走らせる（push 時は下記の main ガードだけ）。
+# push 時の再実行は commit 時と CI に重複するため行わない。
+default_stages: [pre-commit]
+
+repos:
+  # ruff: リント + フォーマット（black の代替を含む）
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.5
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  # mypy: 静的型チェック
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy
+        entry: uv run mypy
+        language: system
+        types: [python]
+        files: ^(kawasemi|scripts)/
+        args: [kawasemi/, scripts/]
+        pass_filenames: false
+
+  # main への直接 push をブロックする（旧 scripts/git-hooks/pre-push の移植先）。
+  # 変更は feature ブランチから PR で入れる運用なので、手元での誤 push を止める。
+  - repo: local
+    hooks:
+      - id: block-push-to-main
+        name: main への直接 push をブロック
+        entry: scripts/pre_push_guard.sh
+        language: script
+        stages: [pre-push]
+        always_run: true
+        pass_filenames: false

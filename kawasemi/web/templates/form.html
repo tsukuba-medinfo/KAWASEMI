@@ -1,0 +1,455 @@
+{% extends "base.html" %}
+
+{% block title %}{{ title }} - KAWASEMI{% endblock %}
+
+{% block content %}
+<div class="card">
+    <div class="page-head">
+        <h2>{{ title }}</h2>
+    </div>
+    {% if description %}
+    <p>{{ description }}</p>
+    {% endif %}
+
+    {% if assignment_info %}
+    <div class="info-box patient-info">
+        <h4>対象患者</h4>
+        <p><strong>患者ID:</strong> {{ assignment_info.patient_id }}</p>
+        {% if assignment_info.patient_name %}
+        <p><strong>氏名:</strong> {{ assignment_info.patient_name }}</p>
+        {% endif %}
+        {% if patient_info %}
+        <p><strong>性別:</strong> {{ patient_info.gender_display or '未設定' }}</p>
+        <p><strong>生年月日:</strong> {{ patient_info.birth_date or '未設定' }}</p>
+        {% endif %}
+    </div>
+    {% elif patient_info %}
+    <div class="info-box patient-info">
+        <h4>患者情報</h4>
+        <p><strong>氏名:</strong> {{ patient_info.name or '未設定' }}</p>
+        <p><strong>性別:</strong> {{ patient_info.gender_display or '未設定' }}</p>
+        <p><strong>生年月日:</strong> {{ patient_info.birth_date or '未設定' }}</p>
+    </div>
+    {% endif %}
+
+    {% if encounter_info %}
+    <div class="info-box encounter-info">
+        <h4>診療情報</h4>
+        <p><strong>種別:</strong> {{ encounter_info.class_display or '未設定' }}</p>
+        <p><strong>状態:</strong> {{ encounter_info.status or '未設定' }}</p>
+        <p><strong>医療機関:</strong> {{ encounter_info.service_provider or '未設定' }}</p>
+    </div>
+    {% endif %}
+
+    {% if ai_enabled %}
+    <div class="card ai-panel">
+        <h3>AI アシスト <small class="help-text">powered by Ollama ({{ ollama_model }})</small></h3>
+        <div class="page-head__actions">
+            <button type="button" class="btn btn--sm btn--ai" onclick="generateAIPlan()">AI実行計画を生成</button>
+            <button type="button" class="btn btn--sm btn--ai" id="btn-autofill" onclick="runAIAutofill()">AIで自動入力</button>
+        </div>
+        <div id="ai-status" class="ai-status"></div>
+    </div>
+    {% endif %}
+
+    <form method="POST" action="{{ base_path() }}/forms/{{ questionnaire_id }}/submit" id="questionnaire-form">
+        {% if assignment_info %}
+        {% if assignment_info.is_input_target %}
+        <input type="hidden" name="input_target_id" value="{{ assignment_info.id }}">
+        {% else %}
+        <input type="hidden" name="assignment_id" value="{{ assignment_info.id }}">
+        {% endif %}
+        {% endif %}
+        {% for field in fields %}
+        <div class="form-group" data-link-id="{{ field.link_id }}" {% if field.enable_when or field.enable_when_ancestors %}data-enable-when="true" data-enable-ancestors='{{ (field.enable_when_ancestors or []) | tojson }}' style="display: none;"{% endif %}>
+            {% set prefill_value = prefill_data.get(field.link_id, '') if prefill_data else '' %}
+            {% if field.type == 'boolean' %}
+                <label>
+                    <input type="checkbox" name="{{ field.link_id }}" {% if field.required and not field.enable_when and not field.enable_when_ancestors %}required{% endif %} {% if prefill_value %}checked{% endif %}>
+                    {{ field.text }}
+                    {% if field.required %}<span class="required"></span>{% endif %}
+                </label>
+            {% elif field.type == 'choice' or field.type == 'open-choice' %}
+                <label {% if field.required %}class="required"{% endif %}>{{ field.text }}</label>
+                <select name="{{ field.link_id }}" {% if field.required and not field.enable_when and not field.enable_when_ancestors %}required{% endif %}>
+                    <option value="">選択してください</option>
+                    {% for option in field.options %}
+                    <option value="{{ option.value }}" {% if prefill_value == option.value %}selected{% endif %}>{{ option.display }}</option>
+                    {% endfor %}
+                </select>
+            {% elif field.type == 'text' %}
+                <label {% if field.required %}class="required"{% endif %}>{{ field.text }}</label>
+                <textarea name="{{ field.link_id }}" {% if field.required and not field.enable_when and not field.enable_when_ancestors %}required{% endif %}>{{ prefill_value }}</textarea>
+            {% elif field.type == 'display' %}
+                <p><strong>{{ field.text }}</strong></p>
+            {% elif field.type == 'group' %}
+                <h3>{{ field.text }}</h3>
+            {% else %}
+                <label {% if field.required %}class="required"{% endif %}>{{ field.text }}</label>
+                <input type="{{ field.input_type }}" name="{{ field.link_id }}" value="{{ prefill_value }}" {% if field.required and not field.enable_when and not field.enable_when_ancestors %}required{% endif %}>
+            {% endif %}
+            {% if ai_enabled %}
+            <div class="ai-source-badge" data-link-id="{{ field.link_id }}"
+                 {% if field.link_id not in plans_map %}style="display:none"{% endif %}>
+                データソース:
+                <span class="source-type">{{ data_source_labels.get(plans_map[field.link_id].data_source_type, '未設定') if field.link_id in plans_map else '未設定' }}</span>
+                {% if field.link_id in plans_map and plans_map[field.link_id].fhir_path %}
+                <code>{{ plans_map[field.link_id].fhir_path }}</code>
+                {% endif %}
+            </div>
+            {% endif %}
+        </div>
+        {% endfor %}
+
+        <!-- メタデータ入力 -->
+        <div class="form-group">
+            {% if assignment_info %}
+            <label>患者ID</label>
+            <input type="text" name="subject" id="subject" value="Patient/{{ assignment_info.patient_id }}" readonly style="background-color: var(--color-surface-2); color: var(--color-ink-2);">
+            {% else %}
+            <label>患者ID（オプション）</label>
+            <div class="input-with-button">
+                <input type="text" name="subject" id="subject" placeholder="例: Patient/123" value="{{ prefill_data.subject if prefill_data and prefill_data.subject else '' }}">
+                {% if fhir_enabled %}
+                <button type="button" class="btn btn--secondary" onclick="lookupPatient()">情報取得</button>
+                {% endif %}
+            </div>
+            {% endif %}
+            <div id="patient-lookup-result"></div>
+        </div>
+
+        <div class="form-group">
+            <label>作成者（オプション）</label>
+            <input type="text" name="author" placeholder="例: Practitioner/456">
+        </div>
+
+        <div class="form-actions">
+            <button type="submit" class="btn btn--primary">送信する</button>
+            <a href="{{ base_path() }}/forms" class="btn btn--secondary">キャンセル</a>
+        </div>
+    </form>
+</div>
+
+<script>
+// enableWhen 設定
+const enableWhenConfig = {{ enable_when_config | tojson }};
+
+/**
+ * フィールドの値を取得
+ * @param {string} linkId - フィールドのlinkId
+ * @returns {any} フィールドの値
+ */
+function getFieldValue(linkId) {
+    const field = document.querySelector(`[name="${linkId}"]`);
+    if (!field) return null;
+
+    if (field.type === 'checkbox') {
+        return field.checked;
+    } else if (field.type === 'select-one') {
+        return field.value;
+    } else {
+        return field.value;
+    }
+}
+
+/**
+ * 条件を評価
+ * @param {any} actualValue - 実際の値
+ * @param {string} operator - 演算子
+ * @param {any} expectedValue - 期待する値
+ * @param {string} answerType - 値の型
+ * @returns {boolean} 条件が満たされるか
+ */
+function evaluateCondition(actualValue, operator, expectedValue, answerType) {
+    // exists 演算子
+    if (operator === 'exists') {
+        const exists = actualValue !== null && actualValue !== '' && actualValue !== undefined;
+        return expectedValue ? exists : !exists;
+    }
+
+    // 値がない場合は条件を満たさない
+    if (actualValue === null || actualValue === '' || actualValue === undefined) {
+        return false;
+    }
+
+    // 型変換
+    let actual = actualValue;
+    let expected = expectedValue;
+
+    if (answerType === 'boolean') {
+        actual = Boolean(actualValue);
+        expected = Boolean(expectedValue);
+    } else if (answerType === 'integer' || answerType === 'decimal') {
+        actual = Number(actualValue);
+        expected = Number(expectedValue);
+    }
+
+    // 演算子に応じた評価
+    switch (operator) {
+        case '=':
+            return actual === expected || String(actual) === String(expected);
+        case '!=':
+            return actual !== expected && String(actual) !== String(expected);
+        case '>':
+            return actual > expected;
+        case '<':
+            return actual < expected;
+        case '>=':
+            return actual >= expected;
+        case '<=':
+            return actual <= expected;
+        default:
+            return false;
+    }
+}
+
+/**
+ * そのフィールド自身の enableWhen 条件が成り立つか
+ * @param {string} linkId - 対象フィールドのlinkId
+ * @returns {boolean}
+ */
+function ownConditionHolds(linkId) {
+    const config = enableWhenConfig[linkId];
+    if (!config) return true;
+
+    const results = config.conditions.map(cond => {
+        const actualValue = getFieldValue(cond.question);
+        return evaluateCondition(
+            actualValue,
+            cond.operator,
+            cond.answer_value,
+            cond.answer_type
+        );
+    });
+
+    // behavior に応じて最終結果を判定（'all' または未指定は all）
+    return config.behavior === 'any' ? results.some(r => r) : results.every(r => r);
+}
+
+/**
+ * すべてのenableWhen条件を評価し、表示/非表示を切り替える
+ *
+ * **祖先の条件も見る。** FHIR R4 では無効な item の子孫も無効である。画面は項目を平坦に
+ * 並べるので、自身の条件に加えて、条件付きの祖先（data-enable-ancestors）がすべて有効な
+ * ときだけ表示する。
+ */
+function evaluateAllEnableWhen() {
+    const own = {};
+    for (const linkId of Object.keys(enableWhenConfig)) {
+        own[linkId] = ownConditionHolds(linkId);
+    }
+
+    document.querySelectorAll('.form-group[data-enable-when]').forEach(formGroup => {
+        const linkId = formGroup.dataset.linkId;
+        let ancestors = [];
+        try {
+            ancestors = JSON.parse(formGroup.dataset.enableAncestors || '[]');
+        } catch (e) {
+            ancestors = [];
+        }
+        const shouldShow =
+            (linkId in own ? own[linkId] : true) && ancestors.every(a => own[a] !== false);
+
+        formGroup.style.display = shouldShow ? 'block' : 'none';
+
+        // required属性の動的制御
+        const input = formGroup.querySelector('input, select, textarea');
+        if (input) {
+            input.required = Boolean(shouldShow && formGroup.querySelector('.required'));
+        }
+    });
+}
+
+/**
+ * 依存関係のあるフィールドにイベントリスナーを設定
+ */
+function setupEnableWhenListeners() {
+    // 依存先フィールドを収集
+    const dependentQuestions = new Set();
+    for (const config of Object.values(enableWhenConfig)) {
+        for (const condition of config.conditions) {
+            dependentQuestions.add(condition.question);
+        }
+    }
+
+    // 各依存先フィールドにchangeイベントを設定
+    for (const questionId of dependentQuestions) {
+        const field = document.querySelector(`[name="${questionId}"]`);
+        if (field) {
+            field.addEventListener('change', evaluateAllEnableWhen);
+            // チェックボックスの場合はclickイベントも追加
+            if (field.type === 'checkbox') {
+                field.addEventListener('click', evaluateAllEnableWhen);
+            }
+            // 入力フィールドの場合はinputイベントも追加
+            if (field.type === 'text' || field.type === 'number') {
+                field.addEventListener('input', evaluateAllEnableWhen);
+            }
+        }
+    }
+}
+
+// ページ読み込み時に初期化
+document.addEventListener('DOMContentLoaded', function() {
+    setupEnableWhenListeners();
+    evaluateAllEnableWhen();
+});
+</script>
+
+{% endblock %}
+
+{% block extra_js %}
+{% if ai_enabled %}
+<script>
+const QUESTIONNAIRE_ID = {{ questionnaire_id }};
+
+function getCsrfToken() {
+    // raw トークンは meta から読む（cookie は signed のため header 検証に使えない）
+    const m = document.querySelector('meta[name="csrf-token"]');
+    return m ? m.content : '';
+}
+
+async function generateAIPlan() {
+    const statusDiv = document.getElementById('ai-status');
+    statusDiv.innerHTML = '<span class="ai-loading">AI実行計画を生成中...</span>';
+
+    try {
+        const resp = await fetch(`{{ base_path() }}/forms/${QUESTIONNAIRE_ID}/generate-plan`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': getCsrfToken() },
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || '計画生成に失敗しました');
+
+        // 各フィールドのバッジを更新
+        for (const plan of data.plans) {
+            const badge = document.querySelector(`.ai-source-badge[data-link-id="${plan.link_id}"]`);
+            if (badge) {
+                badge.style.display = 'block';
+                const sourceType = badge.querySelector('.source-type');
+                if (sourceType) sourceType.textContent = plan.data_source_type_label;
+                const codeEl = badge.querySelector('code');
+                if (plan.fhir_path) {
+                    if (codeEl) { codeEl.textContent = plan.fhir_path; }
+                    else {
+                        const c = document.createElement('code');
+                        c.textContent = plan.fhir_path;
+                        badge.appendChild(c);
+                    }
+                } else if (codeEl) { codeEl.remove(); }
+            }
+        }
+        statusDiv.innerHTML = `<span class="ai-success">実行計画を生成しました（${data.plans.length}件）</span>`;
+    } catch (e) {
+        statusDiv.innerHTML = `<span class="ai-error">エラー: ${e.message}</span>`;
+    }
+}
+
+async function runAIAutofill() {
+    const statusDiv = document.getElementById('ai-status');
+    const btn = document.getElementById('btn-autofill');
+
+    const subjectInput = document.getElementById('subject');
+    const subject = subjectInput ? subjectInput.value.trim() : '';
+    if (!subject) {
+        statusDiv.innerHTML = '<span class="ai-error">患者IDを入力してください</span>';
+        return;
+    }
+
+    btn.disabled = true;
+    statusDiv.innerHTML = '<span class="ai-loading">AIがデータを取得中... (時間がかかる場合があります)</span>';
+
+    try {
+        const resp = await fetch(`{{ base_path() }}/forms/${QUESTIONNAIRE_ID}/autofill`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': getCsrfToken() },
+            body: JSON.stringify({ subject }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || '自動入力に失敗しました');
+
+        let filledCount = 0;
+        for (const [linkId, value] of Object.entries(data.prefill_data)) {
+            if (value === null || value === undefined) continue;
+            const field = document.querySelector(`[name="${linkId}"]`);
+            if (!field) continue;
+            if (field.type === 'checkbox') {
+                field.checked = Boolean(value);
+            } else {
+                field.value = String(value);
+            }
+            filledCount++;
+        }
+
+        // enableWhen 条件を再評価
+        evaluateAllEnableWhen();
+
+        statusDiv.innerHTML = `<span class="ai-success">${filledCount}件のフィールドに自動入力しました</span>`;
+    } catch (e) {
+        statusDiv.innerHTML = `<span class="ai-error">エラー: ${e.message}</span>`;
+    } finally {
+        btn.disabled = false;
+    }
+}
+</script>
+{% endif %}
+
+{% if fhir_enabled %}
+<script>
+async function lookupPatient() {
+    const subjectInput = document.getElementById('subject');
+    const resultDiv = document.getElementById('patient-lookup-result');
+
+    // Patient/xxx形式からIDを抽出
+    let patientId = subjectInput.value.trim();
+    if (patientId.startsWith('Patient/')) {
+        patientId = patientId.substring(8);
+    }
+
+    if (!patientId) {
+        resultDiv.innerHTML = '<p class="error">患者IDを入力してください</p>';
+        return;
+    }
+
+    resultDiv.innerHTML = '<p>取得中...</p>';
+
+    try {
+        const response = await fetch(`{{ base_path() }}/api/patient/${patientId}`);
+        const data = await response.json();
+
+        if (data.success) {
+            const patient = data.data;
+            resultDiv.innerHTML = `
+                <div class="info-box patient-info">
+                    <p><strong>氏名:</strong> ${patient.name || '未設定'}</p>
+                    <p><strong>性別:</strong> ${patient.gender_display || '未設定'}</p>
+                    <p><strong>生年月日:</strong> ${patient.birth_date || '未設定'}</p>
+                </div>
+            `;
+
+            // 性別フィールドがあれば自動補完
+            const genderField = document.querySelector('[name="gender"]');
+            if (genderField && patient.gender) {
+                genderField.value = patient.gender;
+                // enableWhenを再評価
+                evaluateAllEnableWhen();
+            }
+
+            // 生年月日フィールドがあれば自動補完
+            const birthDateField = document.querySelector('[name="birthDate"]');
+            if (birthDateField && patient.birth_date) {
+                birthDateField.value = patient.birth_date;
+            }
+
+            // subjectフィールドを正規化
+            subjectInput.value = `Patient/${patientId}`;
+        } else {
+            resultDiv.innerHTML = `<p class="error">${data.error}</p>`;
+        }
+    } catch (error) {
+        resultDiv.innerHTML = '<p class="error">患者情報の取得に失敗しました</p>';
+    }
+}
+</script>
+{% endif %}
+{% endblock %}

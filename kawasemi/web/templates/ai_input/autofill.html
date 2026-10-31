@@ -1,0 +1,374 @@
+{% extends "base.html" %}
+
+{% block title %}AI自動入力 - {{ questionnaire.title or questionnaire.fhir_id }} - KAWASEMI{% endblock %}
+
+{% block content %}
+<div style="margin-bottom:1rem;">
+  <h2>ステップ4: AI自動入力 — {{ questionnaire.title or questionnaire.fhir_id }}</h2>
+</div>
+
+{% include "ai_input/_stepper.html" %}
+
+{% if not has_plans %}
+<div class="alert alert-error">
+  実行可能な確認済みプランがありません。先に
+  <a href="{{ base_path() }}/ai-input/questionnaires/{{ questionnaire.id }}/plan">ステップ3: 取得プランの作成</a>
+  で取得プランを作成・確認してください。
+</div>
+{% else %}
+
+<div class="af-layout">
+
+  <!-- 左: フォームパネル -->
+  <div class="form-panel">
+    <div class="patient-input-row">
+      <div class="patient-col">
+        <label for="patient-id-input">患者ID（FHIR Patient ID）</label>
+        <input type="text" id="patient-id-input" placeholder="例: patient-001" />
+      </div>
+      {% if enable_ai_extraction %}
+      <div>
+        <label for="llm-model-input">LLMモデル（任意）</label>
+        <input type="text" id="llm-model-input" class="model-input" value="{{ default_ollama_model }}" placeholder="例: llama3.1" />
+      </div>
+      {% endif %}
+      <button type="button" id="btn-run" onclick="runAutofill()" class="btn btn--ai">
+        {% if enable_ai_extraction %}AIで自動入力する{% else %}取得プランを実行する{% endif %}
+      </button>
+    </div>
+
+    <div id="run-status" class="run-status"></div>
+
+    <div id="form-fields">
+      {% for field in form_fields %}
+      {% if field.type == 'group' %}
+      <h3 class="field-group-title">{{ field.text }}</h3>
+      {% elif field.type == 'display' %}
+      <p class="field-display">{{ field.text }}</p>
+      {% else %}
+      {% set plan = plans_map.get(field.link_id) %}
+      <div class="field-wrapper" id="wrapper-{{ field.link_id }}">
+        <label class="field-label{% if field.required %} required{% endif %}" for="field-{{ field.link_id }}">
+          {{ field.text or field.link_id }}
+          {% if plan %}
+          <span class="ai-badge" onclick="highlightEvidence('{{ field.link_id }}')" title="AI補完対象 - クリックで根拠を表示">AI</span>
+          {% else %}
+          <span class="manual-badge" title="手動入力">手動</span>
+          {% endif %}
+        </label>
+
+        {% if field.type == 'boolean' %}
+        <input type="checkbox" id="field-{{ field.link_id }}" name="{{ field.link_id }}"
+               class="field-input{% if plan %} ai-filled{% endif %}">
+        {% elif field.type in ('choice', 'open-choice') %}
+        <select id="field-{{ field.link_id }}" name="{{ field.link_id }}"
+                class="field-input{% if plan %} ai-filled{% endif %}">
+          <option value="">選択してください</option>
+          {% for opt in field.options %}
+          <option value="{{ opt.value }}">{{ opt.display }}</option>
+          {% endfor %}
+        </select>
+        {% elif field.type == 'text' %}
+        <textarea id="field-{{ field.link_id }}" name="{{ field.link_id }}"
+                  class="field-input{% if plan %} ai-filled{% endif %}"></textarea>
+        {% else %}
+        <input type="{{ field.input_type or 'text' }}" id="field-{{ field.link_id }}"
+               name="{{ field.link_id }}"
+               class="field-input{% if plan %} ai-filled{% endif %}">
+        {% endif %}
+
+        {% if plan %}
+        <div class="help-text">
+          取得プラン（{{ plan.program.get('steps', [])|length }} ステップ）/ 確認済み
+        </div>
+        {% endif %}
+      </div>
+      {% endif %}
+      {% endfor %}
+    </div>
+  </div>
+
+  <!-- 右: 根拠情報パネル -->
+  <div class="evidence-panel">
+    <h3>AI 根拠情報</h3>
+    <div id="evidence-container">
+      <div class="evidence-empty">自動入力を実行すると<br>ここに根拠情報が表示されます</div>
+    </div>
+  </div>
+
+</div>
+{% endif %}
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const QUESTIONNAIRE_ID = {{ questionnaire.id }};
+const CSRF_TOKEN = document.querySelector('meta[name="csrf-token"]')?.content || '';
+const OP_LABELS = {{ op_labels | tojson }};
+
+let currentEvidence = {};
+let lastExecutionId = null;
+
+async function runAutofill() {
+  const patientId = document.getElementById('patient-id-input').value.trim();
+  const model = document.getElementById('llm-model-input')?.value?.trim() || null;
+  if (!patientId) {
+    alert('患者IDを入力してください');
+    return;
+  }
+
+  const btn = document.getElementById('btn-run');
+  const btnLabel = btn.textContent.trim();
+  btn.disabled = true;
+  btn.textContent = '実行中...';
+
+  const statusEl = document.getElementById('run-status');
+  statusEl.style.display = 'block';
+  statusEl.className = 'status-loading';
+  statusEl.innerHTML = '<span class="spinner"></span>準備中...';
+
+  // 進捗状態をリセット（根拠パネルを空にして逐次追記する）
+  currentEvidence = {};
+  lastExecutionId = null;
+  document.getElementById('evidence-container').innerHTML =
+    '<div class="evidence-empty">実行中… 取得できた項目から順に表示します</div>';
+
+  let total = 0;
+  let filled = 0;
+  let firstItem = true;
+
+  const reportLinkHtml = (execId) =>
+    execId
+      ? ` <a href="{{ base_path() }}/ai-input/questionnaires/${QUESTIONNAIRE_ID}/autofill/executions/${execId}/validation" target="_blank">データ収集手続確認書を開く →</a>`
+      : '';
+
+  function handleEvent(ev) {
+    switch (ev.type) {
+      case 'start':
+        total = ev.total;
+        statusEl.className = 'status-loading';
+        statusEl.innerHTML = `<span class="spinner"></span>実行開始（全 ${total} 項目）…`;
+        break;
+      case 'item_start':
+        statusEl.className = 'status-loading';
+        statusEl.innerHTML =
+          `<span class="spinner"></span>${filled} / ${total} 完了 ・ ` +
+          `実行中: <b>${escHtml(ev.item_text || ev.link_id)}</b> (${ev.index + 1}/${ev.total})`;
+        upsertEvidenceCard(ev.link_id, ev.item_text, null, true);
+        break;
+      case 'item': {
+        if (firstItem) { document.getElementById('evidence-container').innerHTML = ''; firstItem = false; }
+        const ed = { trace: ev.trace || [], value: ev.value };
+        if (ev.error) ed.error = ev.error;
+        currentEvidence[ev.link_id] = ed;
+        const hasValue = ev.value !== null && ev.value !== undefined && ev.value !== '';
+        if (hasValue) { applyOneField(ev.link_id, ev.value); filled++; }
+        upsertEvidenceCard(ev.link_id, ev.item_text, ed, false);
+        statusEl.innerHTML = `<span class="spinner"></span>${filled} / ${total} 完了 …`;
+        break;
+      }
+      case 'done': {
+        lastExecutionId = ev.execution_id;
+        const link = reportLinkHtml(ev.execution_id);
+        if (ev.status === 'success') {
+          statusEl.className = 'status-ok';
+          statusEl.innerHTML = `✓ ${ev.filled}件の項目を自動入力しました (実行ID: ${ev.execution_id}, model: ${ev.model || 'default'})${link}`;
+        } else if (ev.status === 'partial') {
+          statusEl.className = 'status-partial';
+          statusEl.innerHTML = `⚠ ${ev.filled} / ${ev.total}件を補完（一部取得できない項目があります）(実行ID: ${ev.execution_id}, model: ${ev.model || 'default'})${link}`;
+        } else {
+          statusEl.className = 'status-err';
+          statusEl.innerHTML = `エラーが発生しました (実行ID: ${ev.execution_id})`;
+        }
+        break;
+      }
+      case 'error':
+        statusEl.className = 'status-err';
+        statusEl.textContent = `エラー: ${ev.message || '自動入力に失敗しました'}`;
+        break;
+    }
+  }
+
+  try {
+    const resp = await fetch(
+      `{{ base_path() }}/ai-input/questionnaires/${QUESTIONNAIRE_ID}/autofill/stream`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CSRF-Token': CSRF_TOKEN,
+        },
+        body: JSON.stringify({ patient_id: patientId, model }),
+      }
+    );
+
+    // ガード違反（プラン無し・フラグ無効・患者ID未指定等）は非ストリームのJSONで返る
+    const ctype = resp.headers.get('content-type') || '';
+    if (!resp.ok || ctype.includes('application/json')) {
+      let msg = '自動入力に失敗しました';
+      try { const j = await resp.json(); msg = j.message || msg; } catch (_) { /* noop */ }
+      statusEl.className = 'status-err';
+      statusEl.textContent = `エラー: ${msg}`;
+      return;
+    }
+
+    // NDJSON ストリームを1行ずつ処理する
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line) continue;
+        try { handleEvent(JSON.parse(line)); } catch (_) { /* 不完全行は無視 */ }
+      }
+    }
+    const tail = buf.trim();
+    if (tail) { try { handleEvent(JSON.parse(tail)); } catch (_) { /* noop */ } }
+  } catch (e) {
+    statusEl.className = 'status-err';
+    statusEl.textContent = `通信エラー: ${e}`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = btnLabel;
+  }
+}
+
+function applyOneField(linkId, value) {
+  const el = document.getElementById(`field-${linkId}`);
+  if (!el) return;
+
+  if (el.type === 'checkbox') {
+    el.checked = Boolean(value);
+  } else if (el.tagName === 'SELECT') {
+    for (const opt of el.options) {
+      if (opt.value === String(value)) { opt.selected = true; break; }
+    }
+  } else {
+    el.value = String(value ?? '');
+  }
+
+  el.classList.add('ai-filled');
+  // 充填された瞬間を一瞬ハイライトして「埋まったところ」を可視化する
+  el.style.transition = 'background 0.4s';
+  el.style.background = 'var(--color-ok-tint)';
+  setTimeout(() => { el.style.background = ''; }, 700);
+}
+
+// 1項目分の根拠カードを生成・更新する（item_start で実行中、item で確定表示）。
+function upsertEvidenceCard(linkId, itemText, ev, pending) {
+  const container = document.getElementById('evidence-container');
+  let card = document.getElementById(`ev-${linkId}`);
+  if (!card) {
+    card = document.createElement('div');
+    card.className = 'evidence-item';
+    card.id = `ev-${linkId}`;
+    card.setAttribute('onclick', `toggleEvidence('${linkId}')`);
+    container.appendChild(card);
+  }
+  const title = escHtml(itemText || linkId);
+
+  if (pending) {
+    card.innerHTML = `
+      <div class="evidence-header">
+        <span>${title}</span>
+        <span class="evidence-label"><span class="spinner spinner--sm"></span>実行中</span>
+      </div>`;
+    card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    return;
+  }
+
+  const trace = (ev && ev.trace) || [];
+  const value = ev ? ev.value : undefined;
+  const headRight = ev && ev.error
+    ? '<span class="ev-err" style="font-size:0.75rem;">エラー</span>'
+    : `<span class="source-local_db" style="font-size:0.75rem;">= ${escHtml(fmt(value))}</span>`;
+
+  const traceHtml = trace.map((t, i) => {
+    const opLabel = OP_LABELS[t.op] || t.op;
+    // guard が偽で実行されなかった step は「失敗」ではなく設計どおりの未実行。
+    // エラー（⚠）や空の結果と混同されないよう専用表記にする。
+    const out = t.skipped
+      ? '⏭ 未実行（guard 偽）'
+      : (t.error ? `⚠ ${escHtml(t.error)}` : escHtml(fmt(t.output)));
+    const taken = t.taken ? `（${t.taken}）` : '';
+    const llm = t.llm
+      ? `<div class="evidence-row"><span class="evidence-label">LLM (${escHtml(t.llm.model)})</span>
+           <code class="evidence-value">${escHtml((t.llm.prompt || '').substring(0, 280))}</code></div>`
+      : '';
+    const inputs = t.inputs
+      ? `<div class="evidence-row"><span class="evidence-label">入力</span>
+           <code class="evidence-value">${escHtml(JSON.stringify(t.inputs).substring(0, 200))}</code></div>`
+      : '';
+    // 設計根拠（reasoning）は設計時の判断理由であり、実行事実（→ 結果）とは別物。
+    // 混同を避けるため専用ラベルで区別して表示する。
+    const reasoning = t.reasoning
+      ? `<div class="evidence-row"><span class="evidence-label">設計根拠</span>
+           <code class="evidence-value" style="font-style:italic;">${escHtml(String(t.reasoning).substring(0, 200))}</code></div>`
+      : '';
+    return `
+      <div class="evidence-trace">
+        <div style="font-size:0.78rem;"><b>${i + 1}. ${opLabel}</b>
+          <code style="font-family:var(--font-mono);color:var(--color-ink-2);">${escHtml(t.id)}</code> ${taken} → <b>${out}</b></div>
+        ${inputs}${llm}${reasoning}
+      </div>`;
+  }).join('') || '<div class="empty" style="font-size:0.8rem;">トレースなし</div>';
+
+  card.innerHTML = `
+    <div class="evidence-header">
+      <span>${title}</span>
+      ${headRight}
+    </div>
+    <div class="evidence-body" id="ev-body-${linkId}">
+      ${ev && ev.error ? `<div class="evidence-row"><span class="evidence-label">エラー</span>
+        <code class="evidence-value">${escHtml(ev.error)}</code></div>` : ''}
+      ${traceHtml}
+    </div>`;
+}
+
+function toggleEvidence(linkId) {
+  const body = document.getElementById(`ev-body-${linkId}`);
+  if (body) body.classList.toggle('open');
+}
+
+function highlightEvidence(linkId) {
+  // 全ハイライト解除
+  document.querySelectorAll('.evidence-item').forEach(el => el.classList.remove('highlighted'));
+  // 対象をハイライト＋展開
+  const item = document.getElementById(`ev-${linkId}`);
+  if (item) {
+    item.classList.add('highlighted');
+    item.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    const body = document.getElementById(`ev-body-${linkId}`);
+    if (body) body.classList.add('open');
+  }
+  // フォームフィールドをハイライト
+  const fieldEl = document.getElementById(`field-${linkId}`);
+  if (fieldEl) {
+    fieldEl.focus();
+    fieldEl.style.outline = '3px solid var(--color-ok)';
+    setTimeout(() => { fieldEl.style.outline = ''; }, 2000);
+  }
+}
+
+function fmt(v) {
+  if (v === null || v === undefined) return '—';
+  if (typeof v === 'object') return JSON.stringify(v).substring(0, 120);
+  return String(v);
+}
+
+function escHtml(str) {
+  if (str === null || str === undefined) return '—';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+</script>
+{% endblock %}

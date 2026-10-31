@@ -1,0 +1,86 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment variables
+# バックアップも無視する。`.env.bak-YYYYMMDD` のような控えは中身が本物の秘密なので、
+# 追跡外にしないと `git add -A` で入る。
+.env
+.env.local
+.env.bak-*
+.env.*.bak
+
+# Database
+*.db
+# SQLite の WAL / 共有メモリ。`*.db` では拾えず、スクリプトを走らせた作業ツリーで
+# 未追跡ファイルとして現れる（`git add -A` で紛れ込む）。
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+logs/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+
+# Ruff
+.ruff_cache/
+
+# macOS
+.DS_Store
+
+# 施設固有の情報（定義書・接続レジストリ・キー種別・典拠の文書・施設専用スクリプト）。
+# 施設の private リポジトリを clone して置く。雛形は site.example/ にある。
+/site/
+
+# 実行で生まれるもの（索引の成果物・出力ファイル・E2E の生成物）。
+/var/
+
+# Project specific
+data/
+uploads/
+temp/
+output/
+
+# CI の JS 側の検査だけが使う。成果物は追跡しない。
+node_modules/

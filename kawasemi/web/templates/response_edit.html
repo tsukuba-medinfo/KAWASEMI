@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+
+{% block title %}回答編集 - KAWASEMI{% endblock %}
+
+{% block content %}
+<div class="breadcrumb">
+    <a href="{{ base_path() }}/">ホーム</a> &gt;
+    <a href="{{ base_path() }}/questionnaires?mode=response">QuestionnaireResponse管理</a> &gt;
+    <a href="{{ base_path() }}/questionnaires/{{ response.questionnaire_id }}/responses">回答一覧</a> &gt;
+    <a href="{{ base_path() }}/responses/{{ response.id }}">詳細</a> &gt;
+    編集
+</div>
+
+<div class="card">
+    <div class="page-head">
+        <div>
+            <h2>回答編集</h2>
+            <div class="page-head__sub">
+                Questionnaire: {{ questionnaire.title or 'タイトルなし' }} | 回答ID: {{ response.id }}
+            </div>
+        </div>
+    </div>
+
+    {% if error %}
+    <div class="alert alert-error">
+        {{ error }}
+    </div>
+    {% endif %}
+
+    <form method="POST">
+        <div class="form-section">
+            <h3>メタデータ</h3>
+            <div class="form-group">
+                <label for="subject">患者 (subject)</label>
+                <input type="text" id="subject" name="subject" placeholder="Patient/xxx" value="{{ response.subject or '' }}">
+            </div>
+            <div class="form-group">
+                <label for="author">作成者 (author)</label>
+                <input type="text" id="author" name="author" placeholder="Practitioner/xxx" value="{{ response.author or '' }}">
+            </div>
+            <div class="form-group">
+                <label for="status">ステータス</label>
+                <select id="status" name="status">
+                    <option value="in-progress" {% if response.status == 'in-progress' %}selected{% endif %}>in-progress</option>
+                    <option value="completed" {% if response.status == 'completed' %}selected{% endif %}>completed</option>
+                    <option value="amended" {% if response.status == 'amended' %}selected{% endif %}>amended</option>
+                    <option value="entered-in-error" {% if response.status == 'entered-in-error' %}selected{% endif %}>entered-in-error</option>
+                    <option value="stopped" {% if response.status == 'stopped' %}selected{% endif %}>stopped</option>
+                </select>
+            </div>
+        </div>
+
+        <div class="form-section">
+            <h3>回答内容</h3>
+            {% for field in fields %}
+            <div class="field-card">
+                <label>
+                    {{ field.text or field.link_id }}
+                    {% if field.required %}<span class="required"></span>{% endif %}
+                    <span class="help-text mono">({{ field.link_id }})</span>
+                </label>
+
+                {% if field.type == 'boolean' %}
+                <input type="checkbox" name="{{ field.link_id }}" {% if field.value %}checked{% endif %}>
+
+                {% elif field.type == 'choice' or field.type == 'open-choice' %}
+                <select name="{{ field.link_id }}" {% if field.required %}required{% endif %}>
+                    <option value="">-- 選択してください --</option>
+                    {% for option in field.options %}
+                    <option value="{{ option.value }}" {% if field.value == option.value %}selected{% endif %}>{{ option.display }}</option>
+                    {% endfor %}
+                </select>
+
+                {% elif field.type == 'text' or field.type == 'string' %}
+                {% if field.type == 'text' %}
+                <textarea name="{{ field.link_id }}" {% if field.required %}required{% endif %}>{{ field.value or '' }}</textarea>
+                {% else %}
+                <input type="text" name="{{ field.link_id }}" value="{{ field.value or '' }}" {% if field.required %}required{% endif %}>
+                {% endif %}
+
+                {% elif field.type == 'integer' %}
+                <input type="number" name="{{ field.link_id }}" value="{{ field.value or '' }}" step="1" {% if field.required %}required{% endif %}>
+
+                {% elif field.type == 'decimal' %}
+                <input type="number" name="{{ field.link_id }}" value="{{ field.value or '' }}" step="any" {% if field.required %}required{% endif %}>
+
+                {% elif field.type == 'date' %}
+                <input type="date" name="{{ field.link_id }}" value="{{ field.value or '' }}" {% if field.required %}required{% endif %}>
+
+                {% elif field.type == 'dateTime' %}
+                <input type="datetime-local" name="{{ field.link_id }}" value="{{ field.value or '' }}" {% if field.required %}required{% endif %}>
+
+                {% elif field.type == 'time' %}
+                <input type="time" name="{{ field.link_id }}" value="{{ field.value or '' }}" {% if field.required %}required{% endif %}>
+
+                {% else %}
+                <input type="text" name="{{ field.link_id }}" value="{{ field.value or '' }}" {% if field.required %}required{% endif %}>
+                {% endif %}
+            </div>
+            {% endfor %}
+
+            {% if not fields %}
+            <p class="help-text">編集可能な回答項目がありません。</p>
+            {% endif %}
+        </div>
+
+        <div class="form-actions">
+            <button type="submit" class="btn btn--primary">保存する</button>
+            <a href="{{ base_path() }}/responses/{{ response.id }}" class="btn btn--secondary">キャンセル</a>
+        </div>
+    </form>
+</div>
+{% endblock %}

@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+
+{% block title %}ValueSet詳細 - KAWASEMI{% endblock %}
+
+{% block content %}
+<div class="breadcrumb">
+    <a href="{{ base_path() }}/">ホーム</a> &gt; <a href="{{ base_path() }}/valuesets">ValueSet管理</a> &gt; 詳細
+</div>
+
+<div class="card">
+    <div class="page-head">
+        <h2>{{ valueset.title or 'タイトルなし' }}</h2>
+        <div class="page-head__actions">
+            <a href="{{ base_path() }}/valuesets/{{ valueset.id }}/edit" class="btn btn--sm btn--primary">編集</a>
+        </div>
+    </div>
+
+    <h3 class="section-title">基本情報</h3>
+    <table class="meta-table">
+        <tr>
+            <th>内部ID</th>
+            <td>{{ valueset.id }}</td>
+        </tr>
+        <tr>
+            <th>FHIR ID</th>
+            <td>{{ valueset.fhir_id }}</td>
+        </tr>
+        <tr>
+            <th>タイトル</th>
+            <td>{{ valueset.title or '-' }}</td>
+        </tr>
+        <tr>
+            <th>ステータス</th>
+            <td>
+                {% set badge = {'active': 'success', 'draft': 'warning', 'retired': 'danger'}.get(valueset.status, 'neutral') %}
+                <span class="badge badge--{{ badge }}">{{ valueset.status }}</span>
+            </td>
+        </tr>
+        <tr>
+            <th>バージョン</th>
+            <td>{{ valueset.version or '-' }}</td>
+        </tr>
+        <tr>
+            <th>URL</th>
+            <td>{{ valueset.url or '-' }}</td>
+        </tr>
+        <tr>
+            <th>作成日時</th>
+            <td>{{ valueset.created_at.strftime('%Y-%m-%d %H:%M:%S') if valueset.created_at else '-' }}</td>
+        </tr>
+        <tr>
+            <th>更新日時</th>
+            <td>{{ valueset.updated_at.strftime('%Y-%m-%d %H:%M:%S') if valueset.updated_at else '-' }}</td>
+        </tr>
+    </table>
+
+    <h3 class="section-title">選択肢 ({{ options | length }}件)</h3>
+    {% if options %}
+    <div class="table-wrap">
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>コード</th>
+                    <th>表示名</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for opt in options %}
+                <tr>
+                    <td>{{ opt.value }}</td>
+                    <td>{{ opt.display }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="info-box">
+        <p>compose.include[].concept または expansion.contains から選択肢を抽出できませんでした。</p>
+    </div>
+    {% endif %}
+
+    <h3 class="section-title">
+        FHIRリソース (JSON)
+        <button type="button" class="btn btn--sm btn--secondary" style="float: right;" onclick="copyJson()">コピー</button>
+    </h3>
+    <div class="json-view">
+        <pre id="jsonContent">{{ valueset.content | tojson(indent=2) }}</pre>
+    </div>
+</div>
+
+<div class="back-link">
+    <a href="{{ base_path() }}/valuesets">&larr; 一覧に戻る</a>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function copyJson() {
+    const jsonContent = document.getElementById('jsonContent').textContent;
+    navigator.clipboard.writeText(jsonContent).then(function() {
+        alert('JSONをコピーしました');
+    }, function(err) {
+        alert('コピーに失敗しました');
+    });
+}
+</script>
+{% endblock %}

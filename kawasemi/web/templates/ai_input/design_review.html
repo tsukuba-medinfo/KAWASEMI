@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+
+{% block title %}データソース調査 - {{ questionnaire.title or questionnaire.fhir_id }} - KAWASEMI{% endblock %}
+
+{% block content %}
+<div class="card">
+  {% include "ai_input/_stepper.html" %}
+  <h2>ステップ1: データソース調査 — {{ questionnaire.title or questionnaire.fhir_id }}</h2>
+  <p class="hint">各項目の臨床的コンテキスト（左）とデータ所在（右）の入力状況を確認します（読取専用）。編集は各役割の画面で行います。</p>
+
+  <div class="toolbar">
+    <a class="btn btn--secondary" href="{{ base_path() }}/ai-input/questionnaires/{{ questionnaire.id }}/source-survey/clinical">臨床的コンテキストを編集</a>
+    <a class="btn btn--secondary" href="{{ base_path() }}/ai-input/questionnaires/{{ questionnaire.id }}/source-survey/system">データ所在を編集</a>
+    <a class="btn btn--secondary" href="{{ base_path() }}/questionnaires/{{ questionnaire.id }}">Questionnaire詳細へ</a>
+  </div>
+
+  {% if fields %}
+    {% if unresolved_count %}
+    <div class="alert alert-warning">
+      ⚠ データ所在が未解決の項目が <strong>{{ unresolved_count }}</strong> 件あります。
+      各項目で候補を選択するか「該当データなし」を指定してください。未解決が残る間は手順書（次ステップ）の生成に進めません。
+    </div>
+    {% else %}
+    <div class="alert alert-success">✓ すべての項目のデータ所在が解決済みです。手順書の生成に進めます。</div>
+    {% endif %}
+  {% endif %}
+
+  {% if not fields %}
+  <div class="alert alert-error">このQuestionnaireには入力項目がありません。</div>
+  {% else %}
+  <div class="table-wrap">
+    <table class="table">
+      <thead>
+        <tr>
+          <th style="width:120px">linkId</th>
+          <th style="width:160px">項目名</th>
+          <th>臨床的コンテキスト（施設非依存）</th>
+          <th style="width:90px">ソース</th>
+          <th>データ所在（施設固有）</th>
+          <th style="width:90px">状態</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for field in fields %}
+        {% set ann = annotations.get(field.link_id) %}
+        {% set loc = locations.get(field.link_id) %}
+        {% set has_clin = ann and ann.annotation %}
+        {% set has_sys = loc and loc.has_content %}
+        {% set is_na = loc and loc.primary_source_category == 'not_available' %}
+        {% set is_unresolved = field.link_id in unresolved %}
+        <tr class="{{ 'row-unresolved' if is_unresolved else '' }}">
+          <td class="link-id">{{ field.link_id }}</td>
+          <td>{{ field.text or '（テキストなし）' }}</td>
+          <td class="cell-text">
+            {% if has_clin %}{{ ann.annotation }}
+            <div class="cite-meta">{{ annotation_status_labels.get(ann.status, ann.status) }}{% if ann.citation_list %} / 典拠{{ ann.citation_list | length }}件{% else %} / 典拠なし{% endif %}</div>
+            {% for c in ann.citation_list %}
+            <div class="cite-meta" style="font-family:var(--font-mono);">{{ c.unit_id or (c.payload and c.payload.get('label')) or '（アドレス未記載）' }}</div>
+            {% endfor %}
+            {% else %}<span class="empty">未入力</span>{% endif %}
+          </td>
+          <td>{% if loc and loc.candidate_list %}<span class="source-badge">{{ source_labels.get(loc.primary_source_category, loc.primary_source_category) }}</span>{% else %}<span class="empty">—</span>{% endif %}</td>
+          <td class="cell-text">{% if loc and loc.primary_location %}{{ loc.primary_location }}{% elif is_na %}<span class="empty">該当データなし</span>{% else %}<span class="empty">未入力</span>{% endif %}</td>
+          <td>
+            {% if has_clin and has_sys %}<span class="status-pill st-both">両方</span>
+            {% elif has_clin %}<span class="status-pill st-clinical">臨床のみ</span>
+            {% elif has_sys %}<span class="status-pill st-system">所在のみ</span>
+            {% elif is_na %}<span class="status-pill st-na">該当データなし</span>
+            {% else %}<span class="status-pill st-unresolved">未解決</span>{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+
+{% block title %}データセット管理 - KAWASEMI{% endblock %}
+
+{% block content %}
+<div class="card">
+    <div class="page-head">
+        <h2>データセット管理</h2>
+        <div class="page-head__actions">
+            <a href="{{ base_path() }}/datasets/new" class="btn btn--sm btn--primary">新規登録</a>
+        </div>
+    </div>
+
+    {% if datasets %}
+    <div class="table-wrap">
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>名前</th>
+                    <th>Questionnaire</th>
+                    <th>進捗</th>
+                    <th>作成者</th>
+                    <th>作成日</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for ds in datasets %}
+                {% set total = ds.input_targets | length %}
+                {% set completed = ds.input_targets | selectattr('status', 'equalto', 'completed') | list | length %}
+                {% set pct = ((completed / total * 100) | int) if total > 0 else 0 %}
+                <tr>
+                    <td>
+                        <a href="{{ base_path() }}/datasets/{{ ds.id }}">{{ ds.name }}</a>
+                        {% if ds.description %}
+                        <div class="help-text">{{ ds.description }}</div>
+                        {% endif %}
+                    </td>
+                    <td>
+                        <div class="tag-list">
+                            {% for dq in ds.dataset_questionnaires %}
+                            <span class="tag">{{ dq.questionnaire.title or dq.questionnaire.fhir_id }}</span>
+                            {% endfor %}
+                        </div>
+                    </td>
+                    <td>
+                        <span class="databar"><span class="databar__fill" style="width: {{ pct }}%;"></span></span>
+                        <span class="databar__text">{{ completed }} / {{ total }}</span>
+                    </td>
+                    <td>{{ ds.created_by.full_name if ds.created_by else '-' }}</td>
+                    <td>{{ ds.created_at.strftime('%Y-%m-%d') }}</td>
+                    <td>
+                        <div class="row-actions">
+                            <a href="{{ base_path() }}/datasets/{{ ds.id }}">詳細</a>
+                            <form action="{{ base_path() }}/datasets/{{ ds.id }}/delete" method="post" style="margin: 0;"
+                                  onsubmit="return confirm('データセット「{{ ds.name }}」を削除しますか？\n入力対象も全て削除されます。');">
+                                <button type="submit" class="btn btn--sm btn--danger">削除</button>
+                            </form>
+                        </div>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="empty-state">
+        <p>データセットがありません。</p>
+        <a href="{{ base_path() }}/datasets/new" class="btn btn--sm btn--primary">新規登録する</a>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

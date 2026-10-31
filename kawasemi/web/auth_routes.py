@@ -1,0 +1,372 @@
+"""認証関連ルーター"""
+
+import uuid
+from datetime import UTC, datetime, timedelta
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Form, Request, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.templating import Jinja2Templates
+from fastapi_csrf_protect import CsrfProtect
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from kawasemi.core.auth import (
+    create_access_token,
+    create_refresh_token,
+    decode_refresh_token,
+    verify_password,
+)
+from kawasemi.core.config import settings
+from kawasemi.core.database import get_db
+from kawasemi.core.deps import get_current_user, get_current_user_optional
+from kawasemi.core.entry import current_entry
+from kawasemi.core.logging_config import get_logger
+from kawasemi.core.rate_limit import limiter, login_rate_limit
+from kawasemi.models.auth_event import AuthEvent, AuthEventAction
+from kawasemi.models.refresh_token import RefreshToken
+from kawasemi.models.role import RoleType
+from kawasemi.models.user import User, UserRole
+from kawasemi.web.template_globals import register_template_globals
+
+router = APIRouter()
+logger = get_logger(__name__)
+
+# ユーザー不在/非アクティブ時も bcrypt を1回走らせて応答時間を平準化し、
+# 処理時間差による有効ユーザー名の列挙（timing oracle）を防ぐためのダミーハッシュ。
+# 実在のパスワードではなく、検証は常に False になる。
+_DUMMY_PASSWORD_HASH = "$2b$12$sn/2lq0dq92EJCQ2fOSDeutgWHBKFvpE4efccvhWfrMK8SjUqUgZy"
+
+templates = Jinja2Templates(directory="kawasemi/web/templates")
+register_template_globals(templates)
+
+
+def _safe_redirect_path(next_url: str | None) -> str:
+    """ログイン後のリダイレクト先を自サイト内の相対パスに限定する。
+
+    `next` にユーザー制御の値が入るため、`//evil.com` や `https://evil.com`
+    のような絶対/プロトコル相対 URL を弾き、オープンリダイレクトを防ぐ。
+    安全でなければトップ（"/"）にフォールバックする。
+    """
+    if not next_url:
+        return "/"
+    # 先頭が単一の "/" で始まる相対パスのみ許可（"//" や "/\" は外部扱い）
+    if not next_url.startswith("/") or next_url.startswith(("//", "/\\")):
+        return "/"
+    return next_url
+
+
+def _set_access_cookie(response: Response, access_token: str) -> None:
+    response.set_cookie(
+        key=settings.jwt_cookie_name,
+        value=access_token,
+        httponly=True,
+        secure=settings.cookie_secure,
+        samesite="lax",
+        max_age=settings.jwt_access_token_expire_minutes * 60,
+    )
+
+
+def _set_refresh_cookie(response: Response, refresh_token: str) -> None:
+    response.set_cookie(
+        key=settings.jwt_refresh_cookie_name,
+        value=refresh_token,
+        httponly=True,
+        secure=settings.cookie_secure,
+        samesite="lax",
+        max_age=settings.jwt_refresh_token_expire_days * 86400,
+    )
+
+
+async def _issue_refresh_token(user_id: int, db: AsyncSession) -> str:
+    """リフレッシュトークンを1件発行し DB に保存して返す。"""
+    jti = uuid.uuid4().hex
+    expires_at = datetime.now(UTC) + timedelta(days=settings.jwt_refresh_token_expire_days)
+    db.add(RefreshToken(jti=jti, user_id=user_id, expires_at=expires_at))
+    await db.commit()
+    return create_refresh_token(user_id, jti)
+
+
+@router.get("/login", response_class=HTMLResponse)
+async def login_page(
+    request: Request,
+    user: Annotated[User | None, Depends(get_current_user_optional)],
+    csrf_protect: CsrfProtect = Depends(),
+    next: str | None = None,
+) -> Response:
+    """ログインページ"""
+    # すでにログイン済みの場合はトップページへリダイレクト
+    if user:
+        return RedirectResponse(url="/", status_code=303)
+
+    # CSRFトークンを生成
+    csrf_token, signed_token = csrf_protect.generate_csrf_tokens()
+
+    response = templates.TemplateResponse(
+        "login.html",
+        {"request": request, "error": None, "next": next, "csrf_token": csrf_token},
+    )
+
+    # 署名済みトークンをCookieに設定
+    csrf_protect.set_csrf_cookie(signed_token, response)
+
+    return response
+
+
+@router.post("/login", response_class=HTMLResponse)
+@limiter.limit(login_rate_limit)
+async def login(
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    username: Annotated[str, Form()],
+    password: Annotated[str, Form()],
+    csrf_protect: CsrfProtect = Depends(),
+    next: Annotated[str | None, Form()] = None,
+) -> Response:
+    """ログイン処理
+
+    レート制限: 5回/分（ブルートフォース攻撃対策）
+    CSRF保護: 有効
+    """
+    # CSRF検証
+    await csrf_protect.validate_csrf(request)
+
+    def _error_response(message: str) -> Response:
+        # エラー時も新しいCSRFトークンを生成して返す
+        csrf_token, signed_token = csrf_protect.generate_csrf_tokens()
+        resp: Response = templates.TemplateResponse(
+            "login.html",
+            {"request": request, "error": message, "next": next, "csrf_token": csrf_token},
+        )
+        csrf_protect.set_csrf_cookie(signed_token, resp)
+        return resp
+
+    locked_msg = "アカウントがロックされています。しばらく待つか管理者に解除を依頼してください"
+
+    # ユーザーを検索（ロック判定のため is_active では絞らず取得する）
+    result = await db.execute(
+        select(User)
+        .where(User.username == username)
+        .options(selectinload(User.user_roles).selectinload(UserRole.role))
+    )
+    user = result.scalar_one_or_none()
+
+    # ロック済みで期限切れなら自動解除（監査に記録）。期限内なら即拒否。
+    if user is not None and user.locked_until is not None:
+        if user.is_locked():
+            logger.warning(f"ロック中アカウントのログイン試行: username={username}")
+            return _error_response(locked_msg)
+        # 期限切れ → 自動解除
+        user.reset_lockout()
+        db.add(AuthEvent(user_id=user.id, action=AuthEventAction.UNLOCKED, reason="時間経過"))
+        await db.commit()
+
+    # 認証チェック。ユーザー不在/非アクティブでもダミーハッシュで bcrypt を実行し、
+    # 応答時間差による有効ユーザー名の列挙（timing oracle）を防ぐ。
+    if user is not None and user.is_active:
+        password_ok = verify_password(password, user.password_hash)
+    else:
+        verify_password(password, _DUMMY_PASSWORD_HASH)
+        password_ok = False
+
+    if not password_ok:
+        logger.warning(f"ログイン失敗: username={username}")
+        # 実在かつ有効なアカウントの失敗のみ回数を数える（存在しないユーザーは数えない）
+        if user is not None and user.is_active:
+            locked = user.register_failed_login(
+                settings.lockout_max_attempts, settings.lockout_duration_minutes
+            )
+            if locked:
+                db.add(
+                    AuthEvent(
+                        user_id=user.id,
+                        action=AuthEventAction.LOCKED,
+                        reason=f"連続ログイン失敗 {user.failed_login_count} 回",
+                        failed_count=user.failed_login_count,
+                    )
+                )
+                logger.warning(
+                    f"アカウントをロックしました: user_id={user.id}, username={username}"
+                )
+            await db.commit()
+            if locked:
+                return _error_response(locked_msg)
+        return _error_response("ユーザー名またはパスワードが正しくありません")
+
+    # password_ok=True は user が存在し有効な場合のみ（型の絞り込み）
+    assert user is not None
+
+    # 認証成功 → 失敗カウント/ロックをリセット
+    if user.failed_login_count or user.locked_until is not None:
+        user.reset_lockout()
+        await db.commit()
+
+    # **この入り口で使える役割が無ければ入れない**。黙って「役割なし」で通すと、
+    # ホームだけ見えて何も押せない画面になる。どの入り口へ行けばよいかを言う
+    outside = user.held_role_names_outside_entry()
+    if user.default_active_role() is None and outside:
+        entry = current_entry()
+        hint = entry.url_for(outside)
+        where = f"（{hint[1]}）" if hint else ""
+        logger.info(
+            f"入り口外の役割によるログイン拒否: user_id={user.id} entry={entry.name!r} roles={outside}"
+        )
+        return _error_response(
+            f"この入り口{('「' + entry.name + '」') if entry.name else ''}では、"
+            f"あなたの役割（{'・'.join(RoleType.display_name(r) for r in outside)}）は使えません。"
+            f"{RoleType.display_name(outside[0])}の入り口{where}からログインしてください"
+        )
+
+    # JWTトークン生成（既定アクティブ役割=最高権限を act クレームに載せる）
+    access_token = create_access_token(
+        data={"sub": str(user.id), "act": user.default_active_role()}
+    )
+
+    logger.info(
+        f"ログイン成功: user_id={user.id}, username={user.username}, "
+        f"active_role={user.default_active_role()}"
+    )
+
+    # リダイレクト先はトップ（/）に任せ、/ 側でアクティブ役割ごとに振り分ける。
+    # next は自サイト内の相対パスに限定（オープンリダイレクト防止）。
+    redirect_url = _safe_redirect_path(next)
+    response = RedirectResponse(url=redirect_url, status_code=303)
+
+    # アクセストークン＋リフレッシュトークンを Cookie に設定
+    _set_access_cookie(response, access_token)
+    refresh_token = await _issue_refresh_token(user.id, db)
+    _set_refresh_cookie(response, refresh_token)
+
+    return response
+
+
+@router.post("/switch-role")
+async def switch_role(
+    request: Request,
+    current_user: Annotated[User, Depends(get_current_user)],
+    role: Annotated[str, Form()],
+    csrf_protect: CsrfProtect = Depends(),
+    next_url: Annotated[str | None, Form(alias="next")] = None,
+) -> Response:
+    """アクティブ役割を切り替える（ハード・スコープ）
+
+    保有（=切替可能な）役割でない場合は何もせずトップへ戻す。
+    JWT を再発行し、新しい act クレームで Cookie を上書きする。
+    `next` があれば切替後にその画面へ戻す（役割不足の 403 からの復帰導線）。
+    """
+    await csrf_protect.validate_csrf(request)
+
+    target = _safe_redirect_path(next_url)
+
+    if not current_user.can_act_as(role):
+        logger.warning(f"不正な役割切替: user_id={current_user.id}, role={role}")
+        return RedirectResponse(url="/", status_code=303)
+
+    access_token = create_access_token(data={"sub": str(current_user.id), "act": role})
+    logger.info(f"役割切替: user_id={current_user.id} -> active_role={role} next={target}")
+
+    response = RedirectResponse(url=target, status_code=303)
+    response.set_cookie(
+        key=settings.jwt_cookie_name,
+        value=access_token,
+        httponly=True,
+        secure=settings.cookie_secure,
+        samesite="lax",
+        max_age=settings.jwt_access_token_expire_minutes * 60,
+    )
+    return response
+
+
+@router.get("/logout")
+async def logout(
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> RedirectResponse:
+    """ログアウト処理。リフレッシュトークンを失効し両 Cookie を削除する。"""
+    refresh_cookie = request.cookies.get(settings.jwt_refresh_cookie_name)
+    if refresh_cookie:
+        payload = decode_refresh_token(refresh_cookie)
+        if payload:
+            result = await db.execute(
+                select(RefreshToken).where(RefreshToken.jti == payload["jti"])
+            )
+            rt = result.scalar_one_or_none()
+            if rt and not rt.revoked:
+                rt.revoked = True
+                await db.commit()
+
+    response = RedirectResponse(url="/login", status_code=303)
+    response.delete_cookie(key=settings.jwt_cookie_name)
+    response.delete_cookie(key=settings.jwt_refresh_cookie_name)
+    return response
+
+
+@router.post("/token/refresh")
+async def refresh_access_token(
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    csrf_protect: CsrfProtect = Depends(),
+) -> Response:
+    """リフレッシュトークンで新しいアクセストークンを発行する。
+
+    ローテーション式: 旧リフレッシュトークンを revoke し新トークンへ差し替える。
+    失効済み/期限切れ/不明な jti は 401。CSRF 保護あり。
+    """
+    await csrf_protect.validate_csrf(request)
+
+    token = request.cookies.get(settings.jwt_refresh_cookie_name)
+    payload = decode_refresh_token(token) if token else None
+    if not payload:
+        return JSONResponse({"success": False, "message": "リフレッシュトークンが無効です"}, 401)
+
+    rt_result = await db.execute(select(RefreshToken).where(RefreshToken.jti == payload["jti"]))
+    rt = rt_result.scalar_one_or_none()
+
+    if rt is not None and rt.revoked:
+        # 失効済み jti の再提示 = ローテ済みトークンの再利用（盗用の疑い）。
+        # 当該ユーザーの全リフレッシュトークンを失効させる（家系失効, RFC 6819）。
+        await db.execute(
+            update(RefreshToken)
+            .where(RefreshToken.user_id == rt.user_id, RefreshToken.revoked.is_(False))
+            .values(revoked=True)
+        )
+        await db.commit()
+        logger.warning(f"リフレッシュトークン再利用を検知: 家系失効 user_id={rt.user_id}")
+        return JSONResponse({"success": False, "message": "リフレッシュトークンが無効です"}, 401)
+
+    now = datetime.now(UTC)
+    expires_at = rt.expires_at if rt else None
+    if expires_at is not None and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    if rt is None or (expires_at is not None and expires_at <= now):
+        # DB に無い jti（改ざん）/ 期限切れ → 拒否
+        logger.warning("リフレッシュトークン拒否: jti 無効/期限切れ")
+        return JSONResponse({"success": False, "message": "リフレッシュトークンが無効です"}, 401)
+
+    user_result = await db.execute(
+        select(User)
+        .where(User.id == int(payload["sub"]), User.is_active.is_(True))
+        .options(selectinload(User.user_roles).selectinload(UserRole.role))
+    )
+    user = user_result.scalar_one_or_none()
+    if user is None:
+        return JSONResponse({"success": False, "message": "ユーザーが無効です"}, 401)
+    if user.default_active_role() is None and user.held_role_names_outside_entry():
+        # この入り口で使える役割が無い。役割なしのトークンを更新し続けない
+        return JSONResponse(
+            {"success": False, "message": "この入り口で使える役割がありません"}, 401
+        )
+
+    # ローテーション: 旧トークンを失効し、新アクセス＋新リフレッシュを発行
+    rt.revoked = True
+    access_token = create_access_token(
+        data={"sub": str(user.id), "act": user.default_active_role()}
+    )
+    refresh_token = await _issue_refresh_token(user.id, db)
+
+    response: Response = JSONResponse({"success": True})
+    _set_access_cookie(response, access_token)
+    _set_refresh_cookie(response, refresh_token)
+    logger.info(f"アクセストークン更新: user_id={user.id}")
+    return response

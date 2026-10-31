@@ -1,0 +1,171 @@
+/* Hallmark · tokens · genre: modern-minimal · tone: technical
+ * theme: custom (paper oklch(98.5% .004 250) · accent oklch(54% .17 256) cool · system-ui + JetBrains Mono)
+ * axes: light/dark · grotesk-neutral(system) · cool
+ *
+ * KAWASEMI デザインシステム — トークン正本
+ * - 全ての色・余白・型・角丸・影・モーションはこのファイルのトークンを参照する
+ * - app.css 以下は raw 値を書かず var(--…) のみを使う
+ * - ライト/ダークは :root と [data-theme="dark"] の2系統。
+ *   tint（背景濃度変種）と fg（tint 上のテキスト色）は両モードで定義し、
+ *   コンポーネント側はモード分岐を持たない（トークンが環境適応する）。
+ */
+
+:root {
+  /* ── Paper / surface ── */
+  --color-paper:      oklch(98.5% 0.004 250);  /* ページ地・寒色寄り */
+  --color-surface:    oklch(100%  0     0);    /* カード・パネル */
+  --color-surface-2:  oklch(97%   0.005 250);  /* 副次面・ゼブラ・トラック */
+
+  /* ── Ink（テキスト） ── */
+  --color-ink:        oklch(24% 0.02  262);    /* 本文・見出し */
+  --color-ink-2:      oklch(46% 0.018 262);    /* 副次テキスト */
+  --color-ink-3:      oklch(62% 0.014 262);    /* 弱め・無効・キャプション */
+
+  /* ── Lines ── */
+  --color-border:     oklch(91% 0.008 262);
+  --color-border-2:   oklch(83% 0.01  262);    /* 強めの境界 */
+
+  /* ── Primary（操作・コバルト） ── */
+  --color-primary:        oklch(54% 0.17 256);
+  --color-primary-strong: oklch(47% 0.18 256); /* hover / active */
+  --color-primary-tint:   oklch(96% 0.03 256); /* 背景 */
+  --color-primary-fg:     oklch(42% 0.15 256); /* tint 上のテキスト */
+
+  /* ── AI（生成・未確認ドラフト・バイオレット） ── */
+  --color-ai:        oklch(56% 0.17 296);
+  --color-ai-strong: oklch(49% 0.18 296);
+  --color-ai-tint:   oklch(96.5% 0.03 296);
+  --color-ai-fg:     oklch(46% 0.16 296);
+
+  /* ── Status: ok（確認済・グリーン） ── */
+  --color-ok:        oklch(56% 0.13 150);
+  --color-ok-strong: oklch(48% 0.13 150);
+  --color-ok-tint:   oklch(95.5% 0.04 150);
+  --color-ok-fg:     oklch(42% 0.12 150);
+
+  /* ── Status: warn（要再確認 stale・琥珀） ── */
+  --color-warn:        oklch(64% 0.13 70);
+  --color-warn-strong: oklch(56% 0.13 65);
+  --color-warn-tint:   oklch(95.5% 0.055 80);
+  --color-warn-fg:     oklch(45% 0.11 65);
+
+  /* ── Status: danger（reject・エラー・レッド） ── */
+  --color-danger:        oklch(56% 0.19 25);
+  --color-danger-strong: oklch(49% 0.20 25);
+  --color-danger-tint:   oklch(95.5% 0.04 25);
+  --color-danger-fg:     oklch(45% 0.16 25);
+
+  /* ── Neutral / muted（副次ボタン等） ── */
+  --color-muted:      oklch(70% 0.012 262);
+  --color-muted-tint: oklch(96% 0.004 262);
+  --color-muted-fg:   oklch(40% 0.012 262);
+
+  /* ── Lock（閲覧のみ・他ロール担当） ── */
+  --color-lock:      oklch(64% 0.008 262);
+  --color-lock-tint: oklch(96.5% 0.003 262);
+  --color-lock-fg:   oklch(50% 0.008 262);
+
+  /* ── On-accent（ソリッドなアクセント地の上のテキスト） ── */
+  --color-on-accent: oklch(100% 0 0);
+
+  /* ── Type ── */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Kaku Gothic ProN",
+               "Yu Gothic", "Noto Sans JP", Meiryo, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  --text-display: 1.75rem;   /* ブランド / 大見出し */
+  --text-h2:      1.35rem;   /* ページ見出し */
+  --text-h3:      1.05rem;   /* 小見出し */
+  --text-body:    0.95rem;
+  --text-sm:      0.85rem;
+  --text-xs:      0.78rem;
+  --lh-body:      1.7;       /* 和文可読性 */
+  --lh-heading:   1.45;
+
+  /* ── Space (4pt) ── */
+  --space-xs:  0.25rem;
+  --space-sm:  0.5rem;
+  --space-md:  1rem;
+  --space-lg:  1.5rem;
+  --space-xl:  2rem;
+  --space-2xl: 3rem;
+
+  /* ── Radius（technical: tight） ── */
+  --radius-sm: 3px;
+  --radius-md: 6px;
+
+  /* ── Elevation（境界線主導・控えめ） ── */
+  --shadow-1: 0 1px 2px oklch(24% 0.02 262 / .06);
+  --shadow-2: 0 4px 16px oklch(24% 0.02 262 / .10);
+  --shadow-3: 0 12px 36px oklch(24% 0.02 262 / .16);
+
+  /* ── Motion ── */
+  --ease-out:    cubic-bezier(.2, 0, 0, 1);
+  --ease-in:     cubic-bezier(.4, 0, 1, 1);
+  --ease-in-out: cubic-bezier(.4, 0, .2, 1);
+  --dur-fast: 120ms;
+  --dur:      160ms;
+
+  /* ── Layout ── */
+  --container-max: 1200px;
+}
+
+/* ============================================================
+ * Dark mode — 寒色チャコール地。アクセントは明度を上げ、
+ * tint は暗側へ反転、fg は明アクセントに。意味（色相）は不変。
+ * ============================================================ */
+[data-theme="dark"] {
+  --color-paper:      oklch(20%   0.012 262);
+  --color-surface:    oklch(24%   0.013 262);
+  --color-surface-2:  oklch(27.5% 0.013 262);
+
+  --color-ink:        oklch(93% 0.008 262);
+  --color-ink-2:      oklch(74% 0.011 262);
+  --color-ink-3:      oklch(58% 0.011 262);
+
+  --color-border:     oklch(33% 0.012 262);
+  --color-border-2:   oklch(45% 0.013 262);
+
+  --color-primary:        oklch(70% 0.15  256);
+  --color-primary-strong: oklch(79% 0.13  256);
+  --color-primary-tint:   oklch(31% 0.055 262);
+  --color-primary-fg:     oklch(82% 0.12  256);
+
+  --color-ai:        oklch(73% 0.15 296);
+  --color-ai-strong: oklch(81% 0.13 296);
+  --color-ai-tint:   oklch(31% 0.06 296);
+  --color-ai-fg:     oklch(83% 0.12 296);
+
+  --color-ok:        oklch(72% 0.14 150);
+  --color-ok-strong: oklch(80% 0.13 150);
+  --color-ok-tint:   oklch(30% 0.05 150);
+  --color-ok-fg:     oklch(84% 0.13 150);
+
+  --color-warn:        oklch(80% 0.13 78);
+  --color-warn-strong: oklch(86% 0.11 80);
+  --color-warn-tint:   oklch(32% 0.055 70);
+  --color-warn-fg:     oklch(86% 0.12 80);
+
+  --color-danger:        oklch(70% 0.17 25);
+  --color-danger-strong: oklch(78% 0.15 25);
+  --color-danger-tint:   oklch(32% 0.075 25);
+  --color-danger-fg:     oklch(82% 0.13 25);
+
+  --color-muted:      oklch(50% 0.012 262);
+  --color-muted-tint: oklch(29% 0.008 262);
+  --color-muted-fg:   oklch(78% 0.012 262);
+
+  --color-lock:      oklch(57% 0.008 262);
+  --color-lock-tint: oklch(28% 0.006 262);
+  --color-lock-fg:   oklch(70% 0.008 262);
+
+  --color-on-accent: oklch(17% 0.02 262);
+
+  --shadow-1: 0 1px 2px oklch(0% 0 0 / .45);
+  --shadow-2: 0 4px 16px oklch(0% 0 0 / .55);
+  --shadow-3: 0 12px 36px oklch(0% 0 0 / .65);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --dur-fast: 0.01ms; --dur: 0.01ms; }
+}

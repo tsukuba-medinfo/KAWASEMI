@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+
+{% block title %}ユーザー管理 - KAWASEMI{% endblock %}
+
+{% block content %}
+<div class="card">
+    <div class="page-head">
+        <h2>ユーザー管理</h2>
+        <div class="page-head__actions">
+            <a href="{{ base_path() }}/admin/users/new" class="btn btn--sm btn--primary">新規登録</a>
+        </div>
+    </div>
+
+    {% if users %}
+    <div class="table-wrap">
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>ユーザー名</th>
+                    <th>氏名</th>
+                    <th>メールアドレス</th>
+                    <th>ロール</th>
+                    <th>状態</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for user in users %}
+                <tr>
+                    <td>{{ user.id }}</td>
+                    <td>{{ user.username }}</td>
+                    <td>{{ user.full_name }}</td>
+                    <td>{{ user.email }}</td>
+                    <td>
+                        <div class="tag-list">
+                            {% for role_name in user.role_names %}
+                            <span class="badge badge--neutral">{{ role_name }}</span>
+                            {% endfor %}
+                        </div>
+                    </td>
+                    <td>
+                        {% if user.is_active %}
+                        <span class="badge badge--success">有効</span>
+                        {% else %}
+                        <span class="badge badge--danger">無効</span>
+                        {% endif %}
+                        {% if user.is_locked() %}
+                        <span class="badge badge--danger" title="連続ログイン失敗によりロック中">ロック中</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        <div class="row-actions">
+                            <a href="{{ base_path() }}/admin/users/{{ user.id }}/edit">編集</a>
+                            {% if user.is_locked() %}
+                            <form action="{{ base_path() }}/admin/users/{{ user.id }}/unlock" method="post" style="margin: 0;">
+                                <button type="submit" class="btn btn--sm btn--secondary">ロック解除</button>
+                            </form>
+                            {% endif %}
+                            {% if user.id != current_user.id %}
+                            <form action="{{ base_path() }}/admin/users/{{ user.id }}/delete" method="post" style="margin: 0;"
+                                  onsubmit="return confirm('本当に削除しますか？');">
+                                <button type="submit" class="btn btn--sm btn--danger">削除</button>
+                            </form>
+                            {% else %}
+                            <button class="btn btn--sm btn--danger" disabled title="自分自身は削除できません">削除</button>
+                            {% endif %}
+                        </div>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="empty-state">
+        <p>ユーザーが登録されていません。</p>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

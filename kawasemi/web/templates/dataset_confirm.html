@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+
+{% block title %}データセット作成 確認 - KAWASEMI{% endblock %}
+
+{% block content %}
+<div class="breadcrumb">
+    <a href="{{ base_path() }}/">ホーム</a> &gt;
+    <a href="{{ base_path() }}/datasets">データセット管理</a> &gt;
+    新規登録 &gt; 確認
+</div>
+
+<div class="card">
+    <div class="page-head">
+        <div>
+            <h2>この内容で作成しますか？</h2>
+            <div class="page-head__sub">
+                以下の組み合わせで入力対象を一括生成します。内容を確認してください。
+            </div>
+        </div>
+    </div>
+
+    <div class="info-box">
+        <strong>生成される入力対象数：</strong>
+        <span class="mono">{{ total_targets }}</span> 件
+        （{{ selected_questionnaires | length }} Questionnaire × {{ patient_ids | length }} Patient ID）
+    </div>
+
+    <div class="form-section">
+        <h3>データセット</h3>
+        <table class="meta-table">
+            <tr><th>名称</th><td>{{ name }}</td></tr>
+            <tr><th>説明</th><td>{{ description or "（なし）" }}</td></tr>
+        </table>
+    </div>
+
+    <div class="form-section">
+        <h3>対象 Questionnaire（{{ selected_questionnaires | length }}）</h3>
+        <div class="tag-list">
+            {% for q in selected_questionnaires %}
+            <span class="tag">{{ q.title or q.fhir_id }}</span>
+            {% endfor %}
+        </div>
+    </div>
+
+    <div class="form-section">
+        <h3>Patient ID（{{ patient_ids | length }}）</h3>
+        <div class="tag-list">
+            {% for pid in patient_sample %}
+            <span class="tag mono">{{ pid }}</span>
+            {% endfor %}
+            {% if patient_ids | length > patient_sample | length %}
+            <span class="help-text">…他 {{ patient_ids | length - patient_sample | length }} 件</span>
+            {% endif %}
+        </div>
+    </div>
+
+    <form method="post" action="{{ base_path() }}/datasets/new" class="form-actions" id="confirmForm">
+        <input type="hidden" name="name" value="{{ name }}">
+        <textarea name="description" hidden>{{ description }}</textarea>
+        {% for qid in questionnaire_ids %}
+        <input type="hidden" name="questionnaire_ids" value="{{ qid }}">
+        {% endfor %}
+        <textarea name="patient_ids_text" hidden>{{ patient_ids_text }}</textarea>
+        <button type="submit" class="btn btn--primary" id="createBtn">この内容で作成する</button>
+        <button type="button" class="btn btn--secondary" onclick="history.back()">修正する</button>
+    </form>
+</div>
+
+<script>
+  // 二重送信ガード（連打による多重作成を防ぐ）
+  (function () {
+    var form = document.getElementById('confirmForm');
+    var btn = document.getElementById('createBtn');
+    if (!form || !btn) return;
+    form.addEventListener('submit', function () {
+      btn.disabled = true;
+      btn.textContent = '作成中…';
+    });
+  })();
+</script>
+{% endblock %}

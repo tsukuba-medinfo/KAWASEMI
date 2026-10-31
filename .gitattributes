@@ -1,0 +1,16 @@
+# 改行コードをLFに統一する。
+# テキストファイルは自動判定し、リポジトリ格納・チェックアウトともに LF にする。
+* text=auto eol=lf
+
+# バイナリは変換しない（text=auto で自動検出されるが明示しておく）。
+*.db binary
+*.sqlite binary
+*.sqlite3 binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.pdf binary

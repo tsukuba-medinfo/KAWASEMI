@@ -1,0 +1,151 @@
+{% extends "base.html" %}
+
+{% block title %}取得困難度メトリクス - KAWASEMI{% endblock %}
+
+{% block content %}
+<div class="page-head">
+    <div>
+        <h2>取得困難度メトリクス</h2>
+        <div class="page-head__sub">
+            項目（linkId）ごとの自動充足率・失敗理由内訳・人手介入率を集計します（本番 autofill 実行が対象。件数・率のみで患者情報は含みません）。
+        </div>
+    </div>
+</div>
+
+<form method="get" action="{{ base_path() }}/ai-input/metrics/acquisition" class="form-inline">
+    <label>
+        Questionnaire
+        <select name="questionnaire_id">
+            <option value="">選択してください</option>
+            {% for q in questionnaires %}
+            <option value="{{ q.id }}" {% if questionnaire and questionnaire.id == q.id %}selected{% endif %}>
+                {{ q.title or 'タイトルなし' }} (ID: {{ q.id }})
+            </option>
+            {% endfor %}
+        </select>
+    </label>
+    <label>
+        期間（自）
+        <input type="date" name="date_from" value="{{ date_from }}">
+    </label>
+    <label>
+        期間（至）
+        <input type="date" name="date_to" value="{{ date_to }}">
+    </label>
+    <button type="submit" class="btn btn--primary btn--sm">集計</button>
+</form>
+
+{% if summary %}
+<div class="bucket">
+    <h3 class="section-title">
+        集計結果
+        <span class="badge badge--neutral">実行 {{ summary.total_executions }}件 / 回答突合 {{ summary.compared_responses }}件</span>
+        {# **母集団の縮みを常に併記する**。取得困難度は confirmed に至った
+           項目に限った条件付きの値で、所在の確からしさの段階分布（coverage）とは分母が違う。
+           「出ていないこと」が読み手に見えるよう、0件でも表示する。 #}
+        {% if summary.target_item_count > 0 %}
+        <span class="badge {% if summary.population_shrink > 0 %}badge--warning{% else %}badge--neutral{% endif %}"
+              title="取得困難度は confirmed に至った項目に限った条件付きの値です。プランを確定できなかった項目（所在不明・SQL を書けない等）は集計の母集団から落ちており、それらは本来もっとも取得困難な項目なので、この値は困難度を過小に見せます。所在の確からしさの段階分布の分母は対象項目の全件です">
+            母集団 {{ summary.confirmed_item_count }} / 対象 {{ summary.target_item_count }}項目
+            {% if summary.population_shrink > 0 %}（未確定 {{ summary.population_shrink }}項目は集計外）{% endif %}
+        </span>
+        {# **母集団のうち step が空のプラン**。手入力への縮退という正当な形だが、
+           「取得の設計ができた項目」と読むと母集団を実態より広く見せる。内数として出す。 #}
+        {% if summary.confirmed_empty_program_count > 0 %}
+        <span class="badge badge--warning"
+              title="step が1つも無いプランです（手入力への縮退、または取得手順を作れなかった）。実行すると必ず needs_input になり、自動で取れた項目には数えられませんが、母集団には入っています">
+            うち step が空 {{ summary.confirmed_empty_program_count }}項目
+        </span>
+        {% endif %}
+        {% endif %}
+        {% if summary.failed_without_evidence > 0 %}
+        <span class="badge badge--danger" title="resolver 不通など実行前提の障害。項目別統計には含まれません">
+            実行全体の失敗（項目記録なし） {{ summary.failed_without_evidence }}件
+        </span>
+        {% endif %}
+        <a class="btn btn--secondary btn--sm"
+           href="{{ base_path() }}/ai-input/metrics/acquisition.csv?questionnaire_id={{ questionnaire.id }}{% if date_from %}&date_from={{ date_from }}{% endif %}{% if date_to %}&date_to={{ date_to }}{% endif %}">
+            CSVエクスポート
+        </a>
+    </h3>
+
+    {% if summary.items %}
+    <div class="table-wrap">
+    <table class="table">
+        <thead>
+            <tr>
+                <th>linkId / 項目</th>
+                <th>実行</th>
+                {# 自動充足率の分母（実行から「該当なし」を除いた数）。
+                   率だけを出すと、分母が何だったかを読み手が復元できない #}
+                <th>分母</th>
+                <th>充足</th>
+                <th>自動充足率</th>
+                <th>失敗理由内訳</th>
+                <th>人手介入率</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for m in summary.items %}
+            <tr>
+                <td>
+                    <code>{{ m.link_id }}</code>
+                    {% if m.item_text %}<div class="help-text">{{ m.item_text }}</div>{% endif %}
+                </td>
+                <td>{{ m.executions }}</td>
+                <td>
+                    {{ m.denominator }}
+                    {% if m.not_applicable > 0 %}
+                    <span class="badge badge--neutral" title="患者の文脈上そもそも該当しない項目。取得の失敗ではないので分母から除いています">
+                        該当なし {{ m.not_applicable }}件を除外
+                    </span>
+                    {% endif %}
+                </td>
+                <td>{{ m.filled }}</td>
+                <td>
+                    {% if m.fill_rate is not none %}
+                        {% set pct = (m.fill_rate * 100) | round(1) %}
+                        {% if m.fill_rate >= 0.8 %}
+                        <span class="badge badge--success">{{ pct }}%</span>
+                        {% elif m.fill_rate >= 0.5 %}
+                        <span class="badge badge--warning">{{ pct }}%</span>
+                        {% else %}
+                        <span class="badge badge--danger">{{ pct }}%</span>
+                        {% endif %}
+                    {% else %}
+                    {# 分母 0（該当しない実行しかない）。0% と混同させない #}
+                    <span class="badge badge--neutral" title="分母が 0 のため算出しません（該当しない実行しかない項目。0% とは異なります）">—</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% for code in failure_codes %}
+                        {% set n = m.failure_counts.get(code, 0) %}
+                        {% if n > 0 %}
+                        <span class="badge badge--neutral" title="{{ code }}">{{ failure_labels[code] }} {{ n }}</span>
+                        {% endif %}
+                    {% endfor %}
+                </td>
+                <td>
+                    {% if m.intervention_rate is not none %}
+                        {{ (m.intervention_rate * 100) | round(1) }}%
+                        <span class="databar__text">（入力 {{ m.manual_entered }} / 修正 {{ m.manual_corrected }}）</span>
+                    {% else %}
+                    <span class="badge badge--neutral">回答なし</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    </div>
+    {% else %}
+    <p class="help-text">指定条件に該当する実行記録（evidence）がありません。本番実行（収集者による autofill）後に集計できます。</p>
+    {% endif %}
+</div>
+
+<p class="help-text">
+    失敗理由コードのうち「所在同定の誤り（schema_mismatch）」は想定した表・カラム・ファイルが実在しないことを、
+    「当該患者データなし（not_found_for_patient）」は所在は正しいが患者のデータが無いことを示します。
+</p>
+{% endif %}
+{% endblock %}

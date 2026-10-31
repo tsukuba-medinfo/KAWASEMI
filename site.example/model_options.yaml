@@ -1,0 +1,12 @@
+# モデルごとの options の例外（kawasemi/ai_input/model_options.py）の雛形。値は架空のもの。
+#
+# models: 推論サーバに渡すモデル名（完全一致）→ そのモデルの要求にだけ足す options。
+#         呼び出し側が渡した options（temperature / num_ctx / seed など）は上書きしない。
+#
+# 長い入力を既定のバッチ幅で処理させると推論サーバが落ちるモデルに、num_batch を
+# 下げて渡す、といった実装上の都合だけを書く。
+#
+# このファイルが無ければ、どのモデルにも何も足さない。
+models:
+  "example-model:7b":
+    num_batch: 512

@@ -1,0 +1,199 @@
+{% extends "base.html" %}
+{% block title %}設計キャンバス - {{ questionnaire.title }} - KAWASEMI{% endblock %}
+
+{% block content %}
+{% set CHIP = {
+  'empty':     ['cv-chip--empty', '未設定'],
+  'draft':     ['cv-chip--draft', 'ドラフト'],
+  'confirmed': ['cv-chip--ok', '確認済'],
+  'stale':     ['cv-chip--stale', '要再確認'],
+  'wait':      ['cv-chip--wait', '上流待ち']
+} %}
+
+<nav class="breadcrumb" aria-label="パンくず">
+  <a href="{{ base_path() }}/">ホーム</a> /
+  <a href="{{ base_path() }}/ai-input/dashboard">データ自動収集</a> /
+  設計キャンバス
+</nav>
+
+<div class="card">
+  <div class="page-head">
+    <div>
+      <h2>データ自動収集 設計キャンバス</h2>
+      <div class="page-head__sub">
+        {{ questionnaire.title }}
+        ・ <span class="mono">Q-{{ questionnaire.id }}</span>
+        ・ {{ rows | length }} 項目
+        ・ アクティブ役割: <strong>{{ role_display_name(current_user.active_role) }}</strong>
+      </div>
+    </div>
+    <div class="cv-progress" role="group" aria-label="全体進捗">
+      <div>
+        <div class="num">{{ confirmed_cells }}<small>/{{ total_cells }}</small></div>
+        <div class="lbl">確認済セル</div>
+      </div>
+      <div class="bar" aria-hidden="true">
+        <i style="width: {% if total_cells %}{{ (confirmed_cells / total_cells * 100) | round | int }}{% else %}0{% endif %}%"></i>
+      </div>
+    </div>
+  </div>
+
+  <div class="cv-legend" aria-label="凡例">
+    <div class="grp">
+      <span>状態</span>
+      <span class="cv-chip cv-chip--ok">確認済</span>
+      <span class="cv-chip cv-chip--draft">ドラフト</span>
+      <span class="cv-chip cv-chip--stale">要再確認</span>
+      <span class="cv-chip cv-chip--empty">未設定</span>
+      <span class="cv-chip cv-chip--wait">上流待ち</span>
+    </div>
+    <div class="grp">
+      <span>権限</span>
+      <span class="cv-owner cv-owner--mine">あなたが編集</span>
+      <span class="cv-owner cv-owner--switch">ロール切替で編集</span>
+      <span class="cv-owner cv-owner--other">他ロール担当（閲覧のみ）</span>
+    </div>
+  </div>
+
+  {% if rows %}
+  <div class="cv-matrix-scroll">
+    <table class="cv-matrix">
+      <thead>
+        <tr>
+          <th class="cv-field"><div class="cv-colhead">項目</div></th>
+          {% for stage in stages %}
+          <th>
+            <div class="cv-colhead">{{ stage.label }}
+              <span class="cv-owner cv-owner--{{ 'mine' if stage.capability == 'edit' else ('switch' if stage.capability == 'switch' else 'other') }}">
+                {% if stage.capability == 'edit' %}あなた（{{ stage.owner }}）{% elif stage.capability == 'switch' %}{{ stage.owner }}（切替で編集）{% else %}{{ stage.owner }}{% endif %}
+              </span>
+            </div>
+          </th>
+          {% endfor %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr>
+          <td class="cv-field">
+            <button type="button" class="cv-row-toggle" aria-expanded="false"
+                    aria-controls="detail-{{ loop.index }}"
+                    title="クリックで全ステージの詳細を開く">
+              <span class="cv-twisty" aria-hidden="true">▸</span>
+              <span>
+                <span class="id">{{ row.link_id }}</span><br>
+                <span class="name">{{ row.text }}</span>
+              </span>
+            </button>
+          </td>
+          {% for stage in stages %}
+          {% set state = row.cells[stage.key] %}
+          {% set chip = CHIP[state] %}
+          <td class="cv-cell">
+            {% if state == 'wait' %}
+              <span class="cv-cap-wait">
+                <span class="cv-chip {{ chip[0] }}" title="上流ステージの解決待ち">{{ chip[1] }}</span>
+              </span>
+            {% elif stage.capability == 'edit' %}
+              <a class="cv-cell-btn"
+                 href="{{ base_path() }}/ai-input/questionnaires/{{ questionnaire.id }}/{{ stage.path }}#item={{ row.link_id | urlencode }}"
+                 title="{{ stage.label }}を編集（あなた: {{ role_display_name(current_user.active_role) }}）">
+                <span class="cv-chip {{ chip[0] }}">{{ chip[1] }}</span>
+                <span class="cv-pencil" aria-hidden="true">✎</span>
+              </a>
+            {% elif stage.capability == 'switch' %}
+              <span class="cv-cap-ro"
+                    title="{{ stage.owner }}の担当です。ヘッダで役割を切り替えると編集できます。">
+                <span class="cv-chip {{ chip[0] }}">{{ chip[1] }}</span>
+                <span class="cv-lock" aria-hidden="true">⇄</span>
+              </span>
+            {% else %}
+              <span class="cv-cap-ro"
+                    title="この段階は{{ stage.owner }}が設定します（あなた: {{ role_display_name(current_user.active_role) }}）。閲覧のみです。">
+                <span class="cv-chip {{ chip[0] }}">{{ chip[1] }}</span>
+                <span class="cv-lock" aria-hidden="true">🔒</span>
+              </span>
+            {% endif %}
+          </td>
+          {% endfor %}
+        </tr>
+        <tr class="cv-detail-row" id="detail-{{ loop.index }}" hidden>
+          <td colspan="{{ stages | length + 1 }}">
+            <div class="cv-detail">
+              <div class="cv-detail__head">
+                <span class="id">{{ row.link_id }}</span>
+                <h3>{{ row.text }}</h3>
+              </div>
+              {% for stage in stages %}
+              {% set state = row.cells[stage.key] %}
+              {% set content = row.content[stage.key] %}
+              <div class="cv-stage">
+                <div class="cv-stage__meta">
+                  <div class="name">{{ stage.label }}</div>
+                  <span class="cv-cap cv-cap--{{ 'edit' if stage.capability == 'edit' else ('switch' if stage.capability == 'switch' else 'ro') }}"></span>
+                  <span class="who">担当: {{ stage.owner }}</span>
+                </div>
+                <div class="cv-stage__body">
+                  {% if state == 'wait' %}
+                    <div class="cv-ronote"><span aria-hidden="true">…</span><span>上流ステージが未解決のため、まだ着手できません。</span></div>
+                  {% elif state == 'stale' %}
+                    <div class="cv-reason"><span aria-hidden="true">⚠</span><span>上流の更新により古くなっています。再生成または内容確認のうえ確定してください。</span></div>
+                  {% elif stage.capability == 'readonly' %}
+                    <div class="cv-ronote"><span aria-hidden="true">🔒</span><span>この段階は{{ stage.owner }}が設定します（あなた: {{ role_display_name(current_user.active_role) }}）。閲覧のみです。</span></div>
+                  {% elif stage.capability == 'switch' %}
+                    <div class="cv-ronote"><span aria-hidden="true">⇄</span><span>{{ stage.owner }}の担当です。ヘッダで役割を切り替えると編集できます。</span></div>
+                  {% endif %}
+                  <p>
+                    <span class="cv-chip {{ CHIP[state][0] }}">{{ CHIP[state][1] }}</span>
+                    {% if content %}<span class="mono cv-content">{{ content }}</span>{% endif %}
+                  </p>
+                  {% if stage.capability == 'edit' and state != 'wait' %}
+                  <div class="cv-actions">
+                    <a class="btn btn--primary btn--sm"
+                       href="{{ base_path() }}/ai-input/questionnaires/{{ questionnaire.id }}/{{ stage.path }}#item={{ row.link_id | urlencode }}">
+                      {{ stage.label }}を編集
+                    </a>
+                  </div>
+                  {% endif %}
+                </div>
+              </div>
+              {% endfor %}
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <p class="help-text">
+    編集可（✎）のセルはクリックで該当ステージのエディタへ移動し、押した項目が開きます。
+    閲覧のみ（🔒）は他ロールの担当で、状態は見えますが編集できません（理由はホバーで表示）。
+    「上流待ち」は前段が未解決のため、まだ着手できないことを示します。
+  </p>
+  {% else %}
+  <div class="empty-state">
+    <p>この調査票には設計対象の項目がありません。</p>
+  </div>
+  {% endif %}
+</div>
+
+<script>
+  // 行クリックで集中パネル（全ステージの詳細）を開閉する
+  (function () {
+    document.querySelectorAll('.cv-row-toggle').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var detail = document.getElementById(btn.getAttribute('aria-controls'));
+        if (!detail) return;
+        if (detail.hasAttribute('hidden')) {
+          detail.removeAttribute('hidden');
+          btn.setAttribute('aria-expanded', 'true');
+        } else {
+          detail.setAttribute('hidden', '');
+          btn.setAttribute('aria-expanded', 'false');
+        }
+      });
+    });
+  })();
+</script>
+{% endblock %}

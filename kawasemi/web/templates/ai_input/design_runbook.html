@@ -1,0 +1,307 @@
+{% extends "base.html" %}
+
+{% block title %}データ取得手順書 - {{ questionnaire.title or questionnaire.fhir_id }} - KAWASEMI{% endblock %}
+
+{% block content %}
+<div class="card">
+  {% include "ai_input/_stepper.html" %}
+  <h2>ステップ2: 取得手順書の作成 — {{ questionnaire.title or questionnaire.fhir_id }}</h2>
+  <p class="hint">各項目について「どのデータをどこからどう取得するか」を順序付きステップの手順書にします。AIで一括下書き生成し、1項目ずつ確認・編集してください。確認済みの手順書は、ステップ3で取得プランへ変換されます。</p>
+
+  <div class="toolbar">
+    {% if enable_ai_drafting %}
+    <input type="text" id="model-input" class="model-input" placeholder="モデル名（任意）" value="">
+    <button type="button" class="btn btn--ai" id="gen-btn" onclick="generateAll()">未生成・未確認を一括生成</button>
+    {% endif %}
+    <a class="btn btn--secondary" href="{{ base_path() }}/ai-input/questionnaires/{{ questionnaire.id }}/source-survey">← ステップ1: データソース調査</a>
+    <span id="status"></span>
+  </div>
+
+  <div id="empty-state" style="display:none;">
+    <div class="alert alert-error">手順書の対象となる項目がありません。先に
+      <a href="{{ base_path() }}/ai-input/questionnaires/{{ questionnaire.id }}/source-survey">ステップ1: データソース調査</a>
+      を入力してください。
+    </div>
+  </div>
+
+  <div id="wizard" style="display:none;">
+    <div class="progress-wrap">
+      <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+      <div class="progress-text" id="progress-text"></div>
+      <div class="item-dots" id="item-dots"></div>
+    </div>
+
+    <div class="item-card" id="item-card"></div>
+
+    <div class="footer-nav">
+      <button type="button" class="btn btn--secondary" id="prev-btn" onclick="go(-1)">← 前へ</button>
+      {% if enable_ai_drafting %}
+      <button type="button" class="btn btn--secondary" id="regen-btn" onclick="regenerate()">この項目だけ再生成</button>
+      {% endif %}
+      <button type="button" class="btn btn--secondary" id="save-btn" onclick="saveCurrent(false)">保存（確認しない）</button>
+      <div class="spacer"></div>
+      <button type="button" class="btn btn--primary" id="confirm-btn" onclick="confirmNext()">確認して次へ →</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const QID = {{ questionnaire.id }};
+const CSRF = document.querySelector('meta[name="csrf-token"]')?.content || '';
+const DEFAULT_MODEL = {{ default_ollama_model | tojson }};
+let ITEMS = {{ items | tojson }};
+let cur = 0;
+
+// 語彙の正本は kawasemi/ai_input/schemas.py の RUNBOOK_ACTION_TYPES。
+// 値の集合が一致していることをテストで固定している（tests/ai_input/test_runbook_branch.py）。
+const ACTION_TYPES = [
+  ["", "（種別なし）"], ["fetch", "取得"], ["select", "選択・絞り込み"],
+  ["transform", "変換"], ["llm", "LLM抽出"], ["manual", "手動確認"],
+  ["condition", "条件の判定"], ["branch", "分岐（取得元・値の選択）"],
+];
+
+function esc(s) { const d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
+function setStatus(msg, ok) { const el = document.getElementById('status'); el.textContent = msg; el.className = ok ? 'ok' : 'err'; }
+
+function renderShell() {
+  const hasItems = ITEMS.length > 0;
+  document.getElementById('empty-state').style.display = hasItems ? 'none' : 'block';
+  document.getElementById('wizard').style.display = hasItems ? 'block' : 'none';
+  const genBtn = document.getElementById('gen-btn');
+  if (genBtn) genBtn.disabled = !hasItems;
+  if (hasItems) { renderProgress(); renderItem(); }
+}
+
+function renderProgress() {
+  const total = ITEMS.length;
+  const confirmed = ITEMS.filter(i => i.status === 'confirmed').length;
+  document.getElementById('progress-fill').style.width = total ? (confirmed / total * 100) + '%' : '0%';
+  document.getElementById('progress-text').textContent = `確認済み ${confirmed} / ${total} 項目`;
+  const dots = ITEMS.map((it, idx) => {
+    let cls = 'dot';
+    if (it.status === 'confirmed') cls += ' confirmed';
+    else if (it.has_runbook) cls += ' draft';
+    else cls += ' empty';
+    if (it.stale) cls += ' stale';
+    if (idx === cur) cls += ' current';
+    return `<div class="${cls}" title="${esc(it.item_text || it.link_id)}" onclick="jump(${idx})">${idx + 1}</div>`;
+  }).join('');
+  document.getElementById('item-dots').innerHTML = dots;
+}
+
+function actionSelect(val) {
+  const opts = ACTION_TYPES.map(([v, l]) =>
+    `<option value="${v}" ${v === (val || '') ? 'selected' : ''}>${l}</option>`).join('');
+  return `<select class="action-select">${opts}</select>`;
+}
+
+function renderItem() {
+  const it = ITEMS[cur];
+  const statusPill = it.status === 'confirmed'
+    ? '<span class="status-pill st-confirmed">確認済み</span>'
+    : '<span class="status-pill st-draft">未確認</span>';
+  const stale = it.stale ? '<span class="stale-badge">⚠ 設計が更新されました・再生成推奨</span>' : '';
+  const stepsHtml = (it.steps && it.steps.length)
+    ? it.steps.map((s, i) => stepHtml(s, i)).join('')
+    : '<p class="empty">手順がありません。「一括生成」または「この項目だけ再生成」で下書きを作成してください。</p>';
+
+  document.getElementById('item-card').innerHTML = `
+    <div class="item-head">
+      <span class="link-id-badge">${esc(it.link_id)}</span>
+      <span class="item-text">${esc(it.item_text || '（テキストなし）')}</span>
+      <span class="source-badge">${esc(it.source_label || it.source_category)}</span>
+      ${statusPill} ${stale}
+    </div>
+    <div class="context-row">
+      <div class="context-box">
+        <h4>臨床的コンテキスト（施設非依存）</h4>
+        <div class="body ${it.annotation ? '' : 'empty'}">${it.annotation ? esc(it.annotation) : '未入力'}</div>
+      </div>
+      <div class="context-box">
+        <h4>データ所在（施設固有）</h4>
+        <div class="body ${it.location ? '' : 'empty'}">${it.location ? esc(it.location) : '未入力'}</div>
+      </div>
+    </div>
+    <div class="steps-head">
+      <h3>手順ステップ</h3>
+      <button type="button" class="btn btn--secondary btn--sm" onclick="addStep()">+ ステップ追加</button>
+    </div>
+    <div id="steps">${stepsHtml}</div>
+  `;
+  document.getElementById('prev-btn').disabled = (cur === 0);
+  document.getElementById('confirm-btn').textContent = (cur === ITEMS.length - 1) ? '確認して完了' : '確認して次へ →';
+  // **説明は全文が見えていないと確認にならない。** 高さを中身に合わせる（以前は2行固定で
+  // スクロールしないと読めなかった）。編集中も追従させる。
+  autoGrowAll();
+}
+
+function autoGrow(el) {
+  el.style.height = 'auto';
+  el.style.height = el.scrollHeight + 'px';
+}
+
+function autoGrowAll() {
+  document.querySelectorAll('#steps .step-desc').forEach(el => {
+    autoGrow(el);
+    el.addEventListener('input', () => autoGrow(el));
+  });
+}
+
+function stepHtml(s, i) {
+  return `
+    <div class="step" data-idx="${i}">
+      <div class="step-top">
+        <span class="step-order">${i + 1}</span>
+        <input class="step-title" placeholder="ステップ見出し" value="${esc(s.title)}">
+        ${actionSelect(s.action_type)}
+        <span class="step-tools">
+          <button type="button" class="icon-btn" title="上へ" onclick="moveStep(${i},-1)">↑</button>
+          <button type="button" class="icon-btn" title="下へ" onclick="moveStep(${i},1)">↓</button>
+          <button type="button" class="icon-btn" title="削除" onclick="delStep(${i})">✕</button>
+        </span>
+      </div>
+      <label class="fld">手順の説明</label>
+      <textarea class="step-desc" placeholder="担当者が実行する具体的な手順">${esc(s.description)}</textarea>
+      <label class="fld">参照データ源・クエリ例（任意）</label>
+      <input class="step-hint" placeholder="例: lab_result テーブルの blast_pct カラム" value="${esc(s.data_hint || '')}">
+    </div>`;
+}
+
+// --- 編集状態の DOM → メモリ反映 ---
+function collectSteps() {
+  const steps = [];
+  document.querySelectorAll('#steps .step').forEach((el, i) => {
+    steps.push({
+      order: i + 1,
+      title: el.querySelector('.step-title').value.trim(),
+      description: el.querySelector('.step-desc').value.trim(),
+      action_type: el.querySelector('.action-select').value || null,
+      data_hint: el.querySelector('.step-hint').value.trim() || null,
+    });
+  });
+  return steps;
+}
+function syncStepsToMemory() { ITEMS[cur].steps = collectSteps(); }
+
+function addStep() {
+  syncStepsToMemory();
+  ITEMS[cur].steps.push({ order: ITEMS[cur].steps.length + 1, title: '', description: '', action_type: null, data_hint: null });
+  renderItem();
+}
+function delStep(i) { syncStepsToMemory(); ITEMS[cur].steps.splice(i, 1); renderItem(); }
+function moveStep(i, dir) {
+  syncStepsToMemory();
+  const j = i + dir; const steps = ITEMS[cur].steps;
+  if (j < 0 || j >= steps.length) return;
+  [steps[i], steps[j]] = [steps[j], steps[i]];
+  renderItem();
+}
+
+// --- ナビゲーション ---
+function jump(idx) { syncStepsToMemory(); cur = idx; renderProgress(); renderItem(); }
+function go(dir) { const n = cur + dir; if (n < 0 || n >= ITEMS.length) return; jump(n); }
+
+// --- サーバ通信 ---
+async function post(url, body) {
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
+    body: JSON.stringify(body || {}),
+  });
+  return resp.json();
+}
+
+async function saveCurrent(confirm) {
+  syncStepsToMemory();
+  const it = ITEMS[cur];
+  setStatus('保存中...', true);
+  try {
+    const data = await post(`{{ base_path() }}/ai-input/questionnaires/${QID}/runbook/${encodeURIComponent(it.link_id)}?confirm=${confirm}`, { steps: it.steps });
+    if (data.success) {
+      it.status = data.status; it.has_runbook = true; it.stale = false;
+      setStatus(confirm ? '✓ 確認しました' : '✓ 保存しました', true);
+      renderProgress();
+      return true;
+    }
+    setStatus(`エラー: ${data.message || '保存に失敗しました'}`, false);
+  } catch (e) { setStatus(`通信エラー: ${e}`, false); }
+  return false;
+}
+
+async function confirmNext() {
+  const ok = await saveCurrent(true);
+  if (ok && cur < ITEMS.length - 1) go(1);
+  else renderItem();
+}
+
+async function regenerate() {
+  const model = document.getElementById('model-input').value.trim() || DEFAULT_MODEL;
+  const it = ITEMS[cur];
+  setStatus(`「${it.item_text || it.link_id}」を再生成中...`, true);
+  const regenBtn = document.getElementById('regen-btn');
+  if (regenBtn) regenBtn.disabled = true;
+  try {
+    const data = await post(`{{ base_path() }}/ai-input/questionnaires/${QID}/runbook/${encodeURIComponent(it.link_id)}/regenerate`, { model });
+    if (data.success) {
+      it.steps = data.steps; it.status = data.status; it.has_runbook = true; it.stale = false;
+      setStatus('✓ 再生成しました', true);
+      renderProgress(); renderItem();
+    } else { setStatus(`エラー: ${data.message || '再生成に失敗しました'}`, false); }
+  } catch (e) { setStatus(`通信エラー: ${e}`, false); }
+  if (regenBtn) regenBtn.disabled = false;
+}
+
+async function generateAll() {
+  const model = document.getElementById('model-input').value.trim() || DEFAULT_MODEL;
+  setStatus('一括生成中...（項目数によっては時間がかかります）', true);
+  document.getElementById('gen-btn').disabled = true;
+  try {
+    const data = await post(`{{ base_path() }}/ai-input/questionnaires/${QID}/runbook/generate`, { model });
+    if (data.success) {
+      // **未試行があるときは緑にせず、再読込を待たせる**。この経路は従来 500 で
+      // 失敗として見えていたので、部分結果を 200 で返すようにした結果**「緑の成功」に化ける**
+      // 退行を作りうる（臨床側で先に指摘された型）。10分待って0件でも
+      // 「✓ 0 件を生成しました」と出ていた。
+      const pending = data.unattempted || 0;
+      // **対象に入らなかった項目を出す**。「N 件を生成しました」は対象の中の
+      // 件数で、表の行数ではない。確認済みの手順書は上書きしないので、表にはその行が残る。
+      const skippedConfirmed = (data.skipped_confirmed || []).length;
+      const skippedNotDesigned = (data.skipped_not_designed || []).length;
+      const skippedNote = (skippedConfirmed ? ` ${skippedConfirmed} 件は確認済みのため作り直していません。` : '')
+        + (skippedNotDesigned ? ` ${skippedNotDesigned} 件は未設計のため対象外です。` : '');
+      if (pending) {
+        setStatus(`⚠ ${data.generated} 件を生成しました / ${pending} 件は手順書が返りませんでした（未試行。もう一度実行してください）${skippedNote}`, false);
+        setTimeout(() => location.reload(), 4000);
+      } else {
+        setStatus(`✓ ${data.generated} 件を生成しました。${skippedNote} 再読込します...`, true);
+        setTimeout(() => location.reload(), skippedNote ? 4000 : 800);
+      }
+    } else {
+      setStatus(`${data.message || '生成に失敗しました'}`, false);
+      document.getElementById('gen-btn').disabled = false;
+    }
+  } catch (e) { setStatus(`通信エラー: ${e}`, false); document.getElementById('gen-btn').disabled = false; }
+}
+
+
+// キャンバスから `#item=<linkId>` で飛んできたら、その項目から始める。
+// 無ければ従来どおり先頭（①）。
+function indexFromHash() {
+  const m = /^#item=(.+)$/.exec(location.hash || '');
+  if (!m) return 0;
+  let linkId;
+  try { linkId = decodeURIComponent(m[1]); } catch (e) { return 0; }
+  const idx = ITEMS.findIndex(it => it.link_id === linkId);
+  if (idx < 0) {
+    // この画面の対象（上流が確定した項目）に無い。黙って①に戻さず、そう言う
+    setStatus(`項目「${linkId}」はこの画面の対象ではありません（上流が未確定か、該当データなしで決着した項目）。先頭の項目を表示しています`, false);
+    return 0;
+  }
+  return idx;
+}
+cur = indexFromHash();
+renderShell();
+</script>
+{% endblock %}

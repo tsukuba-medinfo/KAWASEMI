@@ -1,0 +1,142 @@
+[project]
+name = "kawasemi"
+version = "0.1.0"
+description = "JASPEHR Questionnaire/QuestionnaireResponse テンプレート入力システム"
+authors = [
+    {name = "KAWASEMI Contributors"}
+]
+readme = "README.md"
+# CI（.github/workflows/ci.yml）が検証するのは 3.12 単一。サポート表明と検証対象を
+# 一致させるため 3.12 を下限とする（版を1つ増やすと CI 時間が倍になる）。
+#
+# Python の版は `unicodedata.unidata_version` を通じて挙動に効く。3.12 系は `15.0.0`、
+# 3.11 は `14.0.0` を返し、この値は `file_export.has_forbidden_unit_id_chars` の `Cn`
+# （未割り当て）判定に効くので、3.11 では **4,482 符号位置が新たに拒否される側へ移り**、
+# 索引単位の配布可否が版によって変わる。
+# `.python-version` で uv のインタプリタ選択も固定する。
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.6.0",
+    "fhir.resources>=7.1.0",
+    "jinja2>=3.1.4",
+    "sqlalchemy[asyncio]>=2.0.35",
+    "asyncpg>=0.30.0",
+    "alembic>=1.13.3",
+    "python-multipart>=0.0.12",
+    "httpx>=0.27.2",
+    "aiosqlite>=0.21.0",
+    # 認証関連
+    "python-jose[cryptography]>=3.3.0",
+    # `core/auth.py` は bcrypt を直接呼ぶ。passlib の import は1箇所も無かったので
+    # 宣言を実態へ合わせた。
+    "bcrypt>=4.0",
+    # セキュリティ関連
+    "slowapi>=0.1.9",
+    "fastapi-csrf-protect>=0.3.4",
+    # AI (Ollama)
+    "ollama>=0.4.0",
+    # リソース索引のベクトル検索（embeddings.npy のロードと cosine 検索）
+    "numpy>=1.24",
+    # リソース索引 file kind の PDF テキスト抽出（reference 文書のチャンク化）
+    "pypdf>=4.0",
+    # 手書き/スキャンPDF（テキスト層なし）の Vision 読取: ページのラスタライズ
+    # （pypdfium2=Apache/BSD・self-contained wheel）と画像生成・エンコード（Pillow）
+    "pypdfium2>=4.30",
+    "pillow>=10.0",
+    # 接続レジストリ connections.yaml の読み込み
+    "pyyaml>=6.0",
+    # 注: Excel(.xlsx) 定義書の読み取り（openpyxl）は indexer（`indexer/`）の担当。本番 WebUI は
+    # 索引成果物を読むだけで取り込みを行わないため openpyxl は不要（indexer の依存）。
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.3",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
+    "ruff>=0.7.4",
+    # commit / push 時のフック実行基盤（make hooks が `uv run pre-commit install` を呼ぶ）
+    "pre-commit>=4.0.0",
+    # 注: mypy と types-* は下の [dependency-groups].dev が単一の宣言箇所である。
+    # 両方に書くと下限が食い違い、どちらが効くかが呼び出し方に依存する状態になる。
+]
+
+[project.scripts]
+kawasemi = "kawasemi.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
+# requires-python の下限（3.12）と揃える。
+target-version = "py312"
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+ignore = [
+    "E501",
+    "N818",  # Exceptionサフィックスはプロジェクト規約により許容
+]
+
+[tool.mypy]
+# requires-python の下限（3.12）と揃える。
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+
+# kawasemi-indexer（`indexer/`。dev グループの依存）は py.typed マーカーを持たないため、strict 下では
+# import-untyped エラーになる（`kawasemi/ai_input/e2e/index.py` の遅延 import）。型スタブの無いサードパーティとして
+# missing imports を無視する。本番 WebUI はこの依存を持たない。
+[[tool.mypy.overrides]]
+module = "kawasemi_indexer.*"
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests", "indexer/tests"]
+# **同じファイルのテストを同じ worker へ寄せる**。既定の `--dist load` は
+# テスト単位で配るので、module スコープ fixture（`tests/e2e/test_pipeline_e2e.py` の
+# `pipeline` など）が worker ごとに動き、同じ工程が worker の数だけ重複して走る。
+# `-n` を付けないとき（CI と素の `pytest`）は xdist が働かないので、この指定は効かない。
+# DB ファイル自体は `tmp_path_factory` 配下に作るので、**別プロセスとの競合はそちらが**
+# **消す**（`loadfile` は1回の実行の中の割り当てしか変えられない）。
+#
+# `live` は実機（bge-m3 と LLM サーバ）を使う E2E 実機層。既定では外し、
+# `make e2e-live`（`-m live`）でだけ回す。`-m` は後に書いた方が効くので、コマンド行の
+# `-m live` がこの既定を上書きする。
+addopts = "--dist loadfile -m 'not live'"
+markers = [
+    "live: 実機（bge-m3 / LLM サーバ）を使う E2E 実機層。既定で外す（make e2e-live で回す）",
+]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+
+[dependency-groups]
+# このグループは既定グループなので `uv sync --extra dev` でも入る。したがって
+# ここに書いた下限が実際に効く側である（mypy / types-* を optional-dependencies にも
+# 書くと下限が食い違うので、ここだけに置く）。
+dev = [
+    # テストの並列実行。`make test` が `-n` を渡す。**素の `pytest` は直列**
+    # のままにしてある（1件だけ回すときに worker 起動のオーバーヘッドを払わないため、
+    # また失敗の出力が worker で混ざらないようにするため）。
+    "pytest-xdist>=3.6",
+    "mypy>=1.18.2",
+    "types-python-jose>=3.5.0.20260408",
+    "types-PyYAML>=6.0.12",
+    # 索引ビルドは indexer（`indexer/`。uv workspace のメンバー）の担当。E2E の索引生成と
+    # ビルド側テストのためだけに dev/test で依存する（本番 WebUI は成果物を読むだけで非依存）。
+    "kawasemi-indexer",
+]
+
+[tool.uv.workspace]
+members = ["indexer"]
+
+[tool.uv.sources]
+kawasemi-indexer = { workspace = true }

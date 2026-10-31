@@ -1,0 +1,43 @@
+# キー種別カタログ（key_types.yaml）サンプル ＝ 被験者ID解決のレベル1カタログ
+#
+# key_type（名前空間）の定義。resolver は各 key_type の canonical（正準形）で
+# 値を返す。列ごとの物理整形（ゼロ詰め等）はここではなく索引unit側の宣言
+# （resource_key_binding）が持つ（正準形と物理整形の2層分離）。
+#
+# 重要（非保持・非受領）: ここには名寄せの「値」（0000123456 等）は一切書かない。
+# 値は実行時に resolver（外部・別プロセス可）経由で解決し、KAWASEMI は保持も
+# 受領もしない。本ファイルは「どんな名前空間が存在するか」の定義のみ。
+#
+# id は将来 FHIR Patient.identifier.system URI と揃えておくと backend=fhir が自然。
+# 施設はこのファイルを site/key_types.yaml に置く（gitignore 済、本体はコミットしない）。
+#
+# canonical.kind:
+#   string         = そのまま文字列
+#   numeric_string = 数値文字列（物理ゼロ詰め等は列側＝resource_key_binding で適用）
+
+key_types:
+  # 登録番号（Hub 自身）。KAWASEMI が保持する唯一の被験者識別子。
+  trial_subject_no:
+    label: 登録番号
+    canonical:
+      kind: string
+
+  # 院内MRN（多くは数値・ゼロ詰めで格納される）
+  mrn:
+    label: 院内MRN
+    system: "urn:oid:1.2.392.100495.20.3.51"  # 例: 施設の患者ID体系OID
+    canonical:
+      kind: numeric_string
+      description: "ゼロ詰めを除いた数値文字列（物理ゼロ詰めは列側で適用）"
+
+  # 院内DWH の内部連番
+  dwh_serial:
+    label: DWH内部連番
+    canonical:
+      kind: string
+
+  # FHIR Patient.id
+  fhir_patient_id:
+    label: FHIR Patient.id
+    canonical:
+      kind: string

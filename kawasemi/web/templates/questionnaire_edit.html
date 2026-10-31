@@ -1,0 +1,224 @@
+{% extends "base.html" %}
+
+{% block title %}{% if questionnaire %}Questionnaire編集{% else %}新規Questionnaire登録{% endif %} - KAWASEMI{% endblock %}
+
+{% block content %}
+<div class="breadcrumb">
+    <a href="{{ base_path() }}/">ホーム</a> &gt; <a href="{{ base_path() }}/questionnaires">Questionnaire管理</a> &gt; {% if questionnaire %}編集{% else %}新規登録{% endif %}
+</div>
+
+<div class="card">
+    <div class="page-head">
+        <h2>{% if questionnaire %}Questionnaire編集{% else %}新規Questionnaire登録{% endif %}</h2>
+    </div>
+
+    {% if error %}
+    <div class="alert alert-error">
+        {{ error }}
+    </div>
+    {% endif %}
+
+    <form method="POST" id="questionnaireForm">
+        <div class="form-section">
+            <h3>FHIR Questionnaireリソース (JSON)</h3>
+            <div
+                id="uploadZone"
+                class="upload-zone"
+                onclick="document.getElementById('fileInput').click()"
+            >
+                <div class="upload-zone-icon">&#128196;</div>
+                <div class="upload-zone-text">
+                    ここにJSONファイルをドロップ、または<strong>ファイルを選択</strong>
+                </div>
+                <div id="uploadFilename" class="upload-filename"></div>
+            </div>
+            <input type="file" id="fileInput" accept=".json,application/json" style="display:none">
+            <textarea
+                name="resource_json"
+                id="resourceJson"
+                class="json-editor"
+                placeholder='{"resourceType": "Questionnaire", "status": "draft", "item": [...]}'
+                required
+            >{{ questionnaire.content | tojson(indent=2) if questionnaire else '' }}</textarea>
+            <div id="validationStatus"></div>
+            <p class="help-text">
+                FHIR R4準拠のQuestionnaireリソースをJSON形式で入力してください。
+                <span class="text-link" onclick="loadSample()">サンプルを挿入</span>
+            </p>
+        </div>
+
+        <div class="form-actions">
+            <button type="submit" id="submitBtn" class="btn btn--primary">{% if questionnaire %}更新する{% else %}登録する{% endif %}</button>
+            <a href="{% if questionnaire %}/questionnaires/{{ questionnaire.id }}{% else %}/questionnaires{% endif %}" class="btn btn--secondary">キャンセル</a>
+        </div>
+    </form>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const sampleQuestionnaire = {
+    "resourceType": "Questionnaire",
+    "status": "draft",
+    "title": "サンプル質問票",
+    "description": "KAWASEMIサンプルQuestionnaire",
+    "item": [
+        {
+            "linkId": "q1",
+            "text": "患者氏名",
+            "type": "string",
+            "required": true
+        },
+        {
+            "linkId": "q2",
+            "text": "生年月日",
+            "type": "date",
+            "required": true
+        },
+        {
+            "linkId": "q3",
+            "text": "性別",
+            "type": "choice",
+            "required": true,
+            "answerOption": [
+                {"valueCoding": {"code": "male", "display": "男性"}},
+                {"valueCoding": {"code": "female", "display": "女性"}},
+                {"valueCoding": {"code": "other", "display": "その他"}}
+            ]
+        },
+        {
+            "linkId": "q4",
+            "text": "備考",
+            "type": "text",
+            "required": false
+        }
+    ]
+};
+
+function loadSample() {
+    const textarea = document.getElementById('resourceJson');
+    if (textarea.value.trim() && !confirm('現在の入力内容が上書きされます。よろしいですか？')) {
+        return;
+    }
+    textarea.value = JSON.stringify(sampleQuestionnaire, null, 2);
+    validateJson();
+}
+
+function validateJson() {
+    const textarea = document.getElementById('resourceJson');
+    const statusDiv = document.getElementById('validationStatus');
+    const submitBtn = document.getElementById('submitBtn');
+
+    const value = textarea.value.trim();
+    if (!value) {
+        statusDiv.innerHTML = '';
+        textarea.classList.remove('json-error');
+        return;
+    }
+
+    try {
+        const parsed = JSON.parse(value);
+
+        // 基本的なバリデーション
+        const errors = [];
+        if (parsed.resourceType !== 'Questionnaire') {
+            errors.push('resourceTypeは"Questionnaire"である必要があります');
+        }
+        if (!parsed.status) {
+            errors.push('statusは必須です');
+        }
+        if (!['draft', 'active', 'retired', 'unknown'].includes(parsed.status)) {
+            errors.push('statusはdraft, active, retired, unknownのいずれかである必要があります');
+        }
+
+        if (errors.length > 0) {
+            textarea.classList.add('json-error');
+            statusDiv.innerHTML = '<div class="validation-status validation-invalid">' + errors.join('<br>') + '</div>';
+            submitBtn.disabled = false; // サーバー側で詳細なバリデーションを行うため、送信は許可
+        } else {
+            textarea.classList.remove('json-error');
+            statusDiv.innerHTML = '<div class="validation-status validation-valid">JSON形式は有効です</div>';
+            submitBtn.disabled = false;
+        }
+    } catch (e) {
+        textarea.classList.add('json-error');
+        statusDiv.innerHTML = '<div class="validation-status validation-invalid">無効なJSON形式: ' + e.message + '</div>';
+        submitBtn.disabled = true;
+    }
+}
+
+// リアルタイムバリデーション
+document.getElementById('resourceJson').addEventListener('input', function() {
+    // デバウンス処理
+    clearTimeout(this.validateTimeout);
+    this.validateTimeout = setTimeout(validateJson, 500);
+});
+
+// フォーム送信前のバリデーション
+document.getElementById('questionnaireForm').addEventListener('submit', function(e) {
+    const textarea = document.getElementById('resourceJson');
+    try {
+        JSON.parse(textarea.value);
+    } catch (err) {
+        e.preventDefault();
+        alert('無効なJSON形式です。入力内容を確認してください。');
+    }
+});
+
+// 初期バリデーション
+validateJson();
+
+// ファイルアップロード処理
+function loadFileIntoTextarea(file) {
+    if (!file) return;
+
+    if (!file.name.endsWith('.json') && file.type !== 'application/json') {
+        alert('JSONファイルのみアップロードできます。');
+        return;
+    }
+
+    const textarea = document.getElementById('resourceJson');
+    if (textarea.value.trim() && !confirm('現在の入力内容が上書きされます。よろしいですか？')) {
+        return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = function(e) {
+        try {
+            const parsed = JSON.parse(e.target.result);
+            textarea.value = JSON.stringify(parsed, null, 2);
+            document.getElementById('uploadFilename').textContent = 'ファイル読み込み完了: ' + file.name;
+            validateJson();
+        } catch (err) {
+            alert('無効なJSON形式です: ' + err.message);
+            document.getElementById('uploadFilename').textContent = '';
+        }
+    };
+    reader.readAsText(file);
+}
+
+const uploadZone = document.getElementById('uploadZone');
+const fileInput = document.getElementById('fileInput');
+
+fileInput.addEventListener('change', function() {
+    if (this.files.length > 0) loadFileIntoTextarea(this.files[0]);
+    this.value = '';
+});
+
+uploadZone.addEventListener('dragover', function(e) {
+    e.preventDefault();
+    this.classList.add('drag-over');
+});
+
+uploadZone.addEventListener('dragleave', function() {
+    this.classList.remove('drag-over');
+});
+
+uploadZone.addEventListener('drop', function(e) {
+    e.preventDefault();
+    this.classList.remove('drag-over');
+    const file = e.dataTransfer.files[0];
+    loadFileIntoTextarea(file);
+});
+</script>
+{% endblock %}

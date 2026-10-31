@@ -1,0 +1,11 @@
+# 所在の規則（kawasemi/ai_input/location_rules.py）の雛形。値は架空のもの。
+#
+# fallback_unit_ids: 検索では届きにくい診療記録の本文への受け皿として、所在の AI 案の
+# 提示枠（上位8件）の後ろへ常に足す索引の unit_id。書いた順に並ぶ。索引に無い id は飛ばす。
+#
+# このファイルが無ければ受け皿を足さない（空の規則）。
+fallback_unit_ids:
+  - "db:DEMO.DOCUMENT.NOTE_TEXT#NOTE"     # 経過記録
+  - "db:DEMO.DOCUMENT.NOTE_TEXT#ADMIT"    # 入院時記録
+  - "db:DEMO.DOCUMENT.NOTE_TEXT#OP"       # 手術記録
+  - "db:DEMO.DOCUMENT.NOTE_TEXT#SUMMARY"  # 退院時要約

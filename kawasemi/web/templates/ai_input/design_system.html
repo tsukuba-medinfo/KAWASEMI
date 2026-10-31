@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+
+{% block title %}データ所在の編集 - {{ questionnaire.title or questionnaire.fhir_id }} - KAWASEMI{% endblock %}
+
+{% block content %}
+<div class="card">
+  {% include "ai_input/_stepper.html" %}
+  <h2>ステップ1（役割2）: データ所在 — {{ questionnaire.title or questionnaire.fhir_id }}</h2>
+  <p class="hint">各項目のデータが物理的にどこにあるか（接続先・表・カラム）を確定します。AIが索引から候補を提示するので、上位から1つ選ぶか、手動入力／「該当データなし」を指定してください。施設固有の情報で、Questionnaireには埋め込まれません。</p>
+
+  <div class="toolbar">
+    {% if enable_ai_drafting %}
+    <button type="button" class="btn btn--ai" id="ai-btn" onclick="aiDraftAll()">AIで候補を出す（未解決のみ）</button>
+    {% endif %}
+    <button type="button" class="btn btn--primary" onclick="saveSystem()">保存</button>
+    <a class="btn btn--secondary" href="{{ base_path() }}/ai-input/questionnaires/{{ questionnaire.id }}/source-survey">データソース調査へ</a>
+    <span id="status"></span>
+  </div>
+
+  {% if fields %}
+  <div class="statusbar" id="statusbar">
+    {# **「確定」は人が確認した項目だけを数える**。AI推奨は初期選択されるので、
+       「何かが選ばれている」を確定として数えると、人が一度も触っていない項目が確定に混ざる #}
+    <span>確定状況:</span>
+    <span>確認済み <span class="sb-count" id="sb-confirmed">0</span></span>
+    <span class="sb-unconfirmed">未確認 <span class="sb-count" id="sb-unconfirmed">0</span></span>
+    <span class="sb-unresolved">未選択 <span class="sb-count" id="sb-unresolved">0</span></span>
+    {# **未試行を「未選択」と混ぜない**。押し直せば埋まる項目と、AI では所在が
+       特定できなかった項目を同じ数に入れると、所在の確からしさの段階（rubric）の分布が動く #}
+    <span class="sb-unattempted">未試行 <span class="sb-count" id="sb-unattempted">0</span></span>
+    <span class="sb-sep">内訳:</span>
+    <span>AI推奨そのまま <span class="sb-count" id="sb-rec">0</span></span>
+    <span>変更/手動 <span class="sb-count" id="sb-manual">0</span></span>
+    <span>該当データなし <span class="sb-count" id="sb-na">0</span></span>
+    <span>診療記録（受け皿） <span class="sb-count" id="sb-fallback">0</span></span>
+  </div>
+  {% endif %}
+  {% if enable_ai_drafting %}
+  <p class="hint">候補は適合度（★）の高い順に並びます。<strong>AI推奨</strong>バッジの付いた候補が初期選択されますが、必ず内容を確認してから保存してください。推奨が無い項目は「要確認（未選択）」です。<strong>「未試行」はAIの一推しが返っていない項目</strong>で、<strong>「AIでは所在が特定できなかった」ではありません</strong>——もう一度実行すると埋まることがあります。</p>
+  {% endif %}
+  <p class="hint"><strong>「確定」は各項目の「この項目を確認」を押した項目だけです。</strong>初期選択されているだけの項目は「未確認」と表示します——AI推奨がそのまま初期選択されるので、選ばれていることは人が見たことを意味しません。確認は項目ごとに記録され、誰がいつ確認したかが残ります。</p>
+
+  {% if not fields %}
+  <div class="alert alert-error">このQuestionnaireには入力項目がありません。</div>
+  {% else %}
+  <div id="items">
+    {% for field in fields %}
+    <div class="item-card" data-link-id="{{ field.link_id }}">
+      <div class="item-head item-head--split">
+        <span>
+          <span class="link-id-badge">{{ field.link_id }}</span>
+          <span class="item-text">{{ field.text or '（テキストなし）' }}</span>
+        </span>
+        <span style="display:flex;gap:0.4rem;align-items:center;">
+          <span class="item-flag"></span>
+          {# 確認は**項目単位**。一括保存しか無いと confirmed_at が全項目で
+             揃い、1項目あたりの工数が後から復元できない #}
+          <button type="button" class="btn btn--primary btn--sm" data-role="confirm" onclick="confirmItem(this, '{{ field.link_id }}')">この項目を確認</button>
+          {% if enable_ai_drafting %}
+          <button type="button" class="btn btn--ai btn--sm" onclick="aiDraftItem(this, '{{ field.link_id }}')">この項目を引き直す</button>
+          {% endif %}
+        </span>
+      </div>
+      <input type="hidden" class="item-text-val" value="{{ field.text or '' }}">
+      <div class="cand-list"></div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+
+<script id="init-state" type="application/json">{{ initial | tojson }}</script>
+{% endblock %}
+
+{% block extra_js %}
+{# **JS は静的ファイルへ切り出してある**。インラインのままでは
+   `node --check` に掛けられず、構文エラーを注入しても全テストが緑のままだった。
+   Jinja の値はここで JSON として渡す（JS 側は `#page-config` を読む）。 #}
+<script id="page-config" type="application/json">{{ {"questionnaire_id": questionnaire.id, "base_path": base_path(), "source_labels": source_labels, "manual_categories": manual_categories, "max_location_candidates": max_location_candidates} | tojson }}</script>
+<script src="{{ base_path() }}/static/js/design_system.js?v={{ static_v('js/design_system.js') }}"></script>
+{% endblock %}

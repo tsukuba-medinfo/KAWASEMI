@@ -1,0 +1,983 @@
+"""ステップ3/4 DSL のユニット・統合テスト（Ollama 不要・決定的）
+
+- dsl.validate_program / is_select_only_sql / safe_arith
+- schemas.DSLProgram の return エイリアス往復
+- executor.resolve_fhir_path の対応記法と限界（FHIRPath ではない）
+- viz.program_to_mermaid
+- executor.DSLInterpreter の各 op 実行（in-memory sqlite 使用）
+- select の where / order が非実行ヒントであること
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+
+import pytest
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from kawasemi.ai_input.dsl import (
+    has_needs_input,
+    is_select_only_sql,
+    safe_arith,
+    validate_program,
+)
+from kawasemi.ai_input.executor import (
+    DSLInterpreter,
+    _apply_compare,
+    apply_transform,
+    resolve_fhir_path,
+)
+from kawasemi.ai_input.models import InputPlan
+from kawasemi.ai_input.schemas import DSLProgram
+from kawasemi.ai_input.viz import program_to_mermaid
+
+# --------------------------------------------------------------------------- #
+# SQL 安全性
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "sql,ok",
+    [
+        ("SELECT value FROM labs WHERE patient_id = :patient_id", True),
+        ("  with x as (select 1) select * from x  ", True),
+        ("DELETE FROM labs", False),
+        ("SELECT 1; DROP TABLE labs", False),
+        ("UPDATE labs SET v=1", False),
+        ("INSERT INTO labs VALUES (1)", False),
+        ("", False),
+    ],
+)
+def test_is_select_only_sql(sql: str, ok: bool) -> None:
+    assert is_select_only_sql(sql) is ok
+
+
+# --------------------------------------------------------------------------- #
+# 安全な算術評価
+# --------------------------------------------------------------------------- #
+
+
+def test_safe_arith_basic() -> None:
+    assert safe_arith("value/18.01", 180.1) == pytest.approx(10.0)
+    assert safe_arith("(value + 2) * 3", 1) == pytest.approx(9.0)
+
+
+def test_safe_arith_rejects_calls() -> None:
+    with pytest.raises(ValueError):
+        safe_arith("__import__('os').system('x')", 1)
+    with pytest.raises(ValueError):
+        safe_arith("value.bit_length()", 1)
+
+
+# --------------------------------------------------------------------------- #
+# プログラム検証
+# --------------------------------------------------------------------------- #
+
+
+def _good_program() -> dict:
+    return {
+        "steps": [
+            {
+                "op": "sql_extract",
+                "id": "hb",
+                "sql": "SELECT v FROM labs WHERE patient_id = :patient_id",
+            },
+            {"op": "compare", "id": "low", "left": "$hb", "cmp": "<", "right": 8.0},
+            {"op": "branch", "id": "g", "when": "$low", "then": "$hb", "else_branch": None},
+        ],
+        "return": "$g",
+    }
+
+
+def test_validate_good_program() -> None:
+    assert validate_program(_good_program()) == []
+
+
+def test_validate_unknown_op() -> None:
+    prog = {"steps": [{"op": "evil", "id": "x"}], "return": "$x"}
+    assert any("未知の op" in e for e in validate_program(prog))
+
+
+def test_validate_dangling_reference() -> None:
+    prog = {
+        "steps": [{"op": "compare", "id": "c", "left": "$missing", "cmp": "==", "right": 1}],
+        "return": "$c",
+    }
+    assert any("未定義" in e for e in validate_program(prog))
+
+
+def test_validate_forward_reference_rejected() -> None:
+    # b は後方の a を参照しているのでエラー
+    prog = {
+        "steps": [
+            {"op": "compare", "id": "b", "left": "$a", "cmp": "==", "right": 1},
+            {"op": "sql_extract", "id": "a", "sql": "SELECT 1"},
+        ],
+        "return": "$b",
+    }
+    assert any("$a" in e for e in validate_program(prog))
+
+
+def test_validate_bad_sql() -> None:
+    prog = {"steps": [{"op": "sql_extract", "id": "x", "sql": "DELETE FROM labs"}], "return": "$x"}
+    assert any("SELECT" in e for e in validate_program(prog))
+
+
+def test_validate_select_pick_allowed_values() -> None:
+    # 未指定/first/last は妥当。綴り違いは黙って first に化けさせず検証で弾く
+    def prog(pick: object) -> dict:
+        step = {"op": "select", "id": "s", "source": "$rows"}
+        if pick is not None:
+            step["pick"] = pick
+        return {
+            "steps": [{"op": "sql_extract", "id": "rows", "multi": True, "sql": "SELECT 1"}, step],
+            "return": "$s",
+        }
+
+    assert validate_program(prog(None)) == []
+    assert validate_program(prog("first")) == []
+    assert validate_program(prog("last")) == []
+    assert any("select.pick" in e for e in validate_program(prog("latest")))
+
+
+def test_validate_needs_input_allows_missing_fields() -> None:
+    prog = {
+        "steps": [{"op": "sql_extract", "id": "x", "needs_input": True, "reasoning": "表名不明"}],
+        "return": "$x",
+    }
+    assert validate_program(prog) == []
+    assert has_needs_input(prog) is True
+
+
+# --------------------------------------------------------------------------- #
+# `needs_input` が免除する範囲
+#
+# 方針は「**欠落は許すが、書いてある内容は妥当でなければならない**」。免除するのは
+# `_REQUIRED_FIELDS` の充足検査ただ1つで、他の検査は `needs_input` に関わらず走る。
+# 以前は値域と csv の構造検査も丸ごと免除しており、**旗を立てるだけで検査を回避できた**。
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "step,expected",
+    [
+        pytest.param(
+            {"op": "compare", "id": "x", "left": "$a", "cmp": "bogus", "right": 1},
+            "compare.cmp",
+            id="compare.cmp",
+        ),
+        pytest.param(
+            {"op": "select", "id": "x", "source": "$a", "pick": "latest"},
+            "select.pick",
+            id="select.pick",
+        ),
+        pytest.param(
+            {"op": "aggregate", "id": "x", "source": "$a", "func": "median"},
+            "aggregate.func",
+            id="aggregate.func",
+        ),
+        pytest.param(
+            {"op": "csv_extract", "id": "x", "column": "c", "delimiter": ";;"},
+            "delimiter",
+            id="csv.delimiter",
+        ),
+        pytest.param(
+            {"op": "csv_extract", "id": "x", "column": {"bad": 1}},
+            "列指定",
+            id="csv.column-type",
+        ),
+        pytest.param(
+            {"op": "csv_extract", "id": "x", "column": "{{tbl}}"},
+            "列指定に",
+            id="csv.column-placeholder",
+        ),
+        pytest.param(
+            {"op": "csv_extract", "id": "x", "column": "c", "match": ["文字列"]},
+            "match 要素は辞書",
+            id="csv.match-shape",
+        ),
+        # 空文字の column は `None` と同じに扱う。`is None` で見ていると、空文字が
+        # `col_specs` へ流れて `_is_unset` に飛ばされ、**header=false の整数index規則を
+        # 素通りして確定できてしまう**（実行時に `col_index("")` が ValueError →
+        # schema_mismatch＝所在同定の失敗として数えられる）。
+        pytest.param(
+            {
+                "op": "csv_extract",
+                "id": "x",
+                "column": 0,
+                "header": False,
+                "match": [{"column": "", "value": "v"}],
+            },
+            "match 要素に column が必要です",
+            id="csv.match-column-empty",
+        ),
+    ],
+)
+def test_needs_input_does_not_exempt_written_but_invalid_content(step, expected) -> None:
+    """旗を立てても、**書いてある内容**の検査は素通りしないこと。
+
+    綴り違いを通すと黙って別の意味になる（`pick="latest"` は executor で first に化ける）。
+    `needs_input` は書き手が立てる旗であってサーバ側の保証ではないので、
+    「旗を立てれば検査を回避できる」形にしてはいけない。
+    """
+    prog = {"steps": [{"op": "sql_extract", "id": "a"}, {**step, "needs_input": True}]}
+    errors = validate_program(prog)
+    assert any(expected in e for e in errors), errors
+    # 同じ内容は needs_input=false でも当然弾かれる（旗の有無で答えが変わらない）
+    prog_confirmed = {"steps": [{"op": "sql_extract", "id": "a", "sql": "SELECT 1"}, step]}
+    assert any(expected in e for e in validate_program(prog_confirmed))
+
+
+@pytest.mark.parametrize(
+    "step",
+    [
+        pytest.param({"op": "compare", "id": "x"}, id="compare-all-missing"),
+        pytest.param({"op": "select", "id": "x"}, id="select-all-missing"),
+        pytest.param({"op": "aggregate", "id": "x"}, id="aggregate-all-missing"),
+        pytest.param({"op": "csv_extract", "id": "x"}, id="csv-all-missing"),
+        # 空文字も「まだ書いていない」として扱う（`_is_unset`）
+        pytest.param({"op": "compare", "id": "x", "cmp": ""}, id="compare-empty-cmp"),
+        pytest.param({"op": "aggregate", "id": "x", "func": ""}, id="aggregate-empty-func"),
+    ],
+)
+def test_needs_input_still_exempts_missing_fields(step) -> None:
+    """**欠落は許す。** 値域・構造の検査は書かれているときだけ発火する。"""
+    prog = {"steps": [{**step, "needs_input": True, "reasoning": "未確定"}]}
+    assert validate_program(prog) == []
+
+
+@pytest.mark.parametrize(
+    "step,expected",
+    [
+        pytest.param(
+            {"op": "aggregate", "id": "x", "source": "$a", "func": 0},
+            "aggregate.func",
+            id="aggregate.func-zero",
+        ),
+        pytest.param(
+            {"op": "select", "id": "x", "source": "$a", "pick": False},
+            "select.pick",
+            id="select.pick-false",
+        ),
+        pytest.param(
+            {"op": "csv_extract", "id": "x", "column": False},
+            "列指定",
+            id="csv.column-false",
+        ),
+        pytest.param(
+            {"op": "csv_extract", "id": "x", "column": []},
+            "列指定",
+            id="csv.column-empty-list",
+        ),
+        pytest.param(
+            {"op": "csv_extract", "id": "x", "column": {}},
+            "列指定",
+            id="csv.column-empty-dict",
+        ),
+    ],
+)
+def test_needs_input_exempts_absence_not_falsy_values(step, expected) -> None:
+    """免除するのは**未設定（キー無し・`None`）と空文字だけ**であること。
+
+    `_is_unset` は `value is None or value == ""` であって falsy 判定ではない。
+    ここを `not value` に倒すと `0` `False` `[]` `{}` も「書いていない」に入り、
+    **値域と型の検査が黙って素通りする**（`func=0` や `column=False` を確定できてしまう）。
+    `_is_unset` の docstring はこの区別を主張しているので、主張を測る側をここに置く。
+
+    この検査が無いと、`_is_unset` を素朴な falsy 判定へ書き換える1行の変更が
+    フルスイートを全通しで抜ける（実測: 2,334件すべて緑のまま28形が新たに通る）。
+    """
+    prog = {"steps": [{"op": "sql_extract", "id": "a"}, {**step, "needs_input": True}]}
+    assert any(expected in e for e in validate_program(prog)), validate_program(prog)
+
+
+def test_needs_input_does_not_exempt_the_parameter_declaration_net() -> None:
+    """パラメータ宣言の網は免除しない（旗で検査を回避させない）。
+
+    実行時に何を読むかを縛る検査なので、ここを免除すると `needs_input` を立てるだけで
+    未宣言のパラメータ参照や `allowed` 無しの表名切替が保存できてしまう。
+    """
+    unknown_param = {
+        "steps": [
+            {
+                "op": "sql_extract",
+                "id": "x",
+                "sql": "SELECT * FROM t WHERE c = :nope",
+                "needs_input": True,
+            }
+        ]
+    }
+    assert any("nope" in e for e in validate_program(unknown_param))
+
+    identifier_without_allowed = {
+        "params": [{"name": "tbl", "kind": "identifier", "value": "T"}],
+        "steps": [
+            {"op": "sql_extract", "id": "x", "sql": "SELECT * FROM {{tbl}}", "needs_input": True}
+        ],
+    }
+    assert any("allowed" in e for e in validate_program(identifier_without_allowed))
+
+
+# --------------------------------------------------------------------------- #
+# スキーマ往復（return エイリアス）
+# --------------------------------------------------------------------------- #
+
+
+def test_dslprogram_return_alias_roundtrip() -> None:
+    prog = DSLProgram(**{"steps": [{"op": "transform", "id": "v"}], "return": "$v"})
+    assert prog.return_ == "$v"
+    dumped = prog.model_dump(by_alias=True, exclude_none=True)
+    assert dumped["return"] == "$v"
+    # populate_by_name でも受理
+    prog2 = DSLProgram(steps=[], return_="$z")
+    assert prog2.model_dump(by_alias=True)["return"] == "$z"
+
+
+# --------------------------------------------------------------------------- #
+# compare / transform ヘルパ
+# --------------------------------------------------------------------------- #
+
+
+def test_apply_compare_numeric_and_membership() -> None:
+    assert _apply_compare(7.2, "<", 8.0) is True
+    assert _apply_compare("10", ">=", 10) is True
+    assert _apply_compare("a", "in", ["a", "b"]) is True
+    assert _apply_compare("abc", "contains", "b") is True
+    assert _apply_compare(3, "!=", 4) is True
+
+
+def test_apply_transform_code_map_and_units() -> None:
+    assert apply_transform("M", {"type": "code_map", "map": {"M": "男性"}}) == "男性"
+    assert (
+        apply_transform(180.1, {"type": "unit_conversion", "formula": "value/18.01", "decimals": 2})
+        == 10.0
+    )
+
+
+# --------------------------------------------------------------------------- #
+# fhir_path（FHIRPath ではなく簡易ドット記法）
+# --------------------------------------------------------------------------- #
+
+
+def test_resolve_fhir_path_supported_notation() -> None:
+    data = {"status": "final", "name": [{"text": "山田太郎"}], "valueQuantity": {"value": 12.3}}
+    # 先頭の大文字始まり要素はリソース型として読み飛ばす
+    assert resolve_fhir_path(data, "Observation.valueQuantity.value") == 12.3
+    assert resolve_fhir_path(data, "status") == "final"
+    assert resolve_fhir_path(data, "Patient.name[0].text") == "山田太郎"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "Patient.name.where(use='official').text",  # 関数
+        "Observation.value.ofType(Quantity).value",  # 型フィルタ
+        "Observation.value as Quantity",  # 型キャスト
+        "Patient.name[0].text | Patient.name[1].text",  # union
+        "Patient.name[*].text",  # ワイルドカード添字
+    ],
+)
+def test_resolve_fhir_path_ignores_fhirpath_syntax(path: str) -> None:
+    """FHIRPath 構文は解釈されず None になる（実装は簡易ドット記法）"""
+    data = {"name": [{"use": "official", "text": "山田太郎"}], "value": {"value": 1}}
+    assert resolve_fhir_path(data, path) is None
+
+
+@pytest.mark.parametrize("path", ["Observation", "Patient | Practitioner"])
+def test_resolve_fhir_path_returns_whole_resource_when_nothing_to_walk(path: str) -> None:
+    """大文字始まりの要素は resourceType と照合せず捨てるため、辿る要素が残らないと
+    リソース全体が返る（None ではない）。docstring に明記した驚きの挙動を固定する。
+    """
+    data = {"resourceType": "Observation", "status": "final"}
+    assert resolve_fhir_path(data, path) == data
+
+
+def test_resolve_fhir_path_is_case_and_space_sensitive() -> None:
+    data = {"resourceType": "Observation", "status": "final"}
+    assert resolve_fhir_path(data, "observation.status") is None
+    assert resolve_fhir_path(data, " Observation.status") is None
+
+
+# --------------------------------------------------------------------------- #
+# Mermaid 可視化
+# --------------------------------------------------------------------------- #
+
+
+def test_program_to_mermaid_includes_nodes_and_trace() -> None:
+    out = program_to_mermaid(
+        _good_program(),
+        trace=[
+            {"op": "sql_extract", "id": "hb", "output": 7.2},
+            {"op": "branch", "id": "g", "taken": "then", "output": "Grade"},
+        ],
+    )
+    assert "graph TD" in out
+    assert "7.2" in out  # トレース値が注記される
+    assert "|then|" in out  # branch のエッジ注記
+    assert "result" in out  # return ノード
+
+
+# --------------------------------------------------------------------------- #
+# インタプリタ統合（in-memory sqlite）
+# --------------------------------------------------------------------------- #
+
+
+def _plan(link_id: str, program: dict) -> InputPlan:
+    return InputPlan(questionnaire_id=1, link_id=link_id, program=program, status="confirmed")
+
+
+@pytest.mark.asyncio
+async def test_interpreter_sql_compare_branch_transform(db_session: AsyncSession) -> None:
+    await db_session.execute(text("CREATE TABLE labs (patient_id TEXT, v REAL)"))
+    await db_session.execute(text("INSERT INTO labs VALUES (:p, :v)"), {"p": "P1", "v": 7.2})
+    await db_session.commit()
+
+    program = {
+        "steps": [
+            {
+                "op": "sql_extract",
+                "id": "hb",
+                "sql": "SELECT v FROM labs WHERE patient_id = :patient_id",
+            },
+            {"op": "compare", "id": "low", "left": "$hb", "cmp": "<", "right": 8.0},
+            {"op": "branch", "id": "g", "when": "$low", "then": "要対応", "else_branch": "正常"},
+        ],
+        "return": "$g",
+    }
+    interp = DSLInterpreter()
+    prefill, evidence = await interp.execute([_plan("item1", program)], "P1", db_session)
+
+    assert prefill["item1"] == "要対応"
+    trace = evidence["item1"]["trace"]
+    assert [t["op"] for t in trace] == ["sql_extract", "compare", "branch"]
+    assert trace[0]["output"] == 7.2
+    assert trace[2]["taken"] == "then"
+
+
+@pytest.mark.asyncio
+async def test_interpreter_select_and_aggregate(db_session: AsyncSession) -> None:
+    await db_session.execute(text("CREATE TABLE vitals (patient_id TEXT, v REAL)"))
+    for v in (3.0, 9.0, 5.0):
+        await db_session.execute(text("INSERT INTO vitals VALUES (:p, :v)"), {"p": "P1", "v": v})
+    await db_session.commit()
+
+    program = {
+        "steps": [
+            {
+                "op": "sql_extract",
+                "id": "rows",
+                "multi": True,
+                "sql": "SELECT v FROM vitals WHERE patient_id = :patient_id ORDER BY v",
+            },
+            {"op": "aggregate", "id": "mx", "source": "$rows", "func": "max"},
+            {"op": "select", "id": "first", "source": "$rows", "pick": "first"},
+        ],
+        "return": "$mx",
+    }
+    interp = DSLInterpreter()
+    prefill, evidence = await interp.execute([_plan("item2", program)], "P1", db_session)
+
+    assert prefill["item2"] == 9.0
+    by_id = {t["id"]: t for t in evidence["item2"]["trace"]}
+    assert by_id["first"]["output"] == 3.0
+
+
+@pytest.mark.asyncio
+async def test_interpreter_select_ignores_where_and_order_hints(
+    db_session: AsyncSession,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """select の where / order は非実行のヒント（仕様＝実装）。
+
+    where で絞り込まれず、order でも並び替わらず、pick が抽出時点の行順に適用される。
+    無視した事実は trace.inputs.hints_ignored に残り、警告ログが出る（1インスタンス1回）。
+    """
+    await db_session.execute(text("CREATE TABLE vitals2 (patient_id TEXT, v REAL)"))
+    for v in (3.0, 9.0, 5.0):
+        await db_session.execute(text("INSERT INTO vitals2 VALUES (:p, :v)"), {"p": "P1", "v": v})
+    await db_session.commit()
+
+    program = {
+        "steps": [
+            {
+                "op": "sql_extract",
+                "id": "rows",
+                "multi": True,
+                "sql": "SELECT v FROM vitals2 WHERE patient_id = :patient_id",
+            },
+            {
+                "op": "select",
+                "id": "s",
+                "source": "$rows",
+                "pick": "first",
+                "where": "v > 100",  # 絞り込まれない（全行が残る）
+                "order": "v DESC",  # 並び替わらない（挿入順のまま）
+            },
+        ],
+        "return": "$s",
+    }
+    interp = DSLInterpreter()
+    with caplog.at_level(logging.WARNING, logger="kawasemi.ai_input.executor"):
+        prefill, evidence = await interp.execute([_plan("item2b", program)], "P1", db_session)
+        # 2人目（バッチ相当）でも同じ警告を繰り返さない
+        await interp.execute([_plan("item2b", program)], "P1", db_session)
+
+    # where が効けば None、order が効けば 9.0 になるはず。実装は挿入順の先頭を返す。
+    assert prefill["item2b"] == 3.0
+    entry = {t["id"]: t for t in evidence["item2b"]["trace"]}["s"]
+    assert entry["inputs"]["count"] == 3
+    assert entry["inputs"]["hints_ignored"] == {"where": "v > 100", "order": "v DESC"}
+    warnings = [r for r in caplog.records if "実行されないヒント" in r.getMessage()]
+    assert len(warnings) == 1
+
+
+@pytest.mark.asyncio
+async def test_interpreter_select_without_hints_keeps_trace_clean(
+    db_session: AsyncSession,
+) -> None:
+    # ヒントが無ければ hints_ignored キー自体を作らない（確認書に null を並べない）
+    await db_session.execute(text("CREATE TABLE vitals3 (patient_id TEXT, v REAL)"))
+    await db_session.execute(text("INSERT INTO vitals3 VALUES ('P1', 4.0)"))
+    await db_session.commit()
+
+    program = {
+        "steps": [
+            {
+                "op": "sql_extract",
+                "id": "rows",
+                "multi": True,
+                "sql": "SELECT v FROM vitals3 WHERE patient_id = :patient_id",
+            },
+            {"op": "select", "id": "s", "source": "$rows"},
+        ],
+        "return": "$s",
+    }
+    interp = DSLInterpreter()
+    _, evidence = await interp.execute([_plan("item2c", program)], "P1", db_session)
+    entry = {t["id"]: t for t in evidence["item2c"]["trace"]}["s"]
+    assert "hints_ignored" not in entry["inputs"]
+    assert entry["inputs"]["pick"] == "first"
+
+
+@pytest.mark.asyncio
+async def test_interpreter_records_error_without_aborting(db_session: AsyncSession) -> None:
+    # 解決できない外部DB接続 → エラー記録、値は None（実行は中断しない）
+    program = {
+        "steps": [
+            {
+                "op": "external_db_extract",
+                "id": "x",
+                "sql": "SELECT 1",
+                "connection_id": "no_such_conn",
+            }
+        ],
+        "return": "$x",
+    }
+    interp = DSLInterpreter()
+    prefill, evidence = await interp.execute([_plan("item3", program)], "P1", db_session)
+
+    assert "item3" not in prefill  # 値が出ない
+    assert "接続が解決できません" in evidence["item3"]["trace"][0]["error"]
+
+
+# --------------------------------------------------------------------------- #
+# 堅牢化（Stage3）の回帰テスト
+# --------------------------------------------------------------------------- #
+
+
+def test_safe_arith_rejects_pow() -> None:
+    """冪乗（**）は DoS 回避のため拒否する"""
+    with pytest.raises(ValueError):
+        safe_arith("value ** 3", 2)
+    with pytest.raises(ValueError):
+        safe_arith("9 ** 9 ** 9", 1)
+
+
+def test_safe_arith_rejects_non_finite() -> None:
+    """ゼロ除算など非有限結果は拒否する"""
+    with pytest.raises((ValueError, ZeroDivisionError)):
+        safe_arith("value / 0", 1)
+
+
+@pytest.mark.parametrize(
+    "sql,ok",
+    [
+        # コメントで危険句を隠した複文すり抜けを防ぐ
+        ("SELECT 1 -- ; DROP TABLE labs\n; DELETE FROM labs", False),
+        ("SELECT 1 /* ; DROP TABLE labs */ ; UPDATE labs SET v=1", False),
+        # コメント除去後に純粋な SELECT になるものは許可
+        ("SELECT v FROM labs -- コメント", True),
+        ("/* 先頭コメント */ SELECT v FROM labs", True),
+        # 追加した禁止キーワード
+        ("COPY labs TO '/tmp/x'", False),
+        ("CALL do_something()", False),
+        ("VACUUM", False),
+        ("SELECT execute('x')", False),
+    ],
+)
+def test_is_select_only_sql_comment_and_keywords(sql: str, ok: bool) -> None:
+    assert is_select_only_sql(sql) is ok
+
+
+def test_validate_program_rejects_too_many_steps() -> None:
+    steps = [{"op": "sql_extract", "id": f"s{i}", "sql": "SELECT 1"} for i in range(300)]
+    errors = validate_program({"steps": steps, "return": "$s0"})
+    assert any("上限" in e for e in errors)
+
+
+@pytest.mark.asyncio
+async def test_interpreter_refuses_invalid_program(db_session: AsyncSession) -> None:
+    """実行時に validate_program で弾かれる不正プログラムは実行せずエラー記録する"""
+    program = {"steps": [{"op": "evil_op", "id": "x"}], "return": "$x"}
+    interp = DSLInterpreter()
+    prefill, evidence = await interp.execute([_plan("itemX", program)], "P1", db_session)
+
+    assert "itemX" not in prefill
+    assert "プログラム検証エラー" in evidence["itemX"]["error"]
+    assert evidence["itemX"]["trace"] == []
+
+
+# --------------------------------------------------------------------------- #
+# csv_extract（全患者横断CSVの決定的取得）＋ aggregate sum
+# --------------------------------------------------------------------------- #
+
+
+def test_validate_csv_extract_required_fields() -> None:
+    prog = {"steps": [{"op": "csv_extract", "id": "x", "path": "a.csv"}], "return": "$x"}
+    errs = validate_program(prog)
+    assert any("key_column" in e for e in errs)
+    assert any("column" in e for e in errs)
+
+
+def test_validate_csv_extract_headerless_requires_index() -> None:
+    # header=false（ヘッダ無し）で列名(str)指定はエラー
+    prog = {
+        "steps": [
+            {
+                "op": "csv_extract",
+                "id": "x",
+                "connection_id": "fs",
+                "path": "a.csv",
+                "header": False,
+                "key_column": "pid",  # str はNG
+                "column": 3,
+            }
+        ],
+        "return": "$x",
+    }
+    assert any("整数index" in e for e in validate_program(prog))
+
+
+def test_validate_csv_extract_good() -> None:
+    prog = {
+        "steps": [
+            {
+                "op": "csv_extract",
+                "id": "x",
+                "connection_id": "fs",
+                "path": "a.csv",
+                "key_column": "patient_id",
+                "column": "points",
+                "match": [{"column": "adm_id", "value": "A1"}],
+            }
+        ],
+        "return": "$x",
+    }
+    assert validate_program(prog) == []
+
+
+def test_validate_csv_extract_match_column_required() -> None:
+    prog = {
+        "steps": [
+            {
+                "op": "csv_extract",
+                "id": "x",
+                "connection_id": "fs",
+                "path": "a.csv",
+                "key_column": "pid",
+                "column": "v",
+                "match": [{"value": "A1"}],  # column 欠落
+            }
+        ],
+        "return": "$x",
+    }
+    assert any("match 要素に column が必要" in e for e in validate_program(prog))
+
+
+def test_validate_csv_extract_bad_delimiter() -> None:
+    prog = {
+        "steps": [
+            {
+                "op": "csv_extract",
+                "id": "x",
+                "connection_id": "fs",
+                "path": "a.csv",
+                "key_column": "pid",
+                "column": "v",
+                "delimiter": ", ",  # 2文字はNG
+            }
+        ],
+        "return": "$x",
+    }
+    assert any("delimiter は1文字" in e for e in validate_program(prog))
+
+
+def test_validate_aggregate_sum_allowed() -> None:
+    prog = {
+        "steps": [
+            {"op": "sql_extract", "id": "r", "multi": True, "sql": "SELECT 1"},
+            {"op": "aggregate", "id": "s", "source": "$r", "func": "sum"},
+        ],
+        "return": "$s",
+    }
+    assert validate_program(prog) == []
+
+
+@pytest.mark.asyncio
+async def test_interpreter_csv_composite_where_and_sum(
+    db_session: AsyncSession, fs_root: Path
+) -> None:
+    """ヘッダ付きCSVを複合等値WHERE(患者ID＋adm_id＋code)で絞り → aggregate sum。"""
+    csv_path = fs_root / "ef.csv"
+    csv_path.write_text(
+        "patient_id,adm_id,code,points\n"
+        "P1,A1,150,100\n"
+        "P1,A1,150,200\n"
+        "P1,A1,999,50\n"  # code 不一致 → 除外
+        "P1,A2,150,300\n"  # adm 不一致 → 除外
+        "P2,A1,150,400\n",  # 患者 不一致 → 除外
+        encoding="utf-8",
+    )
+    program = {
+        "steps": [
+            {
+                "op": "csv_extract",
+                "id": "rows",
+                "connection_id": "test_fs",
+                "path": csv_path.name,
+                "key_column": "patient_id",
+                "column": "points",
+                "match": [
+                    {"column": "adm_id", "value": "A1"},
+                    {"column": "code", "value": "150"},
+                ],
+                "multi": True,
+            },
+            {"op": "aggregate", "id": "total", "source": "$rows", "func": "sum"},
+        ],
+        "return": "$total",
+    }
+    interp = DSLInterpreter()
+    prefill, evidence = await interp.execute([_plan("ef", program)], "P1", db_session)
+
+    assert prefill["ef"] == 300.0
+    by_id = {t["id"]: t for t in evidence["ef"]["trace"]}
+    assert by_id["rows"]["output"] == ["100", "200"]
+    assert by_id["rows"]["matched_count"] == 2
+    # 生の患者キーは evidence に残さずマスクされる（_DATA_OPS のキー解決経路）
+    assert by_id["rows"]["inputs"].get("patient_id") is None
+
+
+@pytest.mark.asyncio
+async def test_interpreter_csv_strict_key_match(db_session: AsyncSession, fs_root: Path) -> None:
+    """患者ID突合は厳密文字列等値。"00123" は "123" と誤マッチしない。"""
+    csv_path = fs_root / "z.csv"
+    csv_path.write_text("patient_id,v\n00123,10\n123,20\n", encoding="utf-8")
+    program = {
+        "steps": [
+            {
+                "op": "csv_extract",
+                "id": "r",
+                "connection_id": "test_fs",
+                "path": csv_path.name,
+                "key_column": "patient_id",
+                "column": "v",
+                "multi": True,
+            }
+        ],
+        "return": "$r",
+    }
+    interp = DSLInterpreter()
+    prefill, evidence = await interp.execute([_plan("z", program)], "123", db_session)
+
+    # "123" の行のみ。"00123" は数値的には等しいが文字列としては不一致＝除外
+    assert prefill["z"] == ["20"]
+    assert evidence["z"]["trace"][0]["matched_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_interpreter_csv_headerless_index_and_tab(
+    db_session: AsyncSession, fs_root: Path
+) -> None:
+    """ヘッダ無し・タブ区切りCSVを列indexで指定して読む（DPCのEF/D相当）。"""
+    csv_path = fs_root / "ef.tsv"
+    csv_path.write_text(
+        "P1\tA1\t150\t100\nP1\tA1\t150\t200\nP2\tA1\t150\t300\n",
+        encoding="utf-8",
+    )
+    program = {
+        "steps": [
+            {
+                "op": "csv_extract",
+                "id": "rows",
+                "connection_id": "test_fs",
+                "path": csv_path.name,
+                "header": False,
+                "delimiter": "\t",
+                "key_column": 0,
+                "column": 3,
+                "match": [{"column": 1, "value": "A1"}, {"column": 2, "value": "150"}],
+                "multi": True,
+            },
+            {"op": "aggregate", "id": "total", "source": "$rows", "func": "sum"},
+        ],
+        "return": "$total",
+    }
+    interp = DSLInterpreter()
+    prefill, evidence = await interp.execute([_plan("ef", program)], "P1", db_session)
+
+    assert prefill["ef"] == 300.0
+    assert evidence["ef"]["trace"][0]["output"] == ["100", "200"]
+
+
+@pytest.mark.asyncio
+async def test_interpreter_csv_bom_and_multi_false(db_session: AsyncSession, fs_root: Path) -> None:
+    """BOM付きUTF-8でも列名が壊れず一致。multi=false の複数一致は先頭採用＋件数記録。"""
+    csv_path = fs_root / "bom.csv"
+    csv_path.write_text("patient_id,v\nP1,first\nP1,second\n", encoding="utf-8-sig")
+    program = {
+        "steps": [
+            {
+                "op": "csv_extract",
+                "id": "r",
+                "connection_id": "test_fs",
+                "path": csv_path.name,
+                "key_column": "patient_id",  # BOM が剥がれていないと列名不一致になる
+                "column": "v",
+            }
+        ],
+        "return": "$r",
+    }
+    interp = DSLInterpreter()
+    prefill, evidence = await interp.execute([_plan("b", program)], "P1", db_session)
+
+    assert prefill["b"] == "first"  # multi=false → 先頭
+    assert evidence["b"]["trace"][0]["matched_count"] == 2
+    assert "複数行" in evidence["b"]["trace"][0]["warning"]  # 絞り不足の注記
+
+
+@pytest.mark.asyncio
+async def test_interpreter_csv_ref_in_match_value(db_session: AsyncSession, fs_root: Path) -> None:
+    """match の value が前stepの $id を参照できる（複合キーを動的に与える）。"""
+    csv_path = fs_root / "m.csv"
+    csv_path.write_text("patient_id,adm_id,v\nP1,A1,10\nP1,A2,20\n", encoding="utf-8")
+    program = {
+        "steps": [
+            {
+                "op": "transform",
+                "id": "adm",
+                "input": "raw",
+                "rule": {"type": "code_map", "map": {"raw": "A2"}},
+            },
+            {
+                "op": "csv_extract",
+                "id": "r",
+                "connection_id": "test_fs",
+                "path": csv_path.name,
+                "key_column": "patient_id",
+                "column": "v",
+                "match": [{"column": "adm_id", "value": "$adm"}],
+            },
+        ],
+        "return": "$r",
+    }
+    interp = DSLInterpreter()
+    prefill, _ = await interp.execute([_plan("m", program)], "P1", db_session)
+
+    assert prefill["m"] == "20"
+
+
+@pytest.mark.asyncio
+async def test_interpreter_csv_duplicate_header_rejected(
+    db_session: AsyncSession, fs_root: Path
+) -> None:
+    """同名ヘッダの列名指定は後勝ちで黙読みせず明示エラーにする。"""
+    csv_path = fs_root / "dup.csv"
+    csv_path.write_text("patient_id,v,v\nP1,10,20\n", encoding="utf-8")
+    program = {
+        "steps": [
+            {
+                "op": "csv_extract",
+                "id": "r",
+                "connection_id": "test_fs",
+                "path": csv_path.name,
+                "key_column": "patient_id",
+                "column": "v",  # 重複列名
+            }
+        ],
+        "return": "$r",
+    }
+    interp = DSLInterpreter()
+    prefill, evidence = await interp.execute([_plan("d", program)], "P1", db_session)
+
+    assert "d" not in prefill
+    assert "重複" in evidence["d"]["trace"][0]["error"]
+
+
+@pytest.mark.asyncio
+async def test_interpreter_csv_missing_file_records_error(
+    db_session: AsyncSession, fs_root: Path
+) -> None:
+    program = {
+        "steps": [
+            {
+                "op": "csv_extract",
+                "id": "r",
+                "connection_id": "test_fs",
+                "path": "nope.csv",
+                "key_column": "patient_id",
+                "column": "v",
+            }
+        ],
+        "return": "$r",
+    }
+    interp = DSLInterpreter()
+    prefill, evidence = await interp.execute([_plan("n", program)], "P1", db_session)
+
+    assert "n" not in prefill
+    assert "見つかりません" in evidence["n"]["trace"][0]["error"]
+
+
+# --------------------------------------------------------------------------- #
+# step が1つも無いプログラム
+# --------------------------------------------------------------------------- #
+
+
+def test_an_empty_program_is_valid_because_it_is_the_manual_fallback_shape() -> None:
+    """空の `steps` は検証を通る。**意図した振る舞い**である。
+
+    コンパイラは「manual 中心で自動化できない項目は、空の steps と return:null を返してよい」
+    と指示し（`COMPILE_SYSTEM_PROMPT`）、実行側も step が無い項目を `needs_input` として扱う。
+    ここで弾くと、手入力へ縮退した正当なプランを確定できなくなる。
+    """
+    assert validate_program({"params": [], "steps": []}) == []
+    assert validate_program({"steps": [], "return": None}) == []
+
+
+def test_is_empty_program_tells_the_empty_shape_apart_from_a_program_with_steps() -> None:
+    """検証では区別できないので、集計の側が別に数えるための述語。"""
+    from kawasemi.ai_input.dsl import is_empty_program
+
+    assert is_empty_program({"params": [], "steps": []}) is True
+    assert is_empty_program({"steps": [], "return": None}) is True
+    assert is_empty_program({}) is True
+    assert is_empty_program({"steps": None}) is True
+    one = {"steps": [{"op": "sql_extract", "id": "a", "sql": "SELECT 1"}], "return": "$a"}
+    assert is_empty_program(one) is False
+    # needs_input の step も step である（空ではない。人の補完を待つ形）
+    assert (
+        is_empty_program({"steps": [{"op": "sql_extract", "id": "a", "needs_input": True}]})
+        is False
+    )

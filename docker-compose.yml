@@ -1,0 +1,61 @@
+services:
+  kawasemi:
+    build: .
+    ports:
+      - "8000:8000"
+    # SECRET_KEY / CSRF_SECRET_KEY などは .env から渡す（必須。空だと起動しない）。
+    # 下の environment は .env より優先される。
+    env_file: .env
+    environment:
+      - APP_NAME=KAWASEMI
+      - ENVIRONMENT=production
+      # .env.example の DEBUG=true は production では拒否されるので明示的に切る
+      - DEBUG=false
+      - DATABASE_URL=sqlite+aiosqlite:////app/data/kawasemi.db
+      - LOG_LEVEL=INFO
+      - LOG_FORMAT=json
+      - QUESTIONNAIRE_OUTPUT_DIR=/app/output/questionnaires
+      - QUESTIONNAIRE_RESPONSE_OUTPUT_DIR=/app/output/questionnaire_responses
+      # LLM の接続先（AI 機能を使う場合）。コンテナ内の localhost はコンテナ自身を指すので、
+      # ホストや別サーバの推論サーバを使うときはそのアドレスを書く。
+      # - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      # vLLM を使う場合は LLM_PROVIDER も切り替える（URL に /v1 は付けない）。
+      # - LLM_PROVIDER=vllm
+      # - VLLM_BASE_URL=http://host.docker.internal:8100
+    # Linux で host.docker.internal（ホストの推論サーバ）を使う場合
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"
+    volumes:
+      - kawasemi-data:/app/data
+      - kawasemi-output:/app/output
+      # 施設の設定（site.example/ を複製して作ったもの）を使う場合。アプリは読むだけなので :ro。
+      # - ./site:/app/site:ro
+      # リソース索引（ホストで kawasemi-indexer が var/resource_index/ に作ったもの）を使う場合。
+      # アプリは索引を読むだけなので :ro。索引を作り直したらコンテナを再起動する。
+      # - ./var/resource_index:/app/var/resource_index:ro
+    restart: unless-stopped
+    healthcheck:
+      # python:3.12-slim には curl が無い
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # PostgreSQLを使用する場合（オプション）
+  # postgres:
+  #   image: postgres:17-alpine
+  #   environment:
+  #     - POSTGRES_USER=kawasemi
+  #     - POSTGRES_PASSWORD=password
+  #     - POSTGRES_DB=kawasemi
+  #   volumes:
+  #     - postgres-data:/var/lib/postgresql/data
+  #   ports:
+  #     - "5432:5432"
+  #   restart: unless-stopped
+
+volumes:
+  kawasemi-data:
+  kawasemi-output:
+  # postgres-data:

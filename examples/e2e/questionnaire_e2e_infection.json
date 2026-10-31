@@ -1,0 +1,101 @@
+{
+  "resourceType": "Questionnaire",
+  "id": "kawasemi-e2e-infection",
+  "url": "http://kawasemi.example/Questionnaire/e2e-infection",
+  "version": "1.0.0",
+  "name": "E2EInfection",
+  "title": "入院感染症発生報告票（E2E 試験用・架空様式）",
+  "status": "active",
+  "date": "2026-10-22",
+  "publisher": "KAWASEMI Project (E2E 試験用)",
+  "description": "E2E 試験環境のための架空の感染症様式。実在の様式は写していない。14 項目を、DWH の列に在る値（生年月日・性別・入院年月日・抗菌薬投与日数）、item_code で縦持ちの観察記録（最高体温・体重）、マスタ結合が要る検査結果（CRP）、本文を LLM で読む値（診断名）、ファイル（手書き同意書の同意日）、FHIR（起因微生物・重症度）、CSV（抗菌薬投与の有無）、DWH が空なら本文へ落ちるフォールバック（発症日）で取得する。記入要領は examples/e2e/references/e2e_infection_manual.md。",
+  "item": [
+    {
+      "linkId": "patient_id",
+      "text": "[1] 登録番号",
+      "type": "string",
+      "required": true
+    },
+    {
+      "linkId": "birth_date",
+      "text": "[2] 生年月日",
+      "type": "date",
+      "required": true
+    },
+    {
+      "linkId": "sex",
+      "text": "[3] 性別",
+      "type": "choice",
+      "required": true,
+      "answerOption": [
+        {"valueCoding": {"system": "http://kawasemi.example/CodeSystem/e2e-sex", "code": "1", "display": "男"}},
+        {"valueCoding": {"system": "http://kawasemi.example/CodeSystem/e2e-sex", "code": "2", "display": "女"}}
+      ]
+    },
+    {
+      "linkId": "admission_date",
+      "text": "[4] 入院年月日",
+      "type": "date",
+      "required": true
+    },
+    {
+      "linkId": "onset_date",
+      "text": "[5] 感染症の発症日",
+      "type": "date"
+    },
+    {
+      "linkId": "diagnosis_text",
+      "text": "[6] 感染症診断名",
+      "type": "string"
+    },
+    {
+      "linkId": "max_body_temp",
+      "text": "[7] 発症後の最高体温（℃）",
+      "type": "decimal"
+    },
+    {
+      "linkId": "body_weight",
+      "text": "[8] 入院時体重（kg）",
+      "type": "decimal"
+    },
+    {
+      "linkId": "crp_on_admission",
+      "text": "[9] 入院時 CRP 値（mg/dL）",
+      "type": "decimal"
+    },
+    {
+      "linkId": "pathogen",
+      "text": "[10] 分離された起因微生物",
+      "type": "string"
+    },
+    {
+      "linkId": "severity",
+      "text": "[11] 重症度分類",
+      "type": "choice",
+      "answerOption": [
+        {"valueCoding": {"system": "http://kawasemi.example/CodeSystem/e2e-severity", "code": "1", "display": "軽症"}},
+        {"valueCoding": {"system": "http://kawasemi.example/CodeSystem/e2e-severity", "code": "2", "display": "中等症"}},
+        {"valueCoding": {"system": "http://kawasemi.example/CodeSystem/e2e-severity", "code": "3", "display": "重症"}}
+      ]
+    },
+    {
+      "linkId": "antibiotic_given",
+      "text": "[12] 抗菌薬投与の有無",
+      "type": "choice",
+      "answerOption": [
+        {"valueCoding": {"system": "http://kawasemi.example/CodeSystem/e2e-yesno", "code": "1", "display": "あり"}},
+        {"valueCoding": {"system": "http://kawasemi.example/CodeSystem/e2e-yesno", "code": "2", "display": "なし"}}
+      ]
+    },
+    {
+      "linkId": "antibiotic_days",
+      "text": "[13] 抗菌薬投与日数",
+      "type": "integer"
+    },
+    {
+      "linkId": "consent_date",
+      "text": "[14] 研究参加同意取得日",
+      "type": "date"
+    }
+  ]
+}

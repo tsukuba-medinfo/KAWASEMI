@@ -1,0 +1,10 @@
+# 典拠の範囲（E2E 試験環境。kawasemi/ai_input/reference_scope.py の形式）
+#
+# references は索引の file 単位の payload.path（`--file-source examples/e2e/references` 起点の相対パス）。
+# E2E の様式には架空の記入要領 1 冊だけを典拠として許す。
+scopes:
+  - name: 入院感染症発生報告票（E2E 試験用・架空）
+    questionnaires:
+      - http://kawasemi.example/Questionnaire/e2e-infection
+    references:
+      - e2e_infection_manual.md

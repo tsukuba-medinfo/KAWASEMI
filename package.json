@@ -1,0 +1,8 @@
+{
+  "name": "kawasemi-checks",
+  "private": true,
+  "description": "CI の JS 側の検査だけが使う（アプリは npm に依存しない）",
+  "devDependencies": {
+    "jsdom": "24.1.3"
+  }
+}

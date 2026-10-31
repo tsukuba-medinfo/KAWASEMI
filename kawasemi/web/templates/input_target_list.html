@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+
+{% block title %}入力対象一覧 - KAWASEMI{% endblock %}
+
+{% block content %}
+{% if filter_warnings %}
+<div class="alert alert-warning" role="alert">
+    {% for w in filter_warnings %}<div>{{ w }}</div>{% endfor %}
+</div>
+{% endif %}
+<div class="card">
+    <div class="page-head">
+        <h2>入力対象一覧</h2>
+    </div>
+
+    {% set pending_count = all_targets | selectattr('status', 'equalto', 'pending') | list | length %}
+    {% set in_progress_count = all_targets | selectattr('status', 'equalto', 'in_progress') | list | length %}
+    {% set completed_count = all_targets | selectattr('status', 'equalto', 'completed') | list | length %}
+
+    <div class="summary-row">
+        <div class="summary-item"><div class="count">{{ pending_count }}</div><div class="label">未着手</div></div>
+        <div class="summary-item"><div class="count">{{ in_progress_count }}</div><div class="label">入力中</div></div>
+        <div class="summary-item"><div class="count">{{ completed_count }}</div><div class="label">完了</div></div>
+    </div>
+
+    <form method="get" class="filter-bar">
+        <label>データセット:</label>
+        <select name="dataset_id">
+            <option value="">すべて</option>
+            {% for ds in datasets %}
+            <option value="{{ ds.id }}" {% if filters.dataset_id == ds.id %}selected{% endif %}>
+                {{ ds.name }}
+            </option>
+            {% endfor %}
+        </select>
+
+        <label>Questionnaire:</label>
+        <select name="questionnaire_id">
+            <option value="">すべて</option>
+            {% for q in questionnaires %}
+            <option value="{{ q.id }}" {% if filters.questionnaire_id == q.id %}selected{% endif %}>
+                {{ q.title or q.fhir_id }}
+            </option>
+            {% endfor %}
+        </select>
+
+        <label>ステータス:</label>
+        <select name="status">
+            <option value="">すべて</option>
+            {% for s in statuses %}
+            <option value="{{ s }}" {% if filters.status == s %}selected{% endif %}>
+                {{ status_labels[s] }}
+            </option>
+            {% endfor %}
+        </select>
+
+        <button type="submit" class="btn btn--sm btn--secondary">絞り込み</button>
+        {% if filters.status or filters.dataset_id or filters.questionnaire_id %}
+        <a href="{{ base_path() }}/input-targets" class="btn btn--sm btn--secondary">クリア</a>
+        {% endif %}
+    </form>
+</div>
+
+{% if input_targets %}
+{% for t in input_targets %}
+<div class="card">
+    <div class="page-head" style="margin-bottom: 0;">
+        <div>
+            <h3>{{ t.questionnaire.title or t.questionnaire.fhir_id }}</h3>
+            <p class="meta-line"><strong>Patient ID:</strong> {{ t.patient_id }}</p>
+            <div class="tag-list">
+                <span class="tag">{{ t.dataset.name }}</span>
+                {% set badge = {'pending': 'neutral', 'in_progress': 'info', 'completed': 'success'}.get(t.status, 'neutral') %}
+                <span class="badge badge--{{ badge }}">{{ status_labels[t.status] }}</span>
+                {% if t.started_by %}
+                <span class="help-text">入力者: {{ t.started_by.full_name }}</span>
+                {% endif %}
+                {% if t.completed_at %}
+                <span class="help-text">完了: {{ t.completed_at.strftime('%Y-%m-%d') }}</span>
+                {% endif %}
+            </div>
+        </div>
+        <div class="page-head__actions">
+            {% if t.status == 'pending' %}
+            <form action="{{ base_path() }}/input-targets/{{ t.id }}/start" method="post" style="margin: 0;">
+                <button type="submit" class="btn btn--sm btn--primary">入力を開始</button>
+            </form>
+            {% elif t.status == 'in_progress' %}
+                {% if t.started_by_id == current_user.id %}
+                <a href="{{ base_path() }}/forms/{{ t.questionnaire_id }}?patient_id={{ t.patient_id }}&input_target_id={{ t.id }}"
+                   class="btn btn--sm btn--primary">入力を続ける</a>
+                {% else %}
+                <span class="help-text">入力中（{{ t.started_by.full_name if t.started_by else '他ユーザー' }}）</span>
+                {% endif %}
+            {% elif t.status == 'completed' %}
+            <span class="badge badge--success">完了済み</span>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endfor %}
+{% else %}
+<div class="card">
+    <div class="empty-state">
+        <p>条件に一致する入力対象がありません。</p>
+    </div>
+</div>
+{% endif %}
+{% endblock %}

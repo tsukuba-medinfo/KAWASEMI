@@ -1,0 +1,88 @@
+# E2E 試験環境: 接続 dwh の確認済み知識層（indexer の `ingest` の入力）
+#
+#   kawasemi-indexer ingest examples/e2e/knowledge.yaml \
+#       --out <出力先> --dsn sqlite+aiosqlite:///var/e2e/dwh.db
+#
+# 決定的な層では `draft-knowledge`（LLM 下書き）を飛ばし、ここを人が確認した
+# 知識層として扱う。表・列の論理名は定義書（definitions/dwh_definition.csv）から結合し、
+# 患者キー・表役割・患者で絞らない表・マスタの取込・値ドメインをここで宣言する。
+#
+# db_group は接続 ID と同じ `dwh` にする（builder が `connection_id = db_group` を流用するため。
+# 索引の payload.connection_id が connections.e2e.yaml の `dwh` と一致する）。
+# 定義書のパスはリポジトリ直下から見た相対パス（`kawasemi e2e setup` と pytest の cwd）。
+#
+# 実行用の識別子（payload.physical の schema/table/column）は ingest が reflection から付ける。
+# SQLite の既定スキーマ `main` がそのまま実行先のスキーマなので `physical_schemas` は書かない
+# （reflection に使う DB と実行先でスキーマ名が違う施設では、ここに実行先のスキーマを書く）。
+
+connection_id: dwh
+db_group: dwh
+
+tabular_sources:
+  - path: examples/e2e/definitions/dwh_definition.csv
+    header_row: 1
+    columns:
+      table_id: 表物理名
+      table_logical: 表論理名
+      physical_name: カラム物理名
+      logical_name: カラム論理名
+      notes: 備考
+    table_match: table_id
+
+table_roles:
+  patients: patient_data
+  admissions: patient_data
+  infection_cases: patient_data
+  vital_signs: patient_data
+  observations: patient_data
+  lab_results: patient_data
+  item_counts: patient_data # 件数の集計表（patient_unscoped_tables にも載せる。理由は docs/e2e_assets.md §2）
+  sex_codes: master
+  lab_tests: master
+  observation_items: master
+  measurements: master
+
+# 患者キー列（表ごと）。DWH は mrn を 10 桁ゼロ詰めで格納する。
+# **物理整形（physical_format {pad: 10}）はここにも索引にも書けない**（indexer に語彙が無い）。
+# 接続レジストリ connections.e2e.yaml の dwh.key_formats に書き、コンパイラが key_type=mrn の
+# step へ焼き込む。
+patient_keys:
+  patients: {physical_name: patient_no, key_type: mrn}
+  admissions: {physical_name: patient_no, key_type: mrn}
+  infection_cases: {physical_name: patient_no, key_type: mrn}
+  vital_signs: {physical_name: patient_no, key_type: mrn}
+  observations: {physical_name: patient_no, key_type: mrn}
+  lab_results: {physical_name: patient_no, key_type: mrn}
+
+# 患者で絞らない表（マスタ・件数）。人が確認したものだけを書く。
+patient_unscoped_tables:
+  - sex_codes
+  - lab_tests
+  - observation_items
+  - measurements
+  - item_counts
+
+# マスタの code→label 取込（master の表だけ内容を読む）。
+master_tables:
+  sex_codes: {code_column: sex_code, label_column: label}
+  lab_tests: {code_column: test_code, label_column: test_name}
+  observation_items: {code_column: item_code, label_column: item_name}
+  # 測定名（体温・体重・体脂肪率…）をマスタ単位にする。主キーは (measure_code, seq) だが indexer の
+  # code_column は 1 列なので、同じ measure_code の seq は master 単位では 1 件に畳まれる
+  # （builder が unit_id `master:dwh:measurements:m_weight` で重複排除し、先頭の seq の名称が残る）。
+  measurements: {code_column: measure_code, label_column: measure_name}
+
+# 値ドメイン注釈（コード列 → マスタ）。マスタの語彙がコード列の search_text に畳み込まれる。
+value_domains:
+  patients.sex_code: sex_codes
+  lab_results.test_code: lab_tests
+  vital_signs.item_code: observation_items
+  observations.item_code: observation_items
+
+# 定義書に無い列の補間（人が確認したので inferred=false / confirmed=true）。
+enrichments:
+  item_counts.n_numeric:
+    logical_name: 数値として読める行数
+    notes: value_text / value_num が数値に変換できる行の数
+    inferred: false
+    confirmed: true

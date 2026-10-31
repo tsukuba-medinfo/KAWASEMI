@@ -1,0 +1,17 @@
+# 典拠の範囲：様式ごとに、臨床的意味の典拠にしてよい規約文書を列挙する（kawasemi/ai_input/reference_scope.py）
+#
+# - questionnaires: 様式の Questionnaire.url（**完全一致**。前方一致にしないのは、URL が領域を表さない様式があるため）
+# - references:     索引の file 単位の payload.path（規約文書のファイル名）
+#
+# このファイルが**無ければ**範囲を設けない（全文書が典拠候補）。**あれば**、ここに載っていない様式には典拠を出さない。
+# 様式と無関係な領域の規約から定義を写すより、何も出さない方を選ぶ。
+scopes:
+  - name: 感染症登録（架空の例）
+    questionnaires:
+      - http://kawasemi.example/Questionnaire/e2e-infection
+    references:
+      - registry_manual.pdf
+  # 規約文書がまだ無い領域の様式は、届くまで典拠なし（ここに載せない）
+  #
+  # **ここに無い様式は典拠が0件になる。** 施設で使う同じ領域の様式（版違い・取り込み版等）は
+  # すべて url を列挙すること。読み直しはファイルの更新時刻で行うので、保存すれば再起動なしで効く。

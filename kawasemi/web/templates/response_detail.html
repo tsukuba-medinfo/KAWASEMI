@@ -1,0 +1,155 @@
+{% extends "base.html" %}
+
+{% block title %}回答詳細 - KAWASEMI{% endblock %}
+
+{% block content %}
+<div class="breadcrumb">
+    <a href="{{ base_path() }}/">ホーム</a> &gt;
+    <a href="{{ base_path() }}/questionnaires?mode=response">QuestionnaireResponse管理</a> &gt;
+    <a href="{{ base_path() }}/questionnaires/{{ response.questionnaire_id }}/responses">回答一覧</a> &gt;
+    詳細
+</div>
+
+<div class="card">
+    <div class="page-head">
+        <h2>回答詳細</h2>
+        <div class="page-head__actions">
+            {% if can_edit %}
+            <a href="{{ base_path() }}/responses/{{ response.id }}/edit" class="btn btn--sm btn--primary">編集</a>
+            {% endif %}
+            <form action="{{ base_path() }}/api/v100/questionnaire-responses/{{ response.id }}/export" method="POST" style="margin: 0;">
+                <button type="submit" class="btn btn--sm btn--secondary">エクスポート</button>
+            </form>
+        </div>
+    </div>
+
+    <h3 class="section-title">基本情報</h3>
+    <table class="meta-table">
+        <tr>
+            <th>内部ID</th>
+            <td>{{ response.id }}</td>
+        </tr>
+        <tr>
+            <th>FHIR ID</th>
+            <td>{{ response.fhir_id }}</td>
+        </tr>
+        <tr>
+            <th>Questionnaire</th>
+            <td>
+                <a href="{{ base_path() }}/questionnaires/{{ response.questionnaire_id }}">{{ questionnaire.title or 'タイトルなし' }}</a>
+                (ID: {{ response.questionnaire_id }})
+            </td>
+        </tr>
+        <tr>
+            <th>患者</th>
+            <td>{{ response.subject or '-' }}</td>
+        </tr>
+        <tr>
+            <th>作成者</th>
+            <td>{{ response.author or '-' }}</td>
+        </tr>
+        <tr>
+            <th>作成日時</th>
+            <td>{{ response.authored or '-' }}</td>
+        </tr>
+        <tr>
+            <th>ステータス</th>
+            <td>
+                {% set badge = {'completed': 'success', 'in-progress': 'warning', 'amended': 'info'}.get(response.status, 'neutral') %}
+                <span class="badge badge--{{ badge }}">{{ response.status }}</span>
+            </td>
+        </tr>
+        <tr>
+            <th>検証状態</th>
+            <td>
+                {% set vbadge = {'verified': 'success', 'unverified': 'warning', 'rejected': 'danger'}.get(response.verification_status, 'neutral') %}
+                <span class="badge badge--{{ vbadge }}">
+                    {{ verification_labels.get(response.verification_status, response.verification_status) }}
+                </span>
+                {% if response.verification_status == 'verified' and response.verified_at %}
+                （{{ response.verified_at.strftime('%Y-%m-%d %H:%M') }} 検証）
+                {% endif %}
+            </td>
+        </tr>
+        {% if response.verification_status == 'rejected' and response.rejection_reason %}
+        <tr>
+            <th>差戻し理由</th>
+            <td class="error">{{ response.rejection_reason }}</td>
+        </tr>
+        {% endif %}
+        <tr>
+            <th>登録日時</th>
+            <td>{{ response.created_at.strftime('%Y-%m-%d %H:%M:%S') if response.created_at else '-' }}</td>
+        </tr>
+        <tr>
+            <th>更新日時</th>
+            <td>{{ response.updated_at.strftime('%Y-%m-%d %H:%M:%S') if response.updated_at else '-' }}</td>
+        </tr>
+    </table>
+
+    {% if can_verify %}
+    <h3 class="section-title">検証（検証者）</h3>
+    <div class="page-head__actions">
+        <form action="{{ base_path() }}/responses/{{ response.id }}/verify" method="POST" style="margin: 0;">
+            <button type="submit" class="btn btn--sm btn--success">検証済みにする</button>
+        </form>
+        <form action="{{ base_path() }}/responses/{{ response.id }}/reject" method="POST"
+              style="margin: 0; display: flex; gap: 0.5rem; align-items: center;">
+            <input type="text" name="reason" placeholder="差戻し理由（必須）" required style="width: 18rem;">
+            <button type="submit" class="btn btn--sm btn--danger">差戻し</button>
+        </form>
+    </div>
+    {% endif %}
+
+    <h3 class="section-title">回答内容</h3>
+    {% if answers %}
+    <div class="table-wrap">
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>Link ID</th>
+                    <th>質問</th>
+                    <th>回答</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for answer in answers %}
+                <tr>
+                    <td>{{ answer.link_id }}</td>
+                    <td>{{ answer.text or '-' }}</td>
+                    <td><span class="mono">{{ answer.value }}</span></td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <p class="help-text">回答データがありません。</p>
+    {% endif %}
+
+    <h3 class="section-title">
+        FHIRリソース (JSON)
+        <button type="button" class="btn btn--sm btn--secondary" style="float: right;" onclick="copyJson()">コピー</button>
+    </h3>
+    <div class="json-view">
+        <pre id="jsonContent">{{ response.content | tojson(indent=2) }}</pre>
+    </div>
+</div>
+
+<div class="back-link">
+    <a href="{{ base_path() }}/questionnaires/{{ response.questionnaire_id }}/responses">&larr; 回答一覧に戻る</a>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function copyJson() {
+    const jsonContent = document.getElementById('jsonContent').textContent;
+    navigator.clipboard.writeText(jsonContent).then(function() {
+        alert('JSONをコピーしました');
+    }, function(err) {
+        alert('コピーに失敗しました');
+    });
+}
+</script>
+{% endblock %}

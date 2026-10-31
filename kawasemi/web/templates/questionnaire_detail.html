@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+
+{% block title %}Questionnaire詳細 - KAWASEMI{% endblock %}
+
+{% block content %}
+<div class="breadcrumb">
+    <a href="{{ base_path() }}/">ホーム</a> &gt; <a href="{{ base_path() }}/questionnaires">Questionnaire管理</a> &gt; 詳細
+</div>
+
+<div class="card">
+    <div class="page-head">
+        <h2>{{ questionnaire.title or 'タイトルなし' }}</h2>
+        <div class="page-head__actions">
+            {# 内容の編集は設計者。管理者はファイルの取り込みと削除だけ #}
+            {% if current_user.active_role == 'designer' %}
+            <a href="{{ base_path() }}/questionnaires/{{ questionnaire.id }}/edit" class="btn btn--sm btn--primary">編集</a>
+            <a href="{{ base_path() }}/forms/{{ questionnaire.id }}" class="btn btn--sm btn--secondary">入力フォーム</a>
+            {% endif %}
+        </div>
+    </div>
+
+    <h3 class="section-title">基本情報</h3>
+    <table class="meta-table">
+        <tr>
+            <th>内部ID</th>
+            <td>{{ questionnaire.id }}</td>
+        </tr>
+        <tr>
+            <th>FHIR ID</th>
+            <td>{{ questionnaire.fhir_id }}</td>
+        </tr>
+        <tr>
+            <th>タイトル</th>
+            <td>{{ questionnaire.title or '-' }}</td>
+        </tr>
+        <tr>
+            <th>ステータス</th>
+            <td>
+                {% set badge = {'active': 'success', 'draft': 'warning', 'retired': 'danger'}.get(questionnaire.status, 'neutral') %}
+                <span class="badge badge--{{ badge }}">{{ questionnaire.status }}</span>
+            </td>
+        </tr>
+        <tr>
+            <th>バージョン</th>
+            <td>{{ questionnaire.version or '-' }}</td>
+        </tr>
+        <tr>
+            <th>URL</th>
+            <td>{{ questionnaire.url or '-' }}</td>
+        </tr>
+        <tr>
+            <th>作成日時</th>
+            <td>{{ questionnaire.created_at.strftime('%Y-%m-%d %H:%M:%S') if questionnaire.created_at else '-' }}</td>
+        </tr>
+        <tr>
+            <th>更新日時</th>
+            <td>{{ questionnaire.updated_at.strftime('%Y-%m-%d %H:%M:%S') if questionnaire.updated_at else '-' }}</td>
+        </tr>
+    </table>
+
+    <h3 class="section-title">
+        FHIRリソース (JSON)
+        <button type="button" class="btn btn--sm btn--secondary" style="float: right;" onclick="copyJson()">コピー</button>
+    </h3>
+    <div class="json-view">
+        <pre id="jsonContent">{{ questionnaire.content | tojson(indent=2) }}</pre>
+    </div>
+</div>
+
+<div class="back-link">
+    <a href="{{ base_path() }}/questionnaires">&larr; 一覧に戻る</a>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function copyJson() {
+    const jsonContent = document.getElementById('jsonContent').textContent;
+    navigator.clipboard.writeText(jsonContent).then(function() {
+        alert('JSONをコピーしました');
+    }, function(err) {
+        alert('コピーに失敗しました');
+    });
+}
+</script>
+{% endblock %}

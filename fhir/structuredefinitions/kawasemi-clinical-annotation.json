@@ -1,0 +1,254 @@
+{
+  "resourceType": "StructureDefinition",
+  "id": "kawasemi-clinical-annotation",
+  "url": "https://kawasemi.example.jp/fhir/StructureDefinition/clinical-annotation",
+  "version": "1.0.0",
+  "name": "KawasemiClinicalAnnotation",
+  "title": "KAWASEMI 臨床的意味アノテーション",
+  "status": "draft",
+  "experimental": true,
+  "date": "2026-08-04",
+  "publisher": "KAWASEMI",
+  "description": "Questionnaire の各項目に、その項目が臨床的に何を指すか（施設非依存の記述）と、その記述の典拠を付ける拡張。KAWASEMI のステップ1（役割1: 臨床的意味）の成果物を、Questionnaire を配布された施設が根拠ごと読めるようにするためのもの。データ所在（施設固有）は含めない。",
+  "purpose": "配布された Questionnaire の受け手が、各項目の記述の根拠（どの規約文書のどのページか）を辿れるようにする。典拠の本文抜粋（snippet）と施設のインフラ識別子は意図的に含めない。",
+  "fhirVersion": "4.3.0",
+  "kind": "complex-type",
+  "abstract": false,
+  "context": [
+    {
+      "type": "element",
+      "expression": "Questionnaire.item"
+    }
+  ],
+  "type": "Extension",
+  "baseDefinition": "http://hl7.org/fhir/StructureDefinition/Extension",
+  "derivation": "constraint",
+  "differential": {
+    "element": [
+      {
+        "id": "Extension",
+        "path": "Extension",
+        "short": "臨床的意味と典拠",
+        "min": 0,
+        "max": "1"
+      },
+      {
+        "id": "Extension.extension",
+        "path": "Extension.extension",
+        "slicing": {
+          "discriminator": [
+            {
+              "type": "value",
+              "path": "url"
+            }
+          ],
+          "ordered": false,
+          "rules": "open"
+        },
+        "min": 0,
+        "max": "*"
+      },
+      {
+        "id": "Extension.extension:annotation",
+        "path": "Extension.extension",
+        "sliceName": "annotation",
+        "short": "臨床的意味の記述（施設非依存）",
+        "min": 1,
+        "max": "1"
+      },
+      {
+        "id": "Extension.extension:annotation.url",
+        "path": "Extension.extension.url",
+        "fixedUri": "annotation"
+      },
+      {
+        "id": "Extension.extension:annotation.value[x]",
+        "path": "Extension.extension.value[x]",
+        "min": 1,
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "Extension.extension:citation",
+        "path": "Extension.extension",
+        "sliceName": "citation",
+        "short": "記述の典拠（規約文書のどこか）",
+        "min": 0,
+        "max": "*"
+      },
+      {
+        "id": "Extension.extension:citation.extension",
+        "path": "Extension.extension.extension",
+        "slicing": {
+          "discriminator": [
+            {
+              "type": "value",
+              "path": "url"
+            }
+          ],
+          "ordered": false,
+          "rules": "open"
+        },
+        "min": 0,
+        "max": "*"
+      },
+      {
+        "id": "Extension.extension:citation.extension:unitId",
+        "path": "Extension.extension.extension",
+        "sliceName": "unitId",
+        "short": "索引上のアドレス（file:{path}#p{page}:{start}-{end}）",
+        "min": 0,
+        "max": "1"
+      },
+      {
+        "id": "Extension.extension:citation.extension:unitId.url",
+        "path": "Extension.extension.extension.url",
+        "fixedUri": "unitId"
+      },
+      {
+        "id": "Extension.extension:citation.extension:unitId.value[x]",
+        "path": "Extension.extension.extension.value[x]",
+        "min": 1,
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "Extension.extension:citation.extension:source",
+        "path": "Extension.extension.extension",
+        "sliceName": "source",
+        "short": "人が読む出典表記（path / page / charRange から機械的に組み立てる）",
+        "min": 0,
+        "max": "1"
+      },
+      {
+        "id": "Extension.extension:citation.extension:source.url",
+        "path": "Extension.extension.extension.url",
+        "fixedUri": "source"
+      },
+      {
+        "id": "Extension.extension:citation.extension:source.value[x]",
+        "path": "Extension.extension.extension.value[x]",
+        "min": 1,
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "Extension.extension:citation.extension:page",
+        "path": "Extension.extension.extension",
+        "sliceName": "page",
+        "short": "ページ番号（PDF のとき）",
+        "min": 0,
+        "max": "1"
+      },
+      {
+        "id": "Extension.extension:citation.extension:page.url",
+        "path": "Extension.extension.extension.url",
+        "fixedUri": "page"
+      },
+      {
+        "id": "Extension.extension:citation.extension:page.value[x]",
+        "path": "Extension.extension.extension.value[x]",
+        "min": 1,
+        "type": [
+          {
+            "code": "integer"
+          }
+        ]
+      },
+      {
+        "id": "Extension.extension:citation.extension:charRange",
+        "path": "Extension.extension.extension",
+        "sliceName": "charRange",
+        "short": "原文中の文字位置（start-end）",
+        "min": 0,
+        "max": "1"
+      },
+      {
+        "id": "Extension.extension:citation.extension:charRange.url",
+        "path": "Extension.extension.extension.url",
+        "fixedUri": "charRange"
+      },
+      {
+        "id": "Extension.extension:citation.extension:charRange.value[x]",
+        "path": "Extension.extension.extension.value[x]",
+        "min": 1,
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "Extension.extension:citation.extension:mime",
+        "path": "Extension.extension.extension",
+        "sliceName": "mime",
+        "short": "典拠文書の MIME タイプ",
+        "min": 0,
+        "max": "1"
+      },
+      {
+        "id": "Extension.extension:citation.extension:mime.url",
+        "path": "Extension.extension.extension.url",
+        "fixedUri": "mime"
+      },
+      {
+        "id": "Extension.extension:citation.extension:mime.value[x]",
+        "path": "Extension.extension.extension.value[x]",
+        "min": 1,
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "Extension.extension:citation.extension:llmModel",
+        "path": "Extension.extension.extension",
+        "sliceName": "llmModel",
+        "short": "この典拠を差し込んだ LLM のモデル名（AI 利用の開示）",
+        "min": 0,
+        "max": "1"
+      },
+      {
+        "id": "Extension.extension:citation.extension:llmModel.url",
+        "path": "Extension.extension.extension.url",
+        "fixedUri": "llmModel"
+      },
+      {
+        "id": "Extension.extension:citation.extension:llmModel.value[x]",
+        "path": "Extension.extension.extension.value[x]",
+        "min": 1,
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "Extension.extension:citation.url",
+        "path": "Extension.extension.url",
+        "fixedUri": "citation"
+      },
+      {
+        "id": "Extension.url",
+        "path": "Extension.url",
+        "fixedUri": "https://kawasemi.example.jp/fhir/StructureDefinition/clinical-annotation"
+      },
+      {
+        "id": "Extension.value[x]",
+        "path": "Extension.value[x]",
+        "short": "複合 Extension なので値は持たない（旧形式の valueString 単一値は読み込みのみ後方互換で受ける）",
+        "max": "0"
+      }
+    ]
+  }
+}

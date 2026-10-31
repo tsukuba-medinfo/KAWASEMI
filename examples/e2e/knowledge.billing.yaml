@@ -1,0 +1,34 @@
+# E2E 試験環境: 第2接続 billing（医事会計相当）の確認済み知識層
+#
+#   kawasemi-indexer ingest examples/e2e/knowledge.billing.yaml \
+#       --out <出力先> --dsn sqlite+aiosqlite:///var/e2e/billing.db
+#
+# `ingest` は 1 ファイル＝1 接続なので、dwh とは別ファイルにする。出力先も分ける
+# （同じ out_dir に書くと L2/column_index.jsonl が上書きされる）。患者キーは DWH の mrn とは
+# 別の billing_id で、crosswalk（FHIR Patient.identifier）が登録番号から解決する。
+#
+# 実行用の識別子（payload.physical の schema/table/column）は ingest が reflection から付ける。
+# SQLite の既定スキーマ `main` がそのまま実行先のスキーマなので `physical_schemas` は書かない
+# （reflection に使う DB と実行先でスキーマ名が違う施設では、ここに実行先のスキーマを書く）。
+
+connection_id: billing
+db_group: billing
+
+tabular_sources:
+  - path: examples/e2e/definitions/billing_definition.csv
+    header_row: 1
+    columns:
+      table_id: 表物理名
+      table_logical: 表論理名
+      physical_name: カラム物理名
+      logical_name: カラム論理名
+      notes: 備考
+    table_match: table_id
+
+table_roles:
+  billing_stays: patient_data
+  billing_drugs: patient_data
+
+patient_keys:
+  billing_stays: {physical_name: account_no, key_type: billing_id}
+  billing_drugs: {physical_name: account_no, key_type: billing_id}

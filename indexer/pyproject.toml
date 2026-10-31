@@ -1,0 +1,83 @@
+[project]
+name = "kawasemi-indexer"
+version = "0.1.0"
+description = "KAWASEMI リソース索引のビルド/取り込みツール（DB定義書 → column_index.jsonl → embedding索引）"
+authors = [
+    {name = "KAWASEMI Contributors"}
+]
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.12"
+dependencies = [
+    # データモデル・設定
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.6.0",
+    # information_schema reflection（メタのみ）
+    "sqlalchemy>=2.0.35",
+    "aiosqlite>=0.21.0",
+    # embedding 生成（Ollama）。クエリ側と同一モデルを使うこと（CONTRACT.md）
+    "ollama>=0.4.0",
+    # 索引ベクトルの保存・正規化
+    "numpy>=1.24",
+    # 接続レジストリ connections.yaml / 知識層 YAML の読み込み
+    "pyyaml>=6.0",
+    # Excel(.xlsx) 定義書の読み取り
+    "openpyxl>=3.1.5",
+    # reference 文書(PDF)のテキスト抽出・Vision 読取
+    "pypdf>=4.0",
+    "pypdfium2>=4.30",
+    "pillow>=10.0",
+]
+
+[project.optional-dependencies]
+# 施設の外部DBに応じて追加（reflection 用ドライバ）
+postgres = ["psycopg[binary]>=3.1"]
+oracle = ["oracledb>=2.0"]
+# ローカル索引診断 WebUI/JSON API（kawasemi-indexer serve）
+webui = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+]
+dev = [
+    "pytest>=8.3.3",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
+    "ruff>=0.7.4",
+    "mypy>=1.13.0",
+    "types-PyYAML>=6.0.12",
+    # WebUI 層のテスト（TestClient）
+    "fastapi>=0.115",
+    "httpx>=0.27",
+]
+
+[project.scripts]
+kawasemi-indexer = "kawasemi_indexer.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+ignore = [
+    "E501",
+    "N818",
+]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"

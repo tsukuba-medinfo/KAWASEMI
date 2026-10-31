@@ -1,0 +1,242 @@
+{% extends "base.html" %}
+
+{% block title %}{{ dataset.name }} - データセット詳細 - KAWASEMI{% endblock %}
+
+{% block content %}
+<div class="breadcrumb">
+    <a href="{{ base_path() }}/">ホーム</a> &gt; <a href="{{ base_path() }}/datasets">データセット管理</a> &gt; 詳細
+</div>
+
+{% set notice = request.query_params.get('notice') %}
+{% if notice %}<div class="info-box">{{ notice }}</div>{% endif %}
+{% if filter_warnings %}
+<div class="alert alert-warning" role="alert">
+    {% for w in filter_warnings %}<div>{{ w }}</div>{% endfor %}
+</div>
+{% endif %}
+
+<div class="card">
+    <div class="page-head">
+        <div>
+            <h2>{{ dataset.name }}</h2>
+            <div class="meta-line">
+                作成者: {{ dataset.created_by.full_name if dataset.created_by else '-' }} ／
+                作成日: {{ dataset.created_at.strftime('%Y-%m-%d') }}
+            </div>
+            {% if dataset.description %}
+            <p class="help-text">{{ dataset.description }}</p>
+            {% endif %}
+        </div>
+        <div class="page-head__actions">
+            <a href="{{ base_path() }}/datasets" class="btn btn--sm btn--secondary">&larr; 一覧に戻る</a>
+        </div>
+    </div>
+
+    <div>
+        <strong>対象Questionnaire：</strong>
+        <div class="tag-list" style="margin: 0.5rem 0 1rem;">
+            {% for dq in dataset.dataset_questionnaires %}
+            <span class="tag">{{ dq.questionnaire.title or dq.questionnaire.fhir_id }}</span>
+            {% endfor %}
+        </div>
+    </div>
+
+    {% set pending_count = input_targets | selectattr('status', 'equalto', 'pending') | list | length %}
+    {% set in_progress_count = input_targets | selectattr('status', 'equalto', 'in_progress') | list | length %}
+    {% set ai_drafted_count = input_targets | selectattr('status', 'equalto', 'ai_drafted') | list | length %}
+    {% set completed_count = input_targets | selectattr('status', 'equalto', 'completed') | list | length %}
+
+    <div class="summary-row">
+        <div class="summary-item"><div class="count">{{ pending_count }}</div><div class="label">未着手</div></div>
+        <div class="summary-item"><div class="count">{{ in_progress_count }}</div><div class="label">入力中</div></div>
+        <div class="summary-item"><div class="count">{{ ai_drafted_count }}</div><div class="label">AIドラフト</div></div>
+        <div class="summary-item"><div class="count">{{ completed_count }}</div><div class="label">完了</div></div>
+    </div>
+</div>
+
+<!-- バッチAI自動入力 / チェック（Questionnaire ごと） -->
+<div class="card">
+    <h3 class="section-title" style="margin-top: 0;">バッチAI自動入力 / チェック</h3>
+    {% for s in q_summaries %}
+    {% set q = s.questionnaire %}
+    {% set c = s.counts %}
+    <div class="field-card" data-questionnaire="{{ q.id }}">
+        <h4>{{ q.title or q.fhir_id }}</h4>
+        <div class="help-text">
+            未着手 <b>{{ c.pending }}</b> ／ 入力中 <b>{{ c.in_progress }}</b> ／
+            AIドラフト <b>{{ c.ai_drafted }}</b> ／ 完了 <b>{{ c.completed }}</b>
+        </div>
+
+        {% if s.active_job %}
+        <!-- 実行中ジョブ: 進捗ポーリング -->
+        <div class="page-head__actions" data-job="{{ s.active_job.id }}" style="margin-top: 0.7rem;">
+            <span class="databar" style="width: 220px;"><span class="databar__fill" id="bar-{{ s.active_job.id }}"></span></span>
+            <span id="progress-text-{{ s.active_job.id }}" class="help-text">
+                <span class="spinner spinner--sm" id="spin-{{ s.active_job.id }}"></span>実行中…
+            </span>
+            <form method="post" action="{{ base_path() }}/batch-jobs/{{ s.active_job.id }}/cancel" id="cancel-{{ s.active_job.id }}" style="margin: 0;">
+                <button type="submit" class="btn btn--sm btn--secondary">キャンセル</button>
+            </form>
+        </div>
+        <div class="run-status" id="done-{{ s.active_job.id }}"></div>
+        {% else %}
+        <div class="page-head__actions" style="margin-top: 0.7rem;">
+            {% if s.readiness.ready %}
+            <form method="post" action="{{ base_path() }}/datasets/{{ dataset.id }}/batch-autofill"
+                  style="margin: 0; display: inline-flex; gap: 0.4rem; align-items: center;">
+                <input type="hidden" name="questionnaire_id" value="{{ q.id }}">
+                <input type="text" name="study_id" placeholder="試験ID（任意）" style="width: 130px;">
+                <button type="submit" class="btn btn--sm btn--ai"
+                        {% if c.pending == 0 %}disabled title="未着手の対象がありません"{% endif %}>
+                    一括AI自動入力（{{ c.pending }}件）
+                </button>
+            </form>
+            {% else %}
+            <span class="help-text">
+                設計未完了：確認済み {{ s.readiness.confirmed }}件 / 未確認 {{ s.readiness.draft }}件
+                — <a href="{{ base_path() }}/ai-input/questionnaires/{{ q.id }}/plan" class="text-link">ステップ3で確認</a>してください
+            </span>
+            {% endif %}
+
+            {% if c.ai_drafted > 0 %}
+            <a href="{{ base_path() }}/datasets/{{ dataset.id }}/check?questionnaire_id={{ q.id }}"
+               class="btn btn--sm btn--success">
+                チェック開始（{{ c.ai_drafted }}件）
+            </a>
+            {% endif %}
+        </div>
+        {% endif %}
+    </div>
+    {% endfor %}
+</div>
+
+<div class="card">
+    <form method="get" class="filter-bar">
+        <select name="questionnaire_id" onchange="this.form.submit()">
+            <option value="">すべてのQuestionnaire</option>
+            {% for dq in dataset.dataset_questionnaires %}
+            <option value="{{ dq.questionnaire.id }}"
+                    {% if filters.questionnaire_id == dq.questionnaire.id %}selected{% endif %}>
+                {{ dq.questionnaire.title or dq.questionnaire.fhir_id }}
+            </option>
+            {% endfor %}
+        </select>
+
+        <select name="status" onchange="this.form.submit()">
+            <option value="">すべてのステータス</option>
+            {% for st in statuses %}
+            <option value="{{ st }}" {% if filters.status == st %}selected{% endif %}>
+                {{ status_labels[st] }}
+            </option>
+            {% endfor %}
+        </select>
+
+        {% if filters.questionnaire_id or filters.status %}
+        <a href="{{ base_path() }}/datasets/{{ dataset.id }}" class="btn btn--sm btn--secondary">クリア</a>
+        {% endif %}
+    </form>
+
+    {% if input_targets %}
+    <div class="table-wrap">
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>Questionnaire</th>
+                    <th>Patient ID</th>
+                    <th>ステータス</th>
+                    <th>入力者 / レビュー者</th>
+                    <th>完了日時</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for t in input_targets %}
+                <tr>
+                    <td>{{ t.questionnaire.title or t.questionnaire.fhir_id }}</td>
+                    <td>{{ t.patient_id }}</td>
+                    <td>
+                        {% set badge = {'pending': 'neutral', 'in_progress': 'info', 'ai_drafted': 'warning', 'completed': 'success'}.get(t.status, 'neutral') %}
+                        <span class="badge badge--{{ badge }}">{{ status_labels[t.status] }}</span>
+                        {% if t.needs_attention %}<span class="badge badge--warning">⚑ 要確認</span>{% endif %}
+                    </td>
+                    <td>{{ t.started_by.full_name if t.started_by else '-' }}</td>
+                    <td>{{ t.completed_at.strftime('%Y-%m-%d %H:%M') if t.completed_at else '-' }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="empty-state">
+        <p>条件に一致する入力対象がありません。</p>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+// 実行中バッチジョブの進捗をポーリングし、完了を明示してからページを更新する。
+(function () {
+  const jobEls = document.querySelectorAll('[data-job]');
+  jobEls.forEach((el) => {
+    const jobId = el.getAttribute('data-job');
+    const bar = document.getElementById('bar-' + jobId);
+    const text = document.getElementById('progress-text-' + jobId);
+    const spin = document.getElementById('spin-' + jobId);
+    const cancel = document.getElementById('cancel-' + jobId);
+    const done = document.getElementById('done-' + jobId);
+    let timer = null;
+
+    function finish(j) {
+      if (timer) clearInterval(timer);
+      if (bar) bar.style.width = '100%';
+      if (spin) spin.remove();
+      if (cancel) cancel.style.display = 'none';
+
+      // ジョブの最終ステータスで表示を分ける（finished は status != running の意味なので、
+      // キャンセル/失敗を「成功完了」と誤表示しないよう status を優先して判定する）
+      const canceled = j.status === 'canceled' || j.cancel_requested;
+      const failedJob = j.status === 'failed';
+      let cls, headline;
+      if (canceled) { cls = 'status-partial'; headline = 'キャンセルされました'; }
+      else if (failedJob) { cls = 'status-err'; headline = 'エラーで終了しました'; }
+      else if (j.failed) { cls = 'status-err'; headline = '完了（一部失敗あり）'; }
+      else if (j.partial) { cls = 'status-partial'; headline = '完了（一部のみ取得）'; }
+      else { cls = 'status-ok'; headline = '一括AI自動入力が完了しました'; }
+
+      if (text) text.textContent = j.status_label || headline;
+      if (done) {
+        done.className = 'run-status ' + cls;
+        done.style.display = 'block';
+        done.innerHTML =
+          headline + '：成功 ' + j.succeeded + ' / 一部 ' + j.partial + ' / 失敗 ' + j.failed +
+          ' 　<a class="btn btn--sm btn--secondary" href="' + window.location.href + '">結果を表示</a>';
+      }
+      // 件数・チェック導線を反映するため、完了を見せたうえで自動更新する
+      setTimeout(() => window.location.reload(), 2500);
+    }
+
+    async function poll() {
+      try {
+        const resp = await fetch(`{{ base_path() }}/batch-jobs/${jobId}/status`, { credentials: 'same-origin' });
+        if (!resp.ok) return;
+        const j = await resp.json();
+        const total = j.total || 0;
+        const pct = total ? Math.round((j.processed / total) * 100) : 0;
+        if (bar) bar.style.width = pct + '%';
+        if (text && !j.finished) {
+          text.innerHTML =
+            '<span class="spinner spinner--sm"></span>' +
+            `${j.status_label}: ${j.processed}/${total} ` +
+            `(成功 ${j.succeeded} / 一部 ${j.partial} / 失敗 ${j.failed})`;
+        }
+        if (j.finished) finish(j);
+      } catch (e) { /* 一時的な失敗は無視して次回ポーリング */ }
+    }
+
+    poll();
+    timer = setInterval(poll, 2000);
+  });
+})();
+</script>
+{% endblock %}

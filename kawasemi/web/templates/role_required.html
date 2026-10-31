@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+
+{% block title %}{% if outside_entry %}この入り口では使えない画面です{% else %}役割の切り替えが必要です{% endif %} - KAWASEMI{% endblock %}
+
+{% block content %}
+<div class="role-gate">
+    <h2 class="role-gate__title"><span aria-hidden="true">🔒</span> この操作は別の役割で行います</h2>
+
+    <p class="role-gate__lead">
+        いまのあなたは <strong>{% if active_role %}{{ role_display_name(active_role) }}{% else %}役割なし{% endif %}</strong> として操作しています。
+        この画面は
+        {% for r in required_roles %}<strong>{{ role_display_name(r) }}</strong>{% if not loop.last %} / {% endif %}{% endfor %}
+        の担当です。
+    </p>
+
+    {% if outside_entry %}
+    <div class="role-gate__action">
+        <p>
+            この入り口{% if entry.name %}「{{ entry.name }}」{% endif %}では
+            {% for r in required_roles %}<strong>{{ role_display_name(r) }}</strong>{% if not loop.last %} / {% endif %}{% endfor %}
+            の画面は使えません。
+            {% if other_entry %}
+            <a href="{{ other_entry[1] }}" class="btn btn-primary">{{ role_display_name(other_entry[0]) }}の入り口へ</a>
+            {% else %}
+            {% for r in required_roles %}{{ role_display_name(r) }}{% if not loop.last %} / {% endif %}{% endfor %}の入り口からログインしてください（URL はシステム管理者にご確認ください）。
+            {% endif %}
+        </p>
+    </div>
+    {% elif switchable_to %}
+    <div class="role-gate__action">
+        <p>あなたはこの役割を持っています。切り替えてそのまま続けられます。</p>
+        <form action="{{ base_path() }}/switch-role" method="POST" id="roleGateForm">
+            {% set _csrf = csrf_token_for(request) %}
+            {% if _csrf %}<input type="hidden" name="csrf_token" value="{{ _csrf }}">{% endif %}
+            <input type="hidden" name="next" value="{{ next_url }}">
+            {% for r in switchable_to %}
+            <button type="submit" name="role" value="{{ r }}" class="btn btn-primary">
+                {{ role_display_name(r) }}に切り替えて続ける
+            </button>
+            {% endfor %}
+        </form>
+    </div>
+    {% else %}
+    <div class="role-gate__action">
+        <p>
+            あなたはこの役割を持っていません。
+            {% for r in required_roles %}<strong>{{ role_display_name(r) }}</strong>{% if not loop.last %}または{% endif %}{% endfor %}
+            の担当者に依頼するか、システム管理者に役割の付与を依頼してください。
+        </p>
+    </div>
+    {% endif %}
+
+    <p class="role-gate__back"><a href="{{ base_path() }}/">ホームへ戻る</a></p>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    // CSRF はヘッダ方式（X-CSRF-Token）。素のフォーム送信ではヘッダを付けられないので、
+    // base.html の役割切替と同じく JS で fetch 送信する（押したボタンの role を送る）。
+    (function () {
+        var form = document.getElementById('roleGateForm');
+        if (!form) return;
+        form.addEventListener('submit', function (ev) {
+            ev.preventDefault();
+            var data = new FormData(form);
+            // FormData(form) は押したボタンの値を含まないので明示的に入れる。
+            // ev.submitter が無い環境では最初の役割ボタンにフォールバックする。
+            var submitter = ev.submitter || form.querySelector('button[name="role"]');
+            if (submitter && submitter.value) data.set('role', submitter.value);
+            var tokenEl = form.querySelector('input[name="csrf_token"]');
+            fetch(form.action, {
+                method: 'POST',
+                headers: { 'X-CSRF-Token': tokenEl ? tokenEl.value : '' },
+                body: data,
+                credentials: 'same-origin'
+            }).then(function (res) {
+                window.location.href = res.redirected ? res.url : '/';
+            }).catch(function () {
+                window.location.reload();
+            });
+        });
+    })();
+</script>
+{% endblock %}

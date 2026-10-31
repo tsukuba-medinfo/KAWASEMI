@@ -1,0 +1,14 @@
+表物理名,表論理名,カラム物理名,カラム論理名,備考
+billing_stays,入院会計サマリ,account_no,医事患者番号,医事会計の患者番号（B+6桁）
+billing_stays,入院会計サマリ,admission_no,入院連番,
+billing_stays,入院会計サマリ,admitted_on,入院日,YYYY-MM-DD
+billing_stays,入院会計サマリ,length_of_stay,在院日数,
+billing_stays,入院会計サマリ,antibiotic_days,抗菌薬投与日数,薬効分類 ABX（抗菌薬）の投与日数の合計
+billing_stays,入院会計サマリ,total_points,合計点数,
+billing_drugs,薬剤会計明細,account_no,医事患者番号,
+billing_drugs,薬剤会計明細,admission_no,入院連番,
+billing_drugs,薬剤会計明細,drug_code,薬剤コード,架空の薬剤コード（D から始まる）
+billing_drugs,薬剤会計明細,drug_name,薬剤名,
+billing_drugs,薬剤会計明細,drug_class,薬効分類,架空の分類コード（ABX=抗菌薬 APY=解熱鎮痛薬）
+billing_drugs,薬剤会計明細,days,投与日数,
+billing_drugs,薬剤会計明細,points,点数,

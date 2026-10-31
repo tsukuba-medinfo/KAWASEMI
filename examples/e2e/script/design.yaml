@@ -1,0 +1,314 @@
+# E2E 決定的層の台本: 設計工程（docs/e2e_pipeline.md §3）
+#
+# 台本 LLM（kawasemi/ai_input/e2e/scripted_llm.py）が、設計5段階の LLM 呼び出しに対して
+# ここに書いた応答を返す。**台本に無い link_id が来たら例外にする**（黙って空を返さない）。
+#
+# 項目ごとのキー:
+#   clinical.cite        典拠に選ぶ候補（規約文書のチャンク）の本文に含まれる文字列。
+#                        候補本文に一致するものが1件なら、その cand_id を返す
+#   clinical.annotation  臨床的意味の記述。下書きが返らなかった（典拠候補が足切りで0件）項目は、
+#                        試験が同じ文を人の入力として保存する
+#   hint.terms / hint.expected_types   所在検索ヒント（location_hint）。**クエリに足す語だけ**で、
+#                        順位は索引検索（HashingEmbedder＋型加点）が実際に決める
+#   location.choose      所在 LLM が一推しにする候補の行に**すべて**含まれる文字列。
+#                        提示された候補に無ければ null を返す（本物の LLM と同じく選べない）。
+#                        2件以上に当たれば台本の誤りとして例外にする
+#   location.alternates  第2候補以降の unit_id（人が提示枠から足す。LLM の応答ではない。
+#                        提示枠に無ければ足せない＝関門 (b) で落ちる）
+#   runbook              手順書のステップ
+#   program              DSL プログラム（コンパイラの応答）。op 引数は索引の payload から
+#                        compiler が検証・是正するので、ここは「LLM が書いたもの」に当たる
+#
+# 患者キー（key_type / physical_format）は**書かない**。実機の LLM も書かなかった。
+# コンパイラが索引の payload.key_type と接続レジストリ（connections.e2e.yaml の key_type /
+# key_formats）から焼き込む。台本に書くと、それが焼き込みの代わりに試されてしまう。
+
+items:
+  birth_date:
+    clinical:
+      cite: "2.2 生年月日"
+      annotation: "患者の生年月日。患者基本情報に登録された値をそのまま記入する（記入要領 2.2）。"
+    hint:
+      terms: ["生年月日", "患者基本", "birth_date"]
+      expected_types: ["TEXT"]
+    location:
+      choose: ["[DB] 生年月日 —", "表=patients "]
+    runbook:
+      - {title: "患者基本から生年月日を取る", description: "DWH の患者基本の生年月日を患者番号で引く", action_type: fetch}
+    program:
+      steps:
+        - op: external_db_extract
+          id: v
+          connection_id: dwh
+          sql: "SELECT birth_date FROM main.patients WHERE patient_no = :patient_id"
+      return: "$v"
+
+  sex:
+    clinical:
+      cite: "2.3 性別"
+      annotation: "患者の性別。1=男、2=女。患者基本情報の性別コードに従う（記入要領 2.3）。"
+    hint:
+      terms: ["性別コード", "患者基本", "sex_code"]
+      expected_types: ["TEXT"]
+    location:
+      choose: ["[DB] 性別コード —", "表=patients "]
+    runbook:
+      - {title: "性別コードを取る", description: "患者基本の性別コード（1=男 2=女）をそのまま採る", action_type: fetch}
+    program:
+      steps:
+        - op: external_db_extract
+          id: v
+          connection_id: dwh
+          sql: "SELECT sex_code FROM main.patients WHERE patient_no = :patient_id"
+      return: "$v"
+
+  admission_date:
+    clinical:
+      cite: "3.1 入院年月日"
+      annotation: "当該感染症エピソードに関係する入院の入院日（記入要領 3.1）。"
+    hint:
+      terms: ["入院日", "入院歴", "admitted_on"]
+      expected_types: ["TEXT"]
+    location:
+      choose: ["[DB] 入院日 —", "表=admissions "]
+    runbook:
+      - {title: "入院歴から入院日を取る", description: "入院歴の入院日を入院連番の順に並べ、最初の入院を採る", action_type: fetch}
+    program:
+      steps:
+        - op: external_db_extract
+          id: v
+          connection_id: dwh
+          sql: "SELECT admitted_on FROM main.admissions WHERE patient_no = :patient_id ORDER BY admission_no LIMIT 1"
+      return: "$v"
+
+  onset_date:
+    clinical:
+      cite: "3.2 感染症の発症日"
+      annotation: >-
+        症状が最初に出現した日。感染管理部門が症例として登録した発症日を第一とし、
+        登録が無い場合は入院時サマリの現病歴に記載された症状出現日を発症日とする（記入要領 3.2）。
+    hint:
+      terms: ["発症日", "感染症症例", "onset_date"]
+      expected_types: ["TEXT"]
+    location:
+      choose: ["[DB] 発症日 —", "表=infection_cases "]
+      alternates: ["file:patient_data:入院時サマリ"]
+    runbook:
+      - {title: "感染症症例の発症日を取る", description: "感染管理部門が登録した発症日を引く", action_type: fetch}
+      - {title: "登録の有無を判定する", description: "発症日が空かどうかを見る", action_type: condition}
+      - {title: "空なら入院時サマリから読む", description: "登録が無ければ入院時サマリの現病歴から症状出現日を読む", action_type: branch}
+    program:
+      steps:
+        - op: external_db_extract
+          id: a
+          connection_id: dwh
+          sql: "SELECT onset_date FROM main.infection_cases WHERE patient_no = :patient_id ORDER BY case_no LIMIT 1"
+        - {op: compare, id: has_a, left: "$a", cmp: is_not_empty}
+        - {op: compare, id: no_a, left: "$has_a", cmp: "==", right: false}
+        - op: file_extract
+          id: doc
+          guard: "$no_a"
+          connection_id: report_fs
+          path_pattern: "{{patient_id}}/admission_summary.txt"
+        - op: llm_extract
+          id: b
+          guard: "$no_a"
+          prompt: "被験者 {{patient_id}} の入院時サマリから、感染症の症状が最初に出現した日（発症日）を YYYY-MM-DD で答えよ。\n=== 本文 ===\n$doc"
+        - {op: branch, id: v, when: "$has_a", then: "$a", else_branch: "$b"}
+      return: "$v"
+
+  diagnosis_text:
+    clinical:
+      cite: "3.3 感染症診断名"
+      annotation: "入院時サマリの「診断」に記載された感染症の病名を、略さずに記入する（記入要領 3.3）。"
+    hint:
+      terms: ["入院時サマリ", "入院サマリー", "診断名"]
+      expected_types: []
+    location:
+      choose: ["[ファイル] 入院時サマリ —"]
+    runbook:
+      - {title: "入院時サマリを読む", description: "患者の入院時サマリ本文を開く", action_type: fetch}
+      - {title: "診断名を抜き出す", description: "「診断」に書かれた病名を略さずに取り出す", action_type: llm}
+    program:
+      steps:
+        - op: file_extract
+          id: doc
+          connection_id: report_fs
+          path_pattern: "{{patient_id}}/admission_summary.txt"
+        - op: llm_extract
+          id: v
+          prompt: "被験者 {{patient_id}} の入院時サマリから、感染症の診断名を略さずに答えよ。\n=== 本文 ===\n$doc"
+      return: "$v"
+
+  max_body_temp:
+    clinical:
+      cite: "4.1 発症後の最高体温"
+      annotation: "発症日以降に測定された体温の最高値。削除された記録は除いて最高値を採る（記入要領 4.1）。"
+    hint:
+      terms: ["体温", "バイタルサイン"]
+      expected_types: ["REAL"]
+    location:
+      choose: ["[DB] 体温 —", "項目=body_temp "]
+    runbook:
+      - {title: "バイタルサインの体温を集める", description: "バイタルサインの体温の記録のうち、削除されていないものを集める", action_type: fetch}
+      - {title: "最高値を採る", description: "集めた体温の最大値を採る", action_type: select}
+    program:
+      steps:
+        - op: external_db_extract
+          id: v
+          connection_id: dwh
+          sql: "SELECT MAX(value_num) FROM main.vital_signs WHERE patient_no = :patient_id AND item_code = 'body_temp' AND is_deleted = '0'"
+      return: "$v"
+
+  body_weight:
+    clinical:
+      cite: "4.2 入院時体重"
+      annotation: >-
+        入院時に測定した体重。観察記録の体重のうち最新の測定値を採る。「体重測定」には体重と
+        体脂肪率が同居しているので体重の測定値のみを採る（記入要領 4.2）。
+    hint:
+      terms: ["体重", "観察記録"]
+      expected_types: ["TEXT"]
+    location:
+      choose: ["[DB] 体重測定 —", "項目=weight "]
+    runbook:
+      - {title: "観察記録の体重を集める", description: "体重測定のうち体重の測定（seq 1）で、有効な行だけを集める", action_type: fetch}
+      - {title: "最新を採る", description: "記録日の新しい順に並べて先頭を採る", action_type: select}
+    program:
+      steps:
+        - op: external_db_extract
+          id: v
+          connection_id: dwh
+          sql: >-
+            SELECT value_text FROM main.observations WHERE patient_no = :patient_id AND item_code = 'weight'
+            AND seq = '1' AND is_deleted = '0' AND is_active = '1'
+            ORDER BY recorded_on DESC LIMIT 1
+      return: "$v"
+
+  crp_on_admission:
+    clinical:
+      cite: "4.3 入院時 CRP 値"
+      annotation: "入院日に採取した検体の CRP の値（mg/dL）。複数回測定された場合は最初の値を採る（記入要領 4.3）。"
+    hint:
+      terms: ["CRP", "検査結果", "結果値"]
+      expected_types: ["REAL"]
+    location:
+      choose: ["[DB] 結果値 —", "表=lab_results "]
+    runbook:
+      - {title: "検査結果から CRP を取る", description: "検査コードが CRP（検査マスタで確認）の行を検査日の順に並べ、最初を採る", action_type: fetch}
+    program:
+      steps:
+        - op: external_db_extract
+          id: v
+          connection_id: dwh
+          sql: >-
+            SELECT result_value FROM main.lab_results WHERE patient_no = :patient_id AND test_code = 'crp'
+            ORDER BY tested_on LIMIT 1
+      return: "$v"
+
+  pathogen:
+    clinical:
+      cite: "5.1 分離された起因微生物"
+      annotation: "培養検査で分離・同定され起因菌と判断された微生物の学名。分離されなければ「検出なし」（記入要領 5.1）。"
+    hint:
+      terms: ["起因菌", "培養同定"]
+      expected_types: []
+    location:
+      choose: ["[FHIR] 起因微生物 —"]
+    runbook:
+      - {title: "FHIR の起因微生物を取る", description: "感染症モジュールの Observation（pathogen）の値を採る", action_type: fetch}
+    program:
+      steps:
+        - op: fhir_extract
+          id: v
+          connection_id: hosp_fhir
+          fhir_query: "/Observation?code=pathogen&patient={{patient_id}}"
+          fhir_path: valueString
+      return: "$v"
+
+  severity:
+    clinical:
+      cite: "5.2 重症度分類"
+      annotation: "入院時の重症度。1=軽症、2=中等症、3=重症（記入要領 5.2）。"
+    hint:
+      terms: ["重症度", "重症度分類"]
+      expected_types: []
+    location:
+      choose: ["[FHIR] 重症度分類 —"]
+    runbook:
+      - {title: "FHIR の重症度を取る", description: "Observation（severity）の値をコードのまま採る", action_type: fetch}
+    program:
+      steps:
+        - op: fhir_extract
+          id: v
+          connection_id: hosp_fhir
+          fhir_query: "/Observation?code=severity&patient={{patient_id}}"
+          fhir_path: valueString
+      return: "$v"
+
+  antibiotic_given:
+    clinical:
+      cite: "6.1 抗菌薬投与の有無"
+      annotation: "当該入院中に抗菌薬が投与されたか。DPC の出来高ファイルで薬効分類 ABX の請求があれば「あり」（記入要領 6.1）。"
+    hint:
+      terms: ["DPC", "EFファイル", "出来高", "薬効分類"]
+      expected_types: []
+    location:
+      choose: ["[ファイル] DPC出来高EFファイル —"]
+    runbook:
+      - {title: "EF ファイルの抗菌薬の行を探す", description: "患者IDと薬効分類 ABX で行を絞る", action_type: fetch}
+      - {title: "有無を判定する", description: "行があれば 1（あり）、無ければ 2（なし）", action_type: condition}
+    program:
+      steps:
+        - op: csv_extract
+          id: rows
+          connection_id: dpc_ef
+          path: ef.csv
+          key_column: "患者ID"
+          column: "薬効分類"
+          match: [{column: "薬効分類", value: "ABX"}]
+        - {op: compare, id: has, left: "$rows", cmp: is_not_empty}
+        - {op: branch, id: v, when: "$has", then: "1", else_branch: "2"}
+      return: "$v"
+
+  antibiotic_days:
+    clinical:
+      cite: "6.2 抗菌薬投与日数"
+      annotation: "当該入院中の抗菌薬の投与日数の合計。医事会計の入院会計サマリの値に従う。投与が無い場合は 0（記入要領 6.2）。"
+    hint:
+      terms: ["抗菌薬投与日数", "入院会計サマリ", "医事会計"]
+      expected_types: ["INTEGER"]
+    location:
+      choose: ["[DB] 抗菌薬投与日数 —", "表=billing_stays "]
+    runbook:
+      - {title: "入院会計サマリから投与日数を取る", description: "医事会計の入院会計サマリの抗菌薬投与日数を医事患者番号で引く", action_type: fetch}
+    program:
+      steps:
+        - op: external_db_extract
+          id: v
+          connection_id: billing
+          sql: "SELECT antibiotic_days FROM main.billing_stays WHERE account_no = :patient_id ORDER BY admission_no LIMIT 1"
+      return: "$v"
+
+  consent_date:
+    clinical:
+      cite: "7.1 研究参加同意取得日"
+      annotation: "患者が研究参加に同意した日。同意書に手書きで記入された同意日を転記する（記入要領 7.1）。"
+    hint:
+      terms: ["同意書", "同意日", "インフォームドコンセント"]
+      expected_types: []
+    location:
+      choose: ["[ファイル] 研究参加同意書（手書き） —"]
+    runbook:
+      - {title: "同意書を読む", description: "スキャンされた同意書を文字起こしする", action_type: fetch}
+      - {title: "同意日を抜き出す", description: "手書きの同意日を YYYY-MM-DD で取り出す", action_type: llm}
+    program:
+      steps:
+        - op: file_extract
+          id: doc
+          connection_id: report_fs
+          path_pattern: "{{patient_id}}/consent.pdf"
+        - op: llm_extract
+          id: v
+          prompt: "被験者 {{patient_id}} の手書き同意書の文字起こしから、同意日を YYYY-MM-DD で答えよ。\n=== 文字起こし ===\n$doc"
+      return: "$v"

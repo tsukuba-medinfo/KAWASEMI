@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+
+{% block title %}Questionnaire管理 - KAWASEMI{% endblock %}
+
+{% block content %}
+<div class="card">
+    <div class="page-head">
+        <h2>{% if mode == 'response' %}QuestionnaireResponse管理{% else %}Questionnaire管理{% endif %}</h2>
+        {# 様式のファイル取り込み（新規登録）と削除は管理者、内容の編集は設計者 #}
+        {% if mode != 'response' and current_user.active_role == 'admin' %}
+        <div class="page-head__actions">
+            <a href="{{ base_path() }}/questionnaires/new" class="btn btn--sm btn--primary">新規登録</a>
+        </div>
+        {% endif %}
+    </div>
+
+    {% if mode == 'response' %}
+    <div class="info-box">
+        <p>回答を入力・管理するQuestionnaireを選択してください。</p>
+    </div>
+    {% else %}
+    <div class="info-box">
+        <p>登録済みのQuestionnaireテンプレートを管理します。</p>
+    </div>
+    {% endif %}
+
+    <div class="filter-bar">
+        <label>ステータス:</label>
+        <select id="statusFilter" onchange="filterByStatus()">
+            <option value="">すべて</option>
+            <option value="active" {% if status_filter == 'active' %}selected{% endif %}>active</option>
+            <option value="draft" {% if status_filter == 'draft' %}selected{% endif %}>draft</option>
+            <option value="retired" {% if status_filter == 'retired' %}selected{% endif %}>retired</option>
+        </select>
+    </div>
+
+    {% if questionnaires %}
+    <div class="table-wrap">
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>タイトル</th>
+                    <th>ステータス</th>
+                    <th>バージョン</th>
+                    <th>作成日時</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for q in questionnaires %}
+                <tr>
+                    <td>{{ q.id }}</td>
+                    <td>{{ q.title or 'タイトルなし' }}</td>
+                    <td>
+                        {% set badge = {'active': 'success', 'draft': 'warning', 'retired': 'danger'}.get(q.status, 'neutral') %}
+                        <span class="badge badge--{{ badge }}">{{ q.status }}</span>
+                    </td>
+                    <td>{{ q.version or '-' }}</td>
+                    <td>{{ q.created_at.strftime('%Y-%m-%d %H:%M') if q.created_at else '-' }}</td>
+                    <td>
+                        <div class="row-actions">
+                            {% if mode == 'response' %}
+                            <a href="{{ base_path() }}/questionnaires/{{ q.id }}/responses">回答一覧</a>
+                            <a href="{{ base_path() }}/forms/{{ q.id }}">新規入力</a>
+                            {% else %}
+                            <a href="{{ base_path() }}/questionnaires/{{ q.id }}">詳細</a>
+                            {% if current_user.active_role == 'designer' %}
+                            <a href="{{ base_path() }}/questionnaires/{{ q.id }}/edit">編集</a>
+                            {% endif %}
+                            {% if current_user.active_role == 'admin' %}
+                            <a href="#" class="is-danger" onclick="confirmDelete({{ q.id }}, '{{ q.title | e }}')">削除</a>
+                            {% endif %}
+                            {% endif %}
+                        </div>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="empty-state">
+        <p>登録されているQuestionnaireがありません。</p>
+        {% if mode != 'response' and current_user.active_role == 'admin' %}
+        <a href="{{ base_path() }}/questionnaires/new" class="btn btn--sm btn--primary">新規登録する</a>
+        {% endif %}
+    </div>
+    {% endif %}
+</div>
+
+<!-- 削除確認モーダル -->
+<div id="deleteModal" class="modal">
+    <div class="modal__dialog">
+        <h3>削除の確認</h3>
+        <p id="deleteMessage" style="margin: 1rem 0;"></p>
+        <div class="modal__actions">
+            <button type="button" onclick="closeDeleteModal()" class="btn btn--secondary">キャンセル</button>
+            <form id="deleteForm" method="POST" style="margin: 0;">
+                <button type="submit" class="btn btn--danger">削除する</button>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function filterByStatus() {
+    const status = document.getElementById('statusFilter').value;
+    const currentUrl = new URL(window.location.href);
+    if (status) {
+        currentUrl.searchParams.set('status', status);
+    } else {
+        currentUrl.searchParams.delete('status');
+    }
+    // modeパラメータを保持
+    const mode = currentUrl.searchParams.get('mode');
+    window.location.href = currentUrl.toString();
+}
+
+function confirmDelete(id, title) {
+    document.getElementById('deleteMessage').textContent = `「${title || 'タイトルなし'}」を削除してもよろしいですか？`;
+    document.getElementById('deleteForm').action = `/questionnaires/${id}/delete`;
+    document.getElementById('deleteModal').style.display = 'block';
+}
+
+function closeDeleteModal() {
+    document.getElementById('deleteModal').style.display = 'none';
+}
+
+// モーダル外クリックで閉じる
+document.getElementById('deleteModal').addEventListener('click', function(e) {
+    if (e.target === this) {
+        closeDeleteModal();
+    }
+});
+</script>
+{% endblock %}

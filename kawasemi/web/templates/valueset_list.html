@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+
+{% block title %}ValueSet管理 - KAWASEMI{% endblock %}
+
+{% block content %}
+<div class="card">
+    <div class="page-head">
+        <h2>ValueSet管理</h2>
+        <div class="page-head__actions">
+            <a href="{{ base_path() }}/valuesets/new" class="btn btn--sm btn--primary">新規登録</a>
+        </div>
+    </div>
+
+    <div class="info-box">
+        <p>Questionnaire の選択肢（answerValueSet）に使う ValueSet を管理します。</p>
+    </div>
+
+    <div class="filter-bar">
+        <label>ステータス:</label>
+        <select id="statusFilter" onchange="filterByStatus()">
+            <option value="">すべて</option>
+            <option value="active" {% if status_filter == 'active' %}selected{% endif %}>active</option>
+            <option value="draft" {% if status_filter == 'draft' %}selected{% endif %}>draft</option>
+            <option value="retired" {% if status_filter == 'retired' %}selected{% endif %}>retired</option>
+        </select>
+    </div>
+
+    {% if valuesets %}
+    <div class="table-wrap">
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>タイトル</th>
+                    <th>URL</th>
+                    <th>ステータス</th>
+                    <th>バージョン</th>
+                    <th>作成日時</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for vs in valuesets %}
+                <tr>
+                    <td>{{ vs.id }}</td>
+                    <td>{{ vs.title or 'タイトルなし' }}</td>
+                    <td>{{ vs.url or '-' }}</td>
+                    <td>
+                        {% set badge = {'active': 'success', 'draft': 'warning', 'retired': 'danger'}.get(vs.status, 'neutral') %}
+                        <span class="badge badge--{{ badge }}">{{ vs.status }}</span>
+                    </td>
+                    <td>{{ vs.version or '-' }}</td>
+                    <td>{{ vs.created_at.strftime('%Y-%m-%d %H:%M') if vs.created_at else '-' }}</td>
+                    <td>
+                        <div class="row-actions">
+                            <a href="{{ base_path() }}/valuesets/{{ vs.id }}">詳細</a>
+                            <a href="{{ base_path() }}/valuesets/{{ vs.id }}/edit">編集</a>
+                            <a href="#" class="is-danger js-delete" data-id="{{ vs.id }}" data-title="{{ vs.title or '' }}">削除</a>
+                        </div>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="empty-state">
+        <p>登録されているValueSetがありません。</p>
+        <a href="{{ base_path() }}/valuesets/new" class="btn btn--sm btn--primary">新規登録する</a>
+    </div>
+    {% endif %}
+</div>
+
+<!-- 削除確認モーダル -->
+<div id="deleteModal" class="modal">
+    <div class="modal__dialog">
+        <h3>削除の確認</h3>
+        <p id="deleteMessage" style="margin: 1rem 0;"></p>
+        <div class="modal__actions">
+            <button type="button" onclick="closeDeleteModal()" class="btn btn--secondary">キャンセル</button>
+            <form id="deleteForm" method="POST" style="margin: 0;">
+                <button type="submit" class="btn btn--danger">削除する</button>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function filterByStatus() {
+    const status = document.getElementById('statusFilter').value;
+    const currentUrl = new URL(window.location.href);
+    if (status) {
+        currentUrl.searchParams.set('status', status);
+    } else {
+        currentUrl.searchParams.delete('status');
+    }
+    window.location.href = currentUrl.toString();
+}
+
+// 削除リンクは data 属性から値を読む（onclick へのタイトル埋め込みを避け、
+// ストアド XSS を防ぐ。data 属性値は Jinja の自動エスケープで安全）。
+document.querySelectorAll('.js-delete').forEach(function(el) {
+    el.addEventListener('click', function(e) {
+        e.preventDefault();
+        const id = this.dataset.id;
+        const title = this.dataset.title;
+        document.getElementById('deleteMessage').textContent = `「${title || 'タイトルなし'}」を削除してもよろしいですか？`;
+        document.getElementById('deleteForm').action = `{{ base_path() }}/valuesets/${id}/delete`;
+        document.getElementById('deleteModal').style.display = 'block';
+    });
+});
+
+function closeDeleteModal() {
+    document.getElementById('deleteModal').style.display = 'none';
+}
+
+// モーダル外クリックで閉じる
+document.getElementById('deleteModal').addEventListener('click', function(e) {
+    if (e.target === this) {
+        closeDeleteModal();
+    }
+});
+</script>
+{% endblock %}

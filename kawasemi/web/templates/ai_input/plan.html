@@ -1,0 +1,430 @@
+{% extends "base.html" %}
+
+{% block title %}取得プランの作成 - {{ questionnaire.title or questionnaire.fhir_id }} - KAWASEMI{% endblock %}
+
+{% block content %}
+<div class="card">
+  {% include "ai_input/_stepper.html" %}
+  <h2>ステップ3: 取得プランの作成 — {{ questionnaire.title or questionnaire.fhir_id }}</h2>
+  <p class="hint">確認済みの手順書を、実行可能な取得プラン（限定された処理の組み合わせ）へAIで作成します。1項目ずつ確認・編集し、接続先やSQLが不明な「要入力」ステップは人が補完してください。確認済みの取得プランのみステップ4で実行できます。</p>
+
+  <div class="toolbar">
+    {% if enable_ai_drafting %}
+    <input type="text" id="model-input" class="model-input" placeholder="モデル名（任意）" value="">
+    <button type="button" class="btn btn--ai" id="gen-btn" onclick="compileAll()">未確認を一括作成</button>
+    {% endif %}
+    <a class="btn btn--secondary" href="{{ base_path() }}/ai-input/questionnaires/{{ questionnaire.id }}/runbook">← ステップ2: 取得手順書の作成</a>
+    <a class="btn btn--secondary" href="{{ base_path() }}/ai-input/questionnaires/{{ questionnaire.id }}/autofill">ステップ4: AI自動入力 →</a>
+    <span id="status"></span>
+  </div>
+
+  <div id="empty-state" style="display:none;">
+    <div class="alert alert-error">作成対象がありません。先に
+      <a href="{{ base_path() }}/ai-input/questionnaires/{{ questionnaire.id }}/runbook">ステップ2: 取得手順書の作成</a>
+      で手順書を確認済みにしてください。
+    </div>
+  </div>
+
+  <div id="wizard" style="display:none;">
+    <div class="progress-wrap">
+      <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+      <div class="progress-text" id="progress-text"></div>
+      <div class="item-dots" id="item-dots"></div>
+    </div>
+
+    <div class="item-card" id="item-card"></div>
+
+    <div class="footer-nav">
+      <button type="button" class="btn btn--secondary" id="prev-btn" onclick="go(-1)">← 前へ</button>
+      {% if enable_ai_drafting %}
+      <button type="button" class="btn btn--secondary" id="regen-btn" onclick="recompile()">この項目だけ再作成</button>
+      {% endif %}
+      <button type="button" class="btn btn--secondary" id="save-btn" onclick="saveCurrent(false)">保存（確認しない）</button>
+      <div class="spacer"></div>
+      <button type="button" class="btn btn--primary" id="confirm-btn" onclick="confirmNext()">確認して次へ →</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script src="{{ base_path() }}/static/js/mermaid.min.js"></script>
+<script src="{{ base_path() }}/static/js/diagram-zoom.js"></script>
+<script>
+const QID = {{ questionnaire.id }};
+const CSRF = document.querySelector('meta[name="csrf-token"]')?.content || '';
+const DEFAULT_MODEL = {{ default_ollama_model | tojson }};
+const OP_LABELS = {{ op_labels | tojson }};
+const OPS = Object.keys(OP_LABELS);
+let ITEMS = {{ items | tojson }};
+let cur = 0;
+let graphSeq = 0;
+
+if (window.mermaid) mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+
+const META_KEYS = new Set(['op', 'id', 'needs_input', 'reasoning']);
+
+function esc(s) { const d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
+function setStatus(msg, ok) { const el = document.getElementById('status'); el.textContent = msg; el.className = ok ? 'ok' : 'err'; }
+
+function programOf(it) {
+  if (!it.program || !Array.isArray(it.program.steps)) it.program = { steps: [], return: null };
+  return it.program;
+}
+
+function renderShell() {
+  const hasItems = ITEMS.length > 0;
+  document.getElementById('empty-state').style.display = hasItems ? 'none' : 'block';
+  document.getElementById('wizard').style.display = hasItems ? 'block' : 'none';
+  const genBtn = document.getElementById('gen-btn');
+  if (genBtn) genBtn.disabled = !hasItems;
+  if (hasItems) { renderProgress(); renderItem(); }
+}
+
+function renderProgress() {
+  const total = ITEMS.length;
+  const confirmed = ITEMS.filter(i => i.status === 'confirmed').length;
+  document.getElementById('progress-fill').style.width = total ? (confirmed / total * 100) + '%' : '0%';
+  document.getElementById('progress-text').textContent = `確認済み ${confirmed} / ${total} 項目`;
+  document.getElementById('item-dots').innerHTML = ITEMS.map((it, idx) => {
+    let cls = 'dot';
+    if (it.status === 'confirmed') cls += ' confirmed';
+    else if (it.has_plan) cls += ' draft';
+    else cls += ' empty';
+    if (it.needs_input) cls += ' needs';
+    if (idx === cur) cls += ' current';
+    return `<div class="${cls}" title="${esc(it.item_text || it.link_id)}" onclick="jump(${idx})">${idx + 1}</div>`;
+  }).join('');
+}
+
+function opSelect(val) {
+  return `<select class="op-select">` +
+    OPS.map(o => `<option value="${o}" ${o === val ? 'selected' : ''}>${esc(OP_LABELS[o])} (${o})</option>`).join('') +
+    `</select>`;
+}
+
+function argsOf(step) {
+  const a = {};
+  for (const k of Object.keys(step)) if (!META_KEYS.has(k)) a[k] = step[k];
+  return a;
+}
+
+function renderItem() {
+  const it = ITEMS[cur];
+  const prog = programOf(it);
+  const statusPill = it.status === 'confirmed'
+    ? '<span class="status-pill st-confirmed">確認済み</span>'
+    : '<span class="status-pill st-draft">未確認</span>';
+  const needs = it.needs_input ? '<span class="needs-badge">⚠ 要入力あり</span>' : '';
+  const stale = it.stale ? '<span class="stale-badge">⚠ 手順書が更新されました・再作成推奨</span>' : '';
+
+  const stepsHtml = prog.steps.length
+    ? prog.steps.map((s, i) => stepHtml(s, i)).join('')
+    : '<p class="empty">取得プランがありません。「一括作成」または「この項目だけ再作成」で生成してください。</p>';
+
+  document.getElementById('item-card').innerHTML = `
+    <div class="item-head">
+      <span class="link-id-badge">${esc(it.link_id)}</span>
+      <span class="item-text">${esc(it.item_text || '（テキストなし）')}</span>
+      ${statusPill} ${needs} ${stale}
+    </div>
+    <div class="editor-row">
+      <div>
+        <div class="steps-head">
+          <h3>取得ステップ</h3>
+          <button type="button" class="btn btn--secondary btn--sm" onclick="addStep()">+ ステップ追加</button>
+        </div>
+        <div id="steps">${stepsHtml}</div>
+        <div class="ret-row">return: <input id="ret-input" placeholder="$id" value="${esc(prog.return || prog.return_ || '')}"></div>
+        <div class="params-box">
+          <label class="fld">プログラム引数 params（JSON配列）</label>
+          <div class="params-note">
+            SQL・FHIRクエリ・ファイルパス・プロンプトへ差し込む値の宣言。
+            <b>kind=identifier（表名の切替）は allowed に許可する表名の列挙が必須</b>で、
+            列挙外の値・メタ表は実行時に拒否される。value が "$id" なら前段ステップの
+            取得結果が差し込まれるため、<b>実際に読む対象が実行時のデータで決まる</b>。
+            確定前に束縛と allowed を必ず確認すること。
+          </div>
+          <textarea id="params-area" class="args-area" oninput="onParamsInput(this)">${esc(JSON.stringify(prog.params || [], null, 1))}</textarea>
+          <div id="params-summary" class="params-summary">${paramsSummaryHtml(prog.params)}</div>
+        </div>
+      </div>
+      <div class="graph-box">
+        <h4>取得フロー図</h4>
+        <div id="graph"></div>
+      </div>
+    </div>`;
+  document.getElementById('prev-btn').disabled = (cur === 0);
+  document.getElementById('confirm-btn').textContent = (cur === ITEMS.length - 1) ? '確認して完了' : '確認して次へ →';
+  renderGraph();
+  // **引数の JSON は全文が見えていないと確認にならない。** 高さを中身に合わせる
+  // （手順書側と同じ理由。3行固定では SQL や分岐がスクロールしないと読めなかった）。
+  autoGrowAll();
+}
+
+function autoGrow(el) {
+  el.style.height = 'auto';
+  el.style.height = el.scrollHeight + 'px';
+}
+
+function autoGrowAll() {
+  document.querySelectorAll('.args-area').forEach(el => {
+    autoGrow(el);
+    el.addEventListener('input', () => autoGrow(el));
+  });
+}
+
+function paramsSummaryHtml(params) {
+  if (!Array.isArray(params) || !params.length) return '<span class="muted">（引数なし）</span>';
+  return params.map(p => {
+    if (!p || typeof p !== 'object') {
+      return '<div class="param-row"><span class="params-warn">不正な要素（オブジェクトでない）</span></div>';
+    }
+    const kind = p.kind || 'value';
+    const src = typeof p.value === 'string' && p.value.startsWith('$')
+      ? `前段ステップ <b>${esc(p.value)}</b> の取得結果`
+      : `リテラル <code>${esc(String(p.value))}</code>`;
+    const allowed = Array.isArray(p.allowed) && p.allowed.length
+      ? `allowed: ${p.allowed.map(a => `<code>${esc(String(a))}</code>`).join(' / ')}`
+      : (kind === 'identifier'
+          ? '<span class="params-warn">allowed 未宣言（確定できません）</span>'
+          : '<span class="muted">allowed なし</span>');
+    return `<div class="param-row"><code>${esc(p.name)}</code>`
+      + `<span class="param-kind">${esc(kind)}</span> ← ${src} / ${allowed}</div>`;
+  }).join('');
+}
+
+function stepHtml(s, i) {
+  const args = JSON.stringify(argsOf(s), null, 1);
+  return `
+    <div class="step ${s.needs_input ? 'needs' : ''}" data-idx="${i}">
+      <div class="step-top">
+        ${opSelect(s.op)}
+        <input class="id-input" placeholder="id" value="${esc(s.id || '')}">
+        <label style="font-size:0.78rem;"><input type="checkbox" class="needs-cb" ${s.needs_input ? 'checked' : ''}> 要入力</label>
+        <span class="step-tools">
+          <button type="button" class="icon-btn" onclick="moveStep(${i},-1)">↑</button>
+          <button type="button" class="icon-btn" onclick="moveStep(${i},1)">↓</button>
+          <button type="button" class="icon-btn" onclick="delStep(${i})">✕</button>
+        </span>
+      </div>
+      <label class="fld">処理ごとの引数（JSON）</label>
+      <textarea class="args-area" oninput="onArgsInput(this)">${esc(args)}</textarea>
+      <input class="reason-input" placeholder="補足・要入力の理由（任意）" value="${esc(s.reasoning || '')}">
+    </div>`;
+}
+
+function onParamsInput(el) {
+  onArgsInput(el);
+  // 束縛サマリを編集に追従させる。追従しないと「確定前に束縛と allowed を必ず確認する」
+  // という同じ画面の注意書きと噛み合わない（編集前の状態を見せ続けてしまう）。
+  const box = document.getElementById('params-summary');
+  if (!box) return;
+  try {
+    const parsed = JSON.parse(el.value.trim() || '[]');
+    box.innerHTML = Array.isArray(parsed)
+      ? paramsSummaryHtml(parsed)
+      : '<span class="params-warn">params は JSON 配列にしてください</span>';
+  } catch (e) {
+    box.innerHTML = '<span class="params-warn">JSON が不正です（保存できません）</span>';
+  }
+}
+
+function onArgsInput(el) {
+  try { JSON.parse(el.value || '{}'); el.classList.remove('invalid'); }
+  catch (e) { el.classList.add('invalid'); }
+}
+
+function collectSteps() {
+  const steps = [];
+  document.querySelectorAll('#steps .step').forEach(el => {
+    let args = {};
+    try { args = JSON.parse(el.querySelector('.args-area').value || '{}'); } catch (e) { args = {}; }
+    steps.push(Object.assign({
+      op: el.querySelector('.op-select').value,
+      id: el.querySelector('.id-input').value.trim(),
+      needs_input: el.querySelector('.needs-cb').checked,
+      reasoning: el.querySelector('.reason-input').value.trim() || null,
+    }, args));
+  });
+  return steps;
+}
+function syncToMemoryLoose() {
+  // ステップ追加・削除・移動・項目切替から呼ぶ版。params の JSON が編集途中で不正でも
+  // 操作自体は続けられるようにする（保存経路だけは syncToMemory で厳格に止める）。
+  try { syncToMemory(); }
+  catch (e) { setStatus(e.message + '（params は直前の値のまま）', false); }
+}
+
+function syncToMemory() {
+  const prog = programOf(ITEMS[cur]);
+  prog.steps = collectSteps();
+  const pa = document.getElementById('params-area');
+  if (pa) {
+    // 不正 JSON を黙って捨てると、利用者が allowed を追記したり危険な宣言を削除したりした
+    // 編集が消えたまま「確認しました」になる。params は確定関門の対象そのものなので、
+    // 例外を投げて保存側で止める（step の args と違い、サーバ側の 400 で顕在化しない）。
+    const raw = pa.value.trim() || '[]';
+    let parsed;
+    try { parsed = JSON.parse(raw); }
+    catch (e) { throw new Error('params の JSON が不正です: ' + e.message); }
+    if (!Array.isArray(parsed)) throw new Error('params は JSON 配列にしてください');
+    prog.params = parsed;
+  }
+  const ret = document.getElementById('ret-input');
+  prog.return = ret && ret.value.trim() ? ret.value.trim() : null;
+}
+
+function addStep() {
+  syncToMemoryLoose();
+  programOf(ITEMS[cur]).steps.push({ op: 'sql_extract', id: 'v' + (programOf(ITEMS[cur]).steps.length + 1), needs_input: false, reasoning: null });
+  renderItem();
+}
+function delStep(i) { syncToMemoryLoose(); programOf(ITEMS[cur]).steps.splice(i, 1); renderItem(); }
+function moveStep(i, dir) {
+  syncToMemoryLoose();
+  const steps = programOf(ITEMS[cur]).steps;
+  const j = i + dir; if (j < 0 || j >= steps.length) return;
+  [steps[i], steps[j]] = [steps[j], steps[i]];
+  renderItem();
+}
+
+function jump(idx) { syncToMemoryLoose(); cur = idx; renderProgress(); renderItem(); }
+function go(dir) { const n = cur + dir; if (n < 0 || n >= ITEMS.length) return; jump(n); }
+
+// --- 取得フロー図プレビュー（図の規則はサーバの viz.py が正本） ---
+//
+// **ここで図を組み立ててはいけない。** 以前はクライアント側で Mermaid 定義を組んでいた
+// ため、同じ program に対してこのプレビューと検証画面の監査図が違う図を出していた——
+// server 側で取り除いた「幻エッジ」（transform 以外の op の input）が出て、
+// params 経由の依存は出なかった。設計者はプレビューを見て確定し、監査者は
+// 別の規則で描かれた図を見る、という状態になっていた。
+// 規則の正本は `kawasemi/ai_input/viz.py::program_to_mermaid` ただ1つで、ここが行うのは
+// 描画（レイアウト）だけである。
+let graphReq = 0;
+async function renderGraph() {
+  const box = document.getElementById('graph');
+  if (!box || !window.mermaid) return;
+  // 投げるのは `renderItem()` からだけ（項目切替と step の追加・削除・移動）で、
+  // テキスト入力のたびではない。それでも連続操作で応答が前後しうるため、
+  // **最後に投げた要求の図だけを描く**
+  // （古い応答が新しい図を上書きすると、編集内容と食い違う図を確定してしまう）。
+  const seq = ++graphReq;
+  const fail = msg => { if (seq === graphReq) box.innerHTML = `<span class="empty" style="font-size:0.8rem;">${esc(msg)}</span>`; };
+  try {
+    const data = await post(`{{ base_path() }}/ai-input/questionnaires/${QID}/plan/graph`, { program: programOf(ITEMS[cur]) });
+    if (seq !== graphReq) return;
+    if (!data || typeof data.mermaid !== 'string') {
+      // 保存と同じスキーマを通すので、ここで弾かれる program は保存もできない
+      fail('この内容では図を作れません（保存もできない形です）');
+      return;
+    }
+    const { svg } = await mermaid.render('g' + (graphSeq++), data.mermaid);
+    if (seq !== graphReq) return;
+    box.innerHTML = svg;
+  } catch (e) { fail('グラフ描画エラー'); }
+}
+
+// --- サーバ通信 ---
+async function post(url, body) {
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
+    body: JSON.stringify(body || {}),
+  });
+  return resp.json();
+}
+
+async function saveCurrent(confirm) {
+  // syncToMemory は params の JSON が不正なら例外を投げる。握り潰すと編集が消えたまま
+  // 「確認しました」になるため、ここで止めて利用者へ返す。
+  try { syncToMemory(); }
+  catch (e) { setStatus(e.message, false); return; }
+  const it = ITEMS[cur];
+  setStatus('保存中...', true);
+  try {
+    const data = await post(`{{ base_path() }}/ai-input/questionnaires/${QID}/plan/${encodeURIComponent(it.link_id)}?confirm=${confirm}`, { program: programOf(it) });
+    if (data.success) {
+      it.status = data.status; it.has_plan = true; it.stale = false;
+      it.needs_input = programOf(it).steps.some(s => s.needs_input);
+      // step が空のプランは確定できるが、取得の設計ができたわけではない。警告として出す。
+      if (data.warning) setStatus(`⚠ 確認しました。${data.warning}`, false);
+      else setStatus(confirm ? '✓ 確認しました' : '✓ 保存しました', true);
+      renderProgress();
+      return true;
+    }
+    const extra = data.errors ? '\n' + data.errors.join('\n') : '';
+    setStatus(`エラー: ${(data.message || '保存に失敗しました')}${extra}`, false);
+  } catch (e) { setStatus(`通信エラー: ${e}`, false); }
+  return false;
+}
+
+async function confirmNext() {
+  const ok = await saveCurrent(true);
+  if (ok && cur < ITEMS.length - 1) go(1);
+  else renderItem();
+}
+
+async function recompile() {
+  const model = document.getElementById('model-input').value.trim() || DEFAULT_MODEL;
+  const it = ITEMS[cur];
+  setStatus(`「${it.item_text || it.link_id}」を再作成中...`, true);
+  const regenBtn = document.getElementById('regen-btn');
+  if (regenBtn) regenBtn.disabled = true;
+  try {
+    const data = await post(`{{ base_path() }}/ai-input/questionnaires/${QID}/plan/${encodeURIComponent(it.link_id)}/recompile`, { model });
+    if (data.success) {
+      it.program = data.program; it.status = data.status; it.has_plan = true; it.stale = false; it.needs_input = data.needs_input;
+      setStatus('✓ 再作成しました', true);
+      renderProgress(); renderItem();
+    } else { setStatus(`エラー: ${data.message || '再作成に失敗しました'}`, false); }
+  } catch (e) { setStatus(`通信エラー: ${e}`, false); }
+  if (regenBtn) regenBtn.disabled = false;
+}
+
+async function compileAll() {
+  const model = document.getElementById('model-input').value.trim() || DEFAULT_MODEL;
+  setStatus('一括作成中...（項目数によっては時間がかかります）', true);
+  document.getElementById('gen-btn').disabled = true;
+  try {
+    const data = await post(`{{ base_path() }}/ai-input/questionnaires/${QID}/plan/compile`, { model });
+    if (data.success) {
+      // rejected_llm: 自動構造化AI無効構成で LLM op を含むため保存されなかった項目
+      // **未試行があるときは緑にしない**。この経路は従来 500 で失敗として
+      // 見えていたので、部分結果を 200 で返すようにした結果**「緑の成功」に化ける**退行を
+      // 作りうる（手順書・所在と同じ形に揃える）。
+      const pending = data.unattempted || 0;
+      const note = data.message ? ` ${data.message}` : '';
+      // **警告にするのは、押し直さないと埋まらない／直さないと埋まらないものがあるときだけ**。
+      // 確認済みで作り直さなかった項目は意図した振る舞いなので、緑のまま注記を出す。
+      const warn = pending || (data.rejected_llm || []).length || Object.keys(data.validation_errors || {}).length;
+      const mark = warn ? '⚠' : '✓';
+      setStatus(`${mark} ${data.compiled} 件を作成しました。${note} 再読込します...`, !warn);
+      setTimeout(() => location.reload(), (data.message || pending) ? 4000 : 800);
+    } else {
+      setStatus(`${data.message || '作成に失敗しました'}`, false);
+      document.getElementById('gen-btn').disabled = false;
+    }
+  } catch (e) { setStatus(`通信エラー: ${e}`, false); document.getElementById('gen-btn').disabled = false; }
+}
+
+
+// キャンバスから `#item=<linkId>` で飛んできたら、その項目から始める。
+// 無ければ従来どおり先頭（①）。
+function indexFromHash() {
+  const m = /^#item=(.+)$/.exec(location.hash || '');
+  if (!m) return 0;
+  let linkId;
+  try { linkId = decodeURIComponent(m[1]); } catch (e) { return 0; }
+  const idx = ITEMS.findIndex(it => it.link_id === linkId);
+  if (idx < 0) {
+    // この画面の対象（上流が確定した項目）に無い。黙って①に戻さず、そう言う
+    setStatus(`項目「${linkId}」はこの画面の対象ではありません（上流が未確定か、該当データなしで決着した項目）。先頭の項目を表示しています`, false);
+    return 0;
+  }
+  return idx;
+}
+cur = indexFromHash();
+renderShell();
+</script>
+{% endblock %}

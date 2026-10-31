@@ -1,0 +1,182 @@
+{% extends "base.html" %}
+
+{% block title %}回答一覧 - {{ questionnaire.title or 'Questionnaire' }} - KAWASEMI{% endblock %}
+
+{% block content %}
+<div class="breadcrumb">
+    <a href="{{ base_path() }}/">ホーム</a> &gt; <a href="{{ base_path() }}/questionnaires?mode=response">QuestionnaireResponse管理</a> &gt; 回答一覧
+</div>
+
+<div class="card">
+    <div class="page-head">
+        <div>
+            <h2>回答一覧</h2>
+            <div class="page-head__sub">
+                Questionnaire: {{ questionnaire.title or 'タイトルなし' }} (ID: {{ questionnaire.id }})
+            </div>
+        </div>
+        <div class="page-head__actions">
+            <a href="{{ base_path() }}/forms/{{ questionnaire.id }}" class="btn btn--sm btn--primary">新規入力</a>
+            <form action="{{ base_path() }}/api/v100/questionnaire-responses/bulk-export" method="POST" style="margin: 0;">
+                <input type="hidden" name="questionnaire_id" value="{{ questionnaire.id }}">
+                <button type="submit" class="btn btn--sm btn--secondary">一括エクスポート</button>
+            </form>
+        </div>
+    </div>
+
+    <div class="summary-row">
+        <div class="summary-item">
+            <div class="count">{{ responses | length }}</div>
+            <div class="label">総回答数</div>
+        </div>
+        <div class="summary-item">
+            <div class="count">{{ responses | selectattr('status', 'equalto', 'completed') | list | length }}</div>
+            <div class="label">完了</div>
+        </div>
+        <div class="summary-item">
+            <div class="count">{{ responses | selectattr('status', 'equalto', 'in-progress') | list | length }}</div>
+            <div class="label">入力中</div>
+        </div>
+    </div>
+
+    <div class="filter-bar">
+        <label>患者:</label>
+        <input type="text" id="subjectFilter" placeholder="Patient/xxx" value="{{ subject_filter or '' }}" style="width: 200px;">
+        <label>ステータス:</label>
+        <select id="statusFilter">
+            <option value="">すべて</option>
+            <option value="completed" {% if status_filter == 'completed' %}selected{% endif %}>completed</option>
+            <option value="in-progress" {% if status_filter == 'in-progress' %}selected{% endif %}>in-progress</option>
+            <option value="amended" {% if status_filter == 'amended' %}selected{% endif %}>amended</option>
+        </select>
+        <button type="button" onclick="applyFilter()" class="btn btn--sm btn--secondary">フィルタ</button>
+        <button type="button" onclick="clearFilter()" class="btn btn--sm btn--secondary">クリア</button>
+    </div>
+
+    <div class="bulk-bar" id="bulkActions">
+        <span><strong id="selectedCount">0</strong>件選択中</span>
+        <button type="button" onclick="exportSelected()" class="btn btn--sm btn--secondary">選択をエクスポート</button>
+    </div>
+
+    {% if responses %}
+    <div class="table-wrap">
+        <table class="table">
+            <thead>
+                <tr>
+                    <th style="width: 40px;">
+                        <input type="checkbox" id="selectAll" onchange="toggleSelectAll()">
+                    </th>
+                    <th>ID</th>
+                    <th>患者</th>
+                    <th>作成者</th>
+                    <th>作成日時</th>
+                    <th>ステータス</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for r in responses %}
+                <tr>
+                    <td>
+                        <input type="checkbox" class="response-checkbox" value="{{ r.id }}" onchange="updateBulkActions()">
+                    </td>
+                    <td>{{ r.id }}</td>
+                    <td>{{ r.subject or '-' }}</td>
+                    <td>{{ r.author or '-' }}</td>
+                    <td>{{ r.authored or (r.created_at.strftime('%Y-%m-%d %H:%M') if r.created_at else '-') }}</td>
+                    <td>
+                        {% set badge = {'completed': 'success', 'in-progress': 'warning', 'amended': 'info'}.get(r.status, 'neutral') %}
+                        <span class="badge badge--{{ badge }}">{{ r.status }}</span>
+                    </td>
+                    <td>
+                        <div class="row-actions">
+                            <a href="{{ base_path() }}/responses/{{ r.id }}">詳細</a>
+                            <a href="{{ base_path() }}/responses/{{ r.id }}/edit">編集</a>
+                            <form action="{{ base_path() }}/api/v100/questionnaire-responses/{{ r.id }}/export" method="POST" style="margin: 0;">
+                                <button type="submit" class="btn btn--sm btn--secondary">エクスポート</button>
+                            </form>
+                        </div>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="empty-state">
+        <p>この質問票に対する回答がまだありません。</p>
+        <a href="{{ base_path() }}/forms/{{ questionnaire.id }}" class="btn btn--sm btn--primary">新規入力する</a>
+    </div>
+    {% endif %}
+</div>
+
+<div class="back-link">
+    <a href="{{ base_path() }}/questionnaires?mode=response">&larr; Questionnaire選択に戻る</a>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function applyFilter() {
+    const subject = document.getElementById('subjectFilter').value;
+    const status = document.getElementById('statusFilter').value;
+    const url = new URL(window.location.href);
+
+    if (subject) {
+        url.searchParams.set('subject', subject);
+    } else {
+        url.searchParams.delete('subject');
+    }
+    if (status) {
+        url.searchParams.set('status', status);
+    } else {
+        url.searchParams.delete('status');
+    }
+    window.location.href = url.toString();
+}
+
+function clearFilter() {
+    const url = new URL(window.location.href);
+    url.searchParams.delete('subject');
+    url.searchParams.delete('status');
+    window.location.href = url.toString();
+}
+
+function toggleSelectAll() {
+    const selectAll = document.getElementById('selectAll');
+    const checkboxes = document.querySelectorAll('.response-checkbox');
+    checkboxes.forEach(cb => cb.checked = selectAll.checked);
+    updateBulkActions();
+}
+
+function updateBulkActions() {
+    const checkboxes = document.querySelectorAll('.response-checkbox:checked');
+    const bulkActions = document.getElementById('bulkActions');
+    const selectedCount = document.getElementById('selectedCount');
+
+    if (checkboxes.length > 0) {
+        bulkActions.classList.add('is-active');
+        selectedCount.textContent = checkboxes.length;
+    } else {
+        bulkActions.classList.remove('is-active');
+    }
+}
+
+function exportSelected() {
+    const checkboxes = document.querySelectorAll('.response-checkbox:checked');
+    const ids = Array.from(checkboxes).map(cb => cb.value);
+
+    if (ids.length === 0) {
+        alert('エクスポートする回答を選択してください');
+        return;
+    }
+
+    // 一括エクスポートAPIを呼び出す（IDリストをクエリパラメータとして送信）
+    const form = document.createElement('form');
+    form.method = 'POST';
+    form.action = '/api/v100/questionnaire-responses/bulk-export?ids=' + ids.join(',');
+    document.body.appendChild(form);
+    form.submit();
+}
+</script>
+{% endblock %}

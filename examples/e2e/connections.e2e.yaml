@@ -1,0 +1,62 @@
+# E2E 試験環境用 接続レジストリ（自己完結ダミー）
+#
+# `kawasemi e2e setup` がこれを var/e2e/connections.yaml へ複製する。
+# 通常の起動と並行して動かせるよう、生成物（var/e2e/）と FHIR スタブのポート
+# （:8084）を分ける。
+#
+# scope: self=アプリDB / external=外部DB・FHIR・ファイル
+#
+# 患者キー: コンパイラが step の key_type / physical_format をここと索引から焼き込む。
+#   key_type     file / csv / fhir で {{patient_id}} を埋める名前空間（DB は索引の payload.key_type）
+#   key_formats  この接続が key_type ごとに格納している物理形（DWH と EF の mrn は10桁ゼロ詰め）
+
+connections:
+  # KAWASEMI 自身のアプリDB
+  app_db:
+    kind: db
+    scope: self
+
+  # 外部DB（院内DWH 相当）。DSN は secret_ref(env) で解決する。
+  # 実行時は DWH_DSN=sqlite+aiosqlite:///var/e2e/dwh.db を設定する。
+  dwh:
+    kind: db
+    scope: external
+    driver: sqlite
+    secret_ref: env:DWH_DSN
+    # DB の step には使われない（列ごとの payload.key_type が決める）。患者で絞らない表
+    # （item_counts とマスタ）に付かないことを test_unscoped_db_units_get_no_patient_key が見る
+    key_type: mrn
+    key_formats:
+      mrn: {pad: 10}
+
+  # 第2接続: 医事会計相当。患者キーは DWH とは別の billing_id。
+  # 実行時は BILLING_DSN=sqlite+aiosqlite:///var/e2e/billing.db を設定する。
+  billing:
+    kind: db
+    scope: external
+    driver: sqlite
+    secret_ref: env:BILLING_DSN
+
+  # 外部FHIR（院内FHIR 相当）。実行時の取得先は settings.fhir_server_url が決めるため
+  # base_url は索引/表示メタ用。スタブは :8084 で待ち受ける。
+  hosp_fhir:
+    kind: fhir
+    scope: external
+    base_url: http://localhost:8084/fhir
+    key_type: fhir_patient_id
+
+  # 外部ファイル（患者レポート格納）。file_extract が root_path 起点で読む。
+  report_fs:
+    kind: file
+    scope: external
+    root_path: var/e2e/reports
+    key_type: report_key
+
+  # 他システムのエクスポートCSV（DPC EF 相当）。csv_extract が root_path 起点の ef.csv を開く。
+  dpc_ef:
+    kind: file
+    scope: external
+    root_path: var/e2e/csv
+    key_type: mrn
+    key_formats:
+      mrn: {pad: 10}

@@ -1,0 +1,28 @@
+# 施設の索引規則（kawasemi_indexer.site_rules が読む）。**値はすべて架空の例**。
+# 置き場所は <SITE_DIR>/indexer_rules.yaml（設定 INDEXER_RULES_FILE で変えられる）。
+# ファイルが無ければ空の規則として動く（参照リンクは下書きせず、患者キーは
+# 施設に依らない規則だけで推定する）。
+
+# 参照リンク（kawasemi-indexer draft-ref-links）: 概念名 → 値域マスタの表。
+# 概念名はコードが持つ（byomei = 病名、exam = 検体検査項目）。書いた概念だけ下書きする。
+ref_link_masters:
+  byomei:
+    connection_id: ehr
+    db_qualified: MASTER.DISEASE
+  exam:
+    connection_id: dwh
+    db_qualified: MASTER.LAB_ITEM
+
+# 患者キーの推定（索引の生成時）
+patient_key:
+  # 既定の論理名（患者番号・患者ID・診療録番号など）に足す、施設に固有の論理名。
+  # 既定のどれも無い表でだけ、書いた順に採る。
+  additional_logical_names:
+    - 受診者番号
+  # 曖昧な論理名を、命名の一貫性を確かめた接続の PK 列にだけ患者キーとして認める。
+  # 論理名 → connection_id の一覧。
+  conditional_logical_names:
+    ID: [claims_demo]
+  # 論理名の完全一致でも「患者ID」が2列残る表。患者キーを付けない（人が needs_input で決める）。
+  ambiguous_tables:
+    - DEMO.PATIENT_LINK

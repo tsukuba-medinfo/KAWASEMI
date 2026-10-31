@@ -1,0 +1,108 @@
+{
+  "resourceType": "Questionnaire",
+  "id": "patient-basic-info",
+  "meta": {
+    "profile": [
+      "http://www.hosp.ncgm.go.jp/JASPEHR/fhir/StructureDefinition/jaspehr-questionnaire"
+    ]
+  },
+  "url": "http://example.org/fhir/Questionnaire/patient-basic-info",
+  "version": "1.0.0",
+  "name": "PatientBasic",
+  "title": "患者基本情報入力フォーム",
+  "status": "active",
+  "date": "2025-11-15",
+  "publisher": "KAWASEMI Project",
+  "description": "患者の基本情報を収集するためのサンプルQuestionnaire（注:デモ実装のため本ガイドの一部要件は未充足: item.code未定義・独自CodeSystem等）",  "item": [
+    {
+      "linkId": "patient_name",
+      "type": "string",
+      "text": "患者氏名",
+      "required": true
+    },
+    {
+      "linkId": "patient_kana",
+      "type": "string",
+      "text": "患者氏名（カナ）",
+      "required": false
+    },
+    {
+      "linkId": "gender",
+      "type": "choice",
+      "text": "性別",
+      "required": true,
+      "answerOption": [
+        {
+          "valueCoding": {
+            "system": "http://hl7.org/fhir/administrative-gender",
+            "code": "male",
+            "display": "男性"
+          }
+        },
+        {
+          "valueCoding": {
+            "system": "http://hl7.org/fhir/administrative-gender",
+            "code": "female",
+            "display": "女性"
+          }
+        },
+        {
+          "valueCoding": {
+            "system": "http://hl7.org/fhir/administrative-gender",
+            "code": "other",
+            "display": "その他"
+          }
+        }
+      ]
+    },
+    {
+      "linkId": "birth_date",
+      "type": "date",
+      "text": "生年月日",
+      "required": true
+    },
+    {
+      "linkId": "address",
+      "type": "string",
+      "text": "住所",
+      "required": false
+    },
+    {
+      "linkId": "phone",
+      "type": "string",
+      "text": "電話番号",
+      "required": false
+    },
+    {
+      "linkId": "has_allergy",
+      "type": "boolean",
+      "text": "アレルギーの有無",
+      "required": true
+    },
+    {
+      "linkId": "allergy_detail",
+      "type": "text",
+      "text": "アレルギーの詳細（ある場合）",
+      "required": false,
+      "enableWhen": [
+        {
+          "question": "has_allergy",
+          "operator": "=",
+          "answerBoolean": true
+        }
+      ]
+    },
+    {
+      "linkId": "medical_history",
+      "type": "text",
+      "text": "既往歴",
+      "required": false
+    },
+    {
+      "linkId": "consent",
+      "type": "boolean",
+      "text": "個人情報の取り扱いに同意します",
+      "required": true
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+
+{% block title %}送信完了 - KAWASEMI{% endblock %}
+
+{% block content %}
+<div class="card">
+    <div class="alert alert-success">
+        <h2>✓ 送信完了</h2>
+        <p>QuestionnaireResponseが正常に作成されました。</p>
+    </div>
+
+    <h3 class="section-title">作成された QuestionnaireResponse</h3>
+    <table class="meta-table">
+        <tr>
+            <th>内部ID</th>
+            <td>{{ response.id }}</td>
+        </tr>
+        <tr>
+            <th>FHIR ID</th>
+            <td>{{ response.fhir_id }}</td>
+        </tr>
+        <tr>
+            <th>ステータス</th>
+            <td>{{ response.status }}</td>
+        </tr>
+        {% if response.subject %}
+        <tr>
+            <th>患者</th>
+            <td>{{ response.subject }}</td>
+        </tr>
+        {% endif %}
+    </table>
+
+    <div class="form-actions">
+        <a href="{{ base_path() }}/forms" class="btn btn--primary">フォーム一覧に戻る</a>
+        <a href="{{ base_path() }}/forms/{{ questionnaire_id }}" class="btn btn--secondary">もう一度入力する</a>
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,127 @@
+{% extends "base.html" %}
+
+{% block title %}チェック - {{ questionnaire.title or questionnaire.fhir_id }} - KAWASEMI{% endblock %}
+
+{% block content %}
+<div style="margin-bottom:0.5rem;">
+  <h2>チェック — {{ questionnaire.title or questionnaire.fhir_id }}</h2>
+</div>
+
+<div class="check-toolbar">
+  <div>
+    <span class="pos">{{ position }} / {{ queue_total }} 件</span>
+    <span class="patient">／ Patient ID: <b>{{ target.patient_id }}</b></span>
+    {% if target.needs_attention %}<span class="badge badge--warning">⚑ 要確認</span>{% endif %}
+  </div>
+  <div class="nav-links">
+    {% if prev_id %}
+    <a class="btn btn--secondary btn--sm"
+       href="{{ base_path() }}/datasets/{{ dataset_id }}/check?questionnaire_id={{ questionnaire.id }}&target_id={{ prev_id }}">← 前へ</a>
+    {% endif %}
+    {% if next_id %}
+    <a class="btn btn--secondary btn--sm"
+       href="{{ base_path() }}/datasets/{{ dataset_id }}/check?questionnaire_id={{ questionnaire.id }}&target_id={{ next_id }}">次へ →</a>
+    {% endif %}
+    <a class="btn btn--secondary btn--sm"
+       href="{{ base_path() }}/datasets/{{ dataset_id }}?questionnaire_id={{ questionnaire.id }}">一覧へ戻る</a>
+  </div>
+</div>
+
+{% if locked_by %}
+<div class="alert alert-warning">⚠ この対象は <b>{{ locked_by }}</b> さんがレビュー中でした（あなたがレビュー担当になりました）。</div>
+{% endif %}
+
+{% if not execution %}
+<div class="alert alert-warning">この対象のAIドラフト（実行ログ）が見つかりませんでした。手入力で確定するか、バッチを再実行してください。</div>
+{% endif %}
+
+<div class="af-layout">
+  <!-- 左: フォーム（AIドラフトを事前入力） -->
+  <div class="form-panel">
+    <form method="post"
+          action="{{ base_path() }}/datasets/{{ dataset_id }}/check/{{ target.id }}/confirm">
+      {% for field in form_fields %}
+      {% if field.type == 'group' %}
+      <h3 class="field-group-title">{{ field.text }}</h3>
+      {% elif field.type == 'display' %}
+      <p class="field-display">{{ field.text }}</p>
+      {% else %}
+      {% set pv = prefill.get(field.link_id) %}
+      {% set is_ai = field.link_id in prefill %}
+      <div class="field-wrapper">
+        <label class="field-label{% if field.required %} required{% endif %}" for="field-{{ field.link_id }}">
+          {{ field.text or field.link_id }}
+          {% if is_ai %}<span class="ai-badge">AI</span>{% else %}<span class="manual-badge">手動</span>{% endif %}
+        </label>
+
+        {% if field.type == 'boolean' %}
+        <input type="checkbox" id="field-{{ field.link_id }}" name="{{ field.link_id }}"
+               class="field-input{% if is_ai %} ai-filled{% endif %}"
+               {% if pv in [true, 'true', 'True', '1', 1] %}checked{% endif %}>
+        {% elif field.type in ('choice', 'open-choice') %}
+        <select id="field-{{ field.link_id }}" name="{{ field.link_id }}"
+                class="field-input{% if is_ai %} ai-filled{% endif %}">
+          <option value="">選択してください</option>
+          {% for opt in field.options %}
+          <option value="{{ opt.value }}" {% if pv is not none and opt.value|string == pv|string %}selected{% endif %}>{{ opt.display }}</option>
+          {% endfor %}
+        </select>
+        {% elif field.type == 'text' %}
+        <textarea id="field-{{ field.link_id }}" name="{{ field.link_id }}"
+                  class="field-input{% if is_ai %} ai-filled{% endif %}">{{ pv if pv is not none else '' }}</textarea>
+        {% else %}
+        <input type="{{ field.input_type or 'text' }}" id="field-{{ field.link_id }}"
+               name="{{ field.link_id }}" class="field-input{% if is_ai %} ai-filled{% endif %}"
+               value="{{ pv if pv is not none else '' }}">
+        {% endif %}
+      </div>
+      {% endif %}
+      {% endfor %}
+
+      <div class="actions-bar">
+        <button type="submit" class="btn btn--success">承認して確定（→次へ）</button>
+      </div>
+    </form>
+
+    <!-- 後回し（要確認フラグ）は別フォーム -->
+    <form method="post" style="margin-top:0.75rem;"
+          action="{{ base_path() }}/datasets/{{ dataset_id }}/check/{{ target.id }}/flag">
+      <button type="submit" class="btn btn--secondary">要確認にして後回し（→次へ）</button>
+    </form>
+  </div>
+
+  <!-- 右: AI根拠（保存済みトレース） -->
+  <div class="evidence-panel">
+    <h3>AI 根拠情報</h3>
+    {% set ev_keys = evidence.keys() | reject('equalto', '_meta') | list %}
+    {% for link_id in ev_keys %}
+    {% set ev = evidence[link_id] %}
+    <details class="ev-card">
+      <summary>
+        <span>{{ link_id }}</span>
+        {% if ev.error %}<span class="ev-err">エラー</span>
+        {% else %}<span class="ev-val">= {{ ev.value if ev.value is not none else '—' }}</span>{% endif %}
+      </summary>
+      <div class="ev-body">
+        {% if ev.error %}<div class="ev-err">{{ ev.error }}</div>{% endif %}
+        {% for t in ev.trace %}
+        <div class="ev-step">
+          <div style="font-size:0.78rem;"><b>{{ loop.index }}. {{ op_labels.get(t.op, t.op) }}</b>
+            <code style="color:var(--color-ink-2);">{{ t.id }}</code>
+            → <b>{% if t.skipped %}<span style="color:var(--color-ink-2);">⏭ 未実行（guard 偽）</span>
+              {% elif t.error %}<span class="ev-err">⚠ {{ t.error }}</span>{% else %}{{ t.output }}{% endif %}</b>
+          </div>
+          {% if t.llm %}<code class="ev-code">LLM({{ t.llm.model }}): {{ (t.llm.prompt or '')[:280] }}</code>{% endif %}
+        </div>
+        {% else %}
+        <div class="empty">トレースなし</div>
+        {% endfor %}
+      </div>
+    </details>
+    {% endfor %}
+    {% if not ev_keys %}
+    <div class="evidence-empty">根拠情報がありません</div>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

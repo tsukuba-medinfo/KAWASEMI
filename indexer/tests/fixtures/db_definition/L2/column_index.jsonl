@@ -1,0 +1,5 @@
+{"table_id": "LAB", "db_qualified": "DEMO.LAB", "table_logical": "検査結果", "db_group": "DEMO_DB", "physical_name": "BLAST_PCT", "logical_name": "芽球割合", "type_raw": "NUMBER(5,2)", "type_base": "NUMBER", "pk": false, "notes": "末梢血の芽球割合(%)"}
+{"table_id": "LAB", "db_qualified": "DEMO.LAB", "table_logical": "検査結果", "db_group": "DEMO_DB", "physical_name": "WBC", "logical_name": "白血球数", "type_raw": "NUMBER", "type_base": "NUMBER", "pk": false, "notes": null}
+{"table_id": "RECEPTION", "db_qualified": "DEMO.RECEPTION", "table_logical": "受付", "db_group": "DEMO_DB", "physical_name": "RECEPT_DATETIME", "logical_name": "受付日時", "type_raw": "DATETIME", "type_base": "DATETIME", "pk": false, "notes": "初診の受付日時"}
+{"table_id": "PATIENT", "db_qualified": "DEMO.PATIENT", "table_logical": "患者", "db_group": "DEMO_DB", "physical_name": "BIRTH_DATE", "logical_name": "生年月日", "type_raw": "DATE", "type_base": "DATE", "pk": false, "notes": null}
+{"table_id": "PATIENT", "db_qualified": "DEMO.PATIENT", "table_logical": "患者", "db_group": "DEMO_DB", "physical_name": "PATIENT_ID", "logical_name": "患者ID", "type_raw": "CHAR(10)", "type_base": "CHAR", "pk": true, "notes": "主キー"}

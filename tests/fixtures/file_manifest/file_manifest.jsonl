@@ -1,0 +1,1 @@
+{"label": "外部検査レポートPDF", "aliases": ["紹介状"], "path_pattern": "/reports/{{patient_id}}/*.pdf", "extract": {"method": "pdf_llm"}, "connection_id": "report_fs", "notes": "患者ごとの外部検査レポート"}

@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}KAWASEMI{% endblock %}</title>
+    <script>
+        // テーマ初期化（FOUC 回避: スタイル適用前に data-theme を確定）
+        (function () {
+            try {
+                var t = localStorage.getItem('kawasemi-theme');
+                if (!t) t = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+                document.documentElement.setAttribute('data-theme', t);
+            } catch (e) {}
+        })();
+    </script>
+    <link rel="stylesheet" href="{{ base_path() }}/static/css/tokens.css?v={{ static_v('css/tokens.css') }}">
+    <link rel="stylesheet" href="{{ base_path() }}/static/css/app.css?v={{ static_v() }}">
+    {% block extra_css %}{% endblock %}
+
+    <!-- CSRF Token（raw。署名済み cookie をサーバ側で復号した値）-->
+    {% set _csrf = csrf_token_for(request) %}
+    {% if _csrf %}<meta name="csrf-token" content="{{ _csrf }}">{% endif %}
+    <script>
+        // CSRF は header モード（X-CSRF-Token のみ検証）。プレーン form の submit を横取りし、
+        // meta の raw トークンをヘッダに載せて fetch 送信する（cookie は signed のため使わない）。
+        (function () {
+            function rawCsrf() {
+                var m = document.querySelector('meta[name="csrf-token"]');
+                return m ? m.content : '';
+            }
+            // バブリングで登録し、フォームの onsubmit（confirm 確認・入力検証）が先に走る。
+            // onsubmit が return false / preventDefault した場合は defaultPrevented を尊重して
+            // 送信しない（削除確認のキャンセルで削除が走る等の回帰を防ぐ）。
+            document.addEventListener('submit', function (e) {
+                if (e.defaultPrevented) return;
+                var form = e.target;
+                if (!(form instanceof HTMLFormElement)) return;
+                if ((form.method || 'get').toLowerCase() === 'get') return;
+                // 独自に fetch 送信するフォームは除外（役割切替 / login）
+                if (form.hasAttribute('data-csrf-skip') || form.id === 'roleSwitchForm') return;
+                e.preventDefault();
+                var submitter = e.submitter;
+                var data = new FormData(form);
+                if (submitter && submitter.name) data.append(submitter.name, submitter.value || '');
+                fetch(form.action || window.location.href, {
+                    method: form.method || 'POST',
+                    headers: { 'X-CSRF-Token': rawCsrf() },
+                    body: data,
+                    credentials: 'same-origin'
+                }).then(function (res) {
+                    if (res.redirected) { window.location.href = res.url; return null; }
+                    return res.text();
+                }).then(function (html) {
+                    if (html != null) {
+                        document.open();
+                        document.write(html);
+                        document.close();
+                        // document.write 後は DOMContentLoaded が再発火しないため明示的に通知し、
+                        // 再描画ページ（検証エラー再表示等）のクライアント初期化を動かす。
+                        document.dispatchEvent(new Event('DOMContentLoaded'));
+                    }
+                }).catch(function () { window.location.reload(); });
+            }, false);
+        })();
+    </script>
+</head>
+<body>
+    <header>
+        <div class="container">
+            <h1>KAWASEMI</h1>
+            <nav class="nav">
+                <button type="button" class="theme-toggle" id="themeToggle" aria-label="ライト/ダーク表示の切替">🌙 ダーク</button>
+                {% if current_user %}
+                {% set active = current_user.active_role %}
+                <a href="{{ base_path() }}/">ホーム</a>
+                {# ナビ項目。**アクティブ役割で消さない。** 使えない項目も
+                   切替えれば届くなら 🔒 付きで見せ、担当役割を常時表示する
+                   （DESIGN.md「触れない部分も殺さず、内容と状態は見える」）。 #}
+                {% for item in nav_items(current_user) %}
+                {% if item.other_entry %}
+                <a href="{{ item.other_entry }}" class="nav-locked"
+                   title="{{ item.label }}は{{ role_display_name(item.owner) }}の入り口で使います。押すとそちらへ移ります。">
+                    <span aria-hidden="true">↗</span>{{ item.label }}
+                    <span class="nav-locked__owner">{{ role_display_name(item.owner) }}の入り口</span>
+                </a>
+                {% elif item.locked %}
+                <a href="{{ base_path() }}{{ item.url }}" class="nav-locked"
+                   title="{{ item.label }}は{{ role_display_name(item.owner) }}の担当です。押すと切り替えられます。">
+                    <span aria-hidden="true">🔒</span>{{ item.label }}
+                    <span class="nav-locked__owner">{{ role_display_name(item.owner) }}</span>
+                </a>
+                {% else %}
+                <a href="{{ base_path() }}{{ item.url }}">{{ item.label }}</a>
+                {% endif %}
+                {% endfor %}
+
+                {# 役割切替（切替可能な役割が2つ以上のときだけ表示） #}
+                {% set switchable = current_user.switchable_role_names() %}
+                {% if switchable | length > 1 %}
+                {# CSRF はヘッダ方式（X-CSRF-Token）。素のフォーム送信では
+                   ヘッダを付けられないため、login と同様に JS で fetch 送信する。
+                   hidden 入力は JS がトークン値を読むためのキャリア。 #}
+                <form action="{{ base_path() }}/switch-role" method="POST" id="roleSwitchForm"
+                      style="display:inline; margin:0;">
+                    {% set _csrf = csrf_token_for(request) %}
+                    {% if _csrf %}<input type="hidden" name="csrf_token" value="{{ _csrf }}">{% endif %}
+                    <select name="role" id="roleSwitchSelect"
+                            style="width:auto; padding:0.1rem 0.4rem; font-size:0.85rem;
+                                   border-radius:4px; cursor:pointer;">
+                        {% for r in switchable %}
+                        <option value="{{ r }}" {% if r == active %}selected{% endif %}>
+                            役割: {{ role_display_name(r) }}
+                        </option>
+                        {% endfor %}
+                    </select>
+                </form>
+                <script>
+                    (function () {
+                        var form = document.getElementById('roleSwitchForm');
+                        var select = document.getElementById('roleSwitchSelect');
+                        if (!form || !select) return;
+                        select.addEventListener('change', function () {
+                            var data = new FormData(form);
+                            var tokenEl = form.querySelector('input[name="csrf_token"]');
+                            fetch(form.action, {
+                                method: 'POST',
+                                headers: { 'X-CSRF-Token': tokenEl ? tokenEl.value : '' },
+                                body: data,
+                                credentials: 'same-origin'
+                            }).then(function (res) {
+                                window.location.href = res.redirected ? res.url : '/';
+                            }).catch(function () {
+                                window.location.reload();
+                            });
+                        });
+                    })();
+                </script>
+                {% else %}
+                <span class="nav-role-badge">役割: {{ role_display_name(active) }}</span>
+                {% endif %}
+
+                {% if current_entry().name %}<span class="nav-role-badge">入り口: {{ current_entry().name }}</span>{% endif %}
+                <span class="nav-role-badge">{{ current_user.full_name }}</span>
+                <a href="{{ base_path() }}/logout">ログアウト</a>
+                {% else %}
+                <a href="{{ base_path() }}/login">ログイン</a>
+                {% endif %}
+            </nav>
+        </div>
+    </header>
+
+    <script>
+        // テーマ切替トグル（localStorage に永続化）
+        (function () {
+            var btn = document.getElementById('themeToggle');
+            if (!btn) return;
+            var root = document.documentElement;
+            function sync() {
+                var dark = root.getAttribute('data-theme') === 'dark';
+                btn.textContent = dark ? '☀ ライト' : '🌙 ダーク';
+            }
+            sync();
+            btn.addEventListener('click', function () {
+                var dark = root.getAttribute('data-theme') === 'dark';
+                var next = dark ? 'light' : 'dark';
+                root.setAttribute('data-theme', next);
+                try { localStorage.setItem('kawasemi-theme', next); } catch (e) {}
+                sync();
+            });
+        })();
+    </script>
+
+    <div class="container">
+        {% block content %}{% endblock %}
+    </div>
+
+    {% block extra_js %}{% endblock %}
+</body>
+</html>

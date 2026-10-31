@@ -1,0 +1,260 @@
+{% extends "base.html" %}
+
+{% block title %}データ収集手続確認書 - {{ questionnaire.title or questionnaire.fhir_id }} - KAWASEMI{% endblock %}
+
+{% block extra_css %}
+<style>
+  .doc-title { font-size:1.4rem; font-weight:700; margin-bottom:0.25rem; }
+  .doc-sub { color:#666; font-size:0.9rem; margin-bottom:1rem; }
+  .meta-table { width:100%; border-collapse:collapse; margin-bottom:1.5rem; font-size:0.9rem; }
+  .meta-table th, .meta-table td { border:1px solid #ddd; padding:0.45rem 0.7rem; text-align:left; }
+  .meta-table th { background:#f5f5f5; width:160px; }
+  .badge { display:inline-block; padding:0.1rem 0.5rem; border-radius:10px; font-size:0.78rem; }
+  .b-success { background:#d5f5e3; color:#1e8449; }
+  .b-partial { background:#fff3cd; color:#856404; }
+  .b-failed { background:#fdecea; color:#c0392b; }
+
+  .declaration { border:1px solid {{ '#f0d9bf' if ai_enabled else '#c8e6c9' }}; background:{{ '#fff8f0' if ai_enabled else '#f3faf3' }}; border-radius:6px; padding:0.8rem 1rem; margin-bottom:1.5rem; }
+  .declaration h4 { margin:0 0 0.4rem; font-size:0.9rem; }
+  .declaration p { margin:0; font-size:0.85rem; color:#555; }
+
+  .item { border:1px solid #ddd; border-radius:6px; margin-bottom:1.5rem; overflow:hidden; }
+  .item-head { background:#f8f9fa; padding:0.6rem 1rem; display:flex; gap:0.6rem; align-items:baseline; flex-wrap:wrap; }
+  .item-head .lid { font-family:monospace; font-size:0.8rem; color:#666; }
+  .item-head .name { font-weight:600; }
+  .item-head .val { margin-left:auto; font-weight:700; color:#1e8449; }
+  .item-head .val.err { color:#c0392b; }
+  .item-body { padding:1rem; display:grid; grid-template-columns:1fr 1fr; gap:1rem; }
+  @media (max-width:900px) { .item-body { grid-template-columns:1fr; } }
+  .panel h4 { margin:0 0 0.5rem; font-size:0.85rem; color:#555; }
+
+  .trace-table { width:100%; border-collapse:collapse; font-size:0.8rem; }
+  .trace-table th, .trace-table td { border:1px solid #eee; padding:0.35rem 0.5rem; text-align:left; vertical-align:top; }
+  .trace-table th { background:#fafafa; }
+  .trace-table code { font-family:monospace; word-break:break-all; }
+  .mono { font-family:monospace; }
+  {% if ai_enabled %}.llm-box { background:#fff8f0; border:1px solid #f0d9bf; border-radius:4px; padding:0.3rem 0.5rem; margin-top:0.2rem; font-size:0.75rem; white-space:pre-wrap; max-height:120px; overflow:auto; }{% endif %}
+  .taken { color:#2980b9; font-weight:600; }
+  .skipped { color:#7f8c8d; }
+  .err-text { color:#c0392b; }
+  .graph-box { border:1px solid #eee; border-radius:4px; background:#fafafa; padding:0.4rem; overflow:auto; }
+
+  @media print {
+    header, .no-print { display:none !important; }
+    .item { page-break-inside:avoid; }
+  }
+  .print-btn { background:#34495e; color:#fff; border:none; padding:0.4rem 0.9rem; border-radius:4px; cursor:pointer; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="card">
+  <div class="no-print" style="margin-bottom:1rem;">
+    <button class="print-btn" onclick="window.print()">印刷 / PDF保存</button>
+    <a href="{{ base_path() }}/ai-input/questionnaires/{{ questionnaire.id }}/autofill" style="margin-left:0.5rem;">← 自動入力へ戻る</a>
+  </div>
+
+  <div class="doc-title">データ収集手続確認書</div>
+  <div class="doc-sub">Computerized System Validation — 各データ項目の収集手続きと根拠の記録（{{ 'AI機能有効構成' if ai_enabled else 'AI機能無効構成' }}）</div>
+
+  <table class="meta-table">
+    <tr><th>Questionnaire</th><td>{{ questionnaire.title or questionnaire.fhir_id }}</td></tr>
+    <tr><th>患者ID</th><td class="mono">{{ execution.patient_id }}</td></tr>
+    <tr><th>実行者</th><td>{{ execution.executed_by.username if execution.executed_by else '（不明）' }}</td></tr>
+    <tr><th>実行役割 (acted as)</th><td>{{ role_display_name(audit_meta.acted_as) if audit_meta.acted_as else '（記録なし）' }}</td></tr>
+    <tr><th>実行日時</th><td>{{ execution.created_at }}</td></tr>
+    <tr><th>実行ID</th><td class="mono">{{ execution.id }}</td></tr>
+    <tr><th>自動構造化AI（実行時LLM）</th><td>{% if ai_enabled %}有効（ENABLE_AI_EXTRACTION=true）{% else %}無効（ENABLE_AI_EXTRACTION=false）{% endif %}</td></tr>
+    <tr><th>結果</th><td>
+      {% if execution.status == 'success' %}<span class="badge b-success">成功</span>
+      {% elif execution.status == 'partial' %}<span class="badge b-partial">一部</span>
+      {% else %}<span class="badge b-failed">失敗</span>{% endif %}
+      {% if execution.error_summary %} — {{ execution.error_summary }}{% endif %}
+    </td></tr>
+  </table>
+
+  <div class="declaration">
+    {% if ai_enabled %}
+    <h4>AI利用に関する宣言</h4>
+    <p>
+      本書は自動構造化AI有効構成（ENABLE_AI_EXTRACTION=true）の KAWASEMI が生成した確認文書です。
+      値の導出（実行時）にLLMが関与し得ます。LLMが関与したステップは、
+      使用モデル・プロンプト・生出力のすべてを本書の実行トレースに記録します。
+      取得プランは人による確認（confirmed）を経たもののみが実行されます。
+    </p>
+    {% else %}
+    <h4>処理の決定性に関する宣言</h4>
+    <p>
+      本書は自動構造化AI無効構成（ENABLE_AI_EXTRACTION=false）の KAWASEMI が生成した確認文書です。
+      本実行は決定的処理（DB・FHIR・ファイルからの抽出、比較、分岐、変換、選択、集計）のみで
+      構成され、値の導出（実行時）にLLM（大規模言語モデル）は関与していません。
+      患者データにLLMが触れることはなく、同一の入力データに対して常に同一の結果を返します。
+      取得プランは人による確認（confirmed）を経たもののみが実行されます。
+    </p>
+    {% if guard_skipped_llm %}
+    {# 条件付き実行（guard）でLLM opが未実行になった項目は、実行事実としてはLLM非関与
+       だがプラン構成は「決定的処理のみ」ではない。宣言と実行トレースの齟齬を残さないため、
+       該当項目とstepを明示する。 #}
+    <p>
+      なお以下の項目の取得プランには、条件付き実行（guard）により<b>本実行では未実行</b>と
+      なったLLM opが含まれます。当該 step は条件が偽であったため呼び出されておらず
+      （実行トレースに「未実行」として記録）、本実行におけるLLM非関与の宣言と矛盾しません。
+      ただしプラン構成そのものは決定的処理のみではないため、別の被験者データでは
+      条件が真となり当該 step が実行され得ます。
+    </p>
+    <table class="meta-table">
+      <tr><th>linkId</th><th>未実行のLLM step</th></tr>
+      {% for link_id, step_ids in guard_skipped_llm.items() %}
+      <tr><td><code>{{ link_id }}</code></td><td><code>{{ step_ids | join(', ') }}</code></td></tr>
+      {% endfor %}
+    </table>
+    {% endif %}
+    {% endif %}
+  </div>
+
+  <div class="declaration">
+    <h4>設計過程におけるAI利用と人間レビューの記録</h4>
+    {% if design_llm_provenance %}
+    <p class="hint">設計ロールの LLM 呼び出しは、プロンプト全文と生応答を <code>ai_input_design_llm_calls</code> に保存しています（根拠とガードは <code>docs/design_llm_provenance.md</code>）。本書には**どのプロバイダで何回呼んだか**を記載します（プロンプト全文は載せません。ガード発火・DBエラーで保存できなかった呼び出しは行が残らないため本表に現れません。その事実はサーバログに残ります）。</p>
+    <table class="prov-table">
+      <thead><tr><th>設計ロール</th><th>推論プロバイダ</th><th>呼び出し回数</th><th>うち失敗</th><th>うち切り詰め</th></tr></thead>
+      <tbody>
+        {% for row in design_llm_provenance %}
+        <tr>
+          <td>{{ row.role_label }}</td>
+          <td><code>{{ row.provider }}</code></td>
+          <td>{{ row.calls }}</td>
+          <td>{{ row.failed }}</td>
+          <td>{{ row.truncated }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+    <p>
+      収集手続きの設計（臨床的意味の定義・データ所在の特定・取得手順書・取得プラン）には
+      候補探索AIが関与し得ます。AIの出力はすべて設計ドラフトです。実行できるのは
+      確定（confirmed）済みの取得プランのみであり、その取得プランは確定済みの取得手順書から
+      作成されます。{% if not ai_enabled %}確定済みの取得プランの内容は固定されており、その実行は上記の決定性の宣言と
+      矛盾しません。{% endif %}臨床的意味の定義は実行の前提条件ではないため、その確認状況
+      （未確認／確認済み）は項目ごとに下表へ併記します。臨床的意味の欄には、記述の典拠
+      （規約文書の該当箇所）の件数とアドレスも併記します。
+    </p>
+    {% if design_ai_used %}
+    <table class="meta-table">
+      <tr><th>項目</th><th>① 臨床的意味</th><th>② データ所在</th><th>③ 取得手順書</th><th>④ 取得プラン</th></tr>
+      {% for it in items %}
+      <tr>
+        <td class="mono">{{ it.link_id }}</td>
+        <td>
+          {% if it.clinical_llm_models %}AI下書き（{{ it.clinical_llm_models | join(', ') }}）{% elif it.clinical_status %}手動{% else %}—{% endif %}{% if it.clinical_status %} / {{ annotation_status_labels.get(it.clinical_status, it.clinical_status) }}{% endif %}
+          {% if it.clinical_citations %}
+          <div style="font-size:0.7rem;color:#555;">典拠{{ it.clinical_citations | length }}件</div>
+          {% for c in it.clinical_citations %}
+          <div class="mono" style="font-size:0.65rem;color:#666;">{{ c.unit_id or (c.payload and c.payload.get('label')) or '（アドレス未記載）' }}</div>
+          {% endfor %}
+          {% elif it.clinical_status %}
+          <div style="font-size:0.7rem;color:#888;">典拠なし</div>
+          {% endif %}
+        </td>
+        <td>{% if it.location_llm_models %}AI案（{{ it.location_llm_models | join(', ') }}）{% else %}手動{% endif %}</td>
+        <td>{% if it.runbook_llm_model %}AI生成（{{ it.runbook_llm_model }}）{% else %}手動{% endif %}{% if it.runbook_status %} / {{ runbook_status_labels.get(it.runbook_status, it.runbook_status) }}{% endif %}</td>
+        <td>{% if it.llm_model %}AI作成（{{ it.llm_model }}）{% else %}手動{% endif %}{% if it.plan_status %} / {{ plan_status_labels.get(it.plan_status, it.plan_status) }}{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% else %}
+    <p style="font-size:0.8rem;color:#888;">（本実行の対象項目の設計過程にAIの関与はありません＝全層手動）</p>
+    {% endif %}
+  </div>
+
+  <div class="id-resolution" style="margin:1rem 0;">
+    <h4>ID解決経路（被験者キーの解決）</h4>
+    <p style="font-size:0.8rem;color:#555;">
+      KAWASEMI は名寄せ値（各システムの患者キー）を保持も受領もしません。被験者キーは実行時に
+      外部の解決機構（FHIR Patient.identifier 等）で解決し、本書には生値を残さずマスク値・key_type・
+      解決状況のみを記録します。KAWASEMI からの値入力経路は構造的に存在しません（取り違えの構造的防止）。
+    </p>
+    {% if id_resolution %}
+    <table class="meta-table">
+      <tr><th>key_type（名前空間）</th><th>解決状況</th></tr>
+      {% for kt, statuses in id_resolution.items() %}
+      <tr><td class="mono">{{ kt }}</td><td>{{ statuses | join(', ') }}</td></tr>
+      {% endfor %}
+    </table>
+    {% else %}
+    <p style="font-size:0.8rem;color:#888;">（外部キー解決なし＝登録番号のみで取得）</p>
+    {% endif %}
+  </div>
+
+  {% for it in items %}
+  <div class="item">
+    <div class="item-head">
+      <span class="lid">{{ it.link_id }}</span>
+      <span class="name">{{ it.item_text }}</span>
+      {% if it.error %}
+      <span class="val err">エラー</span>
+      {% else %}
+      <span class="val">{{ it.value if it.value is not none else '—' }}</span>
+      {% endif %}
+    </div>
+    <div class="item-body">
+      <div class="panel">
+        <h4>収集手続き（取得フロー図）</h4>
+        <div class="graph-box"><pre class="mermaid">{{ it.mermaid }}</pre></div>
+        {% if ai_enabled and it.llm_model %}<div style="font-size:0.75rem;color:#888;margin-top:0.3rem;">作成モデル: {{ it.llm_model }}</div>{% endif %}
+        {% if it.program_pinned %}
+        <div style="font-size:0.72rem;color:#2e7d32;margin-top:0.3rem;">🔒 実行時に固定したプログラム（設計根拠込み）を表示{% if it.snapshot_updated_at %}（プラン更新時刻: {{ it.snapshot_updated_at }}）{% endif %}</div>
+        {% else %}
+        <div style="font-size:0.72rem;color:#b26a00;margin-top:0.3rem;">⚠ 実行時スナップショット未保持のため現行プランを表示。実行後にプランが編集されていれば実際の実行内容と異なる場合があります。</div>
+        {% endif %}
+      </div>
+      <div class="panel">
+        <h4>実行トレース（監査証跡）</h4>
+        {% if it.error %}<p class="err-text">{{ it.error }}</p>{% endif %}
+        <table class="trace-table">
+          <thead><tr><th>#</th><th>処理</th><th>入力 / 結果（実行事実）</th><th>設計根拠（設計時の判断理由）</th></tr></thead>
+          <tbody>
+          {% for t in it.trace %}
+            <tr>
+              <td>{{ loop.index }}</td>
+              <td><b>{{ t.op }}</b><br><code>{{ t.id }}</code></td>
+              <td>
+                {% if t.inputs %}<div>入力: <code>{{ t.inputs | tojson }}</code></div>{% endif %}
+                {% if t.sql %}<div>SQL: <code>{{ t.sql }}</code></div>{% endif %}
+                {% if t.taken %}<div class="taken">分岐: {{ t.taken }}</div>{% endif %}
+                {% if t.skipped %}<div class="skipped">⏭ 未実行（guard 偽: <code>{{ t.guard }}</code>）
+                  — 外部システムアクセス・LLM 呼び出しは行っていない</div>
+                {% elif t.error %}<div class="err-text">⚠ {{ t.error }}</div>
+                {% else %}<div>結果: <code>{{ t.output if t.output is not none else '—' }}</code></div>{% endif %}
+                {% if ai_enabled and t.llm %}
+                <div class="llm-box"><b>LLM</b> provider={{ t.llm.provider or 'ollama' }} model={{ t.llm.model }} options={{ t.llm.options | tojson }}
+prompt: {{ t.llm.prompt }}
+output: {{ t.llm.raw_output }}</div>
+                {% endif %}
+              </td>
+              <td style="color:#555;font-style:italic;font-size:0.8rem;">
+                {% if t.reasoning %}{{ t.reasoning }}{% else %}<span style="color:#bbb;">—</span>{% endif %}
+              </td>
+            </tr>
+          {% else %}
+            <tr><td colspan="4" style="color:#aaa;">トレースなし</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+  {% else %}
+  <p style="color:#888;">この実行に記録された項目はありません。</p>
+  {% endfor %}
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script src="{{ base_path() }}/static/js/mermaid.min.js"></script>
+<script src="{{ base_path() }}/static/js/diagram-zoom.js"></script>
+<script>
+  if (window.mermaid) mermaid.initialize({ startOnLoad: true, theme: 'neutral' });
+</script>
+{% endblock %}

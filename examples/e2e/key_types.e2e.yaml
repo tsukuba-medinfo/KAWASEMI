@@ -1,0 +1,45 @@
+# E2E 用のキー種別（key_type）の一覧。すべて架空の名前空間である。
+#
+# `kawasemi e2e setup` が var/e2e/key_types.yaml へ写して使う。
+# 患者ごとの各システムの ID は、E2E の FHIR スタブの Patient.identifier に入っている。
+# 実行時は resolver（FhirIdentifierResolver）が登録番号でその Patient を引き、
+# 各 key_type の値を取り出す。
+#
+# このファイルには名前空間の定義だけを書き、患者の値は書かない。
+
+key_types:
+  # 起点となる登録番号。FHIR Patient をこの system と値で検索する。
+  trial_subject_no:
+    label: 登録番号
+    system: "urn:kawasemi:e2e:trial"
+    canonical:
+      kind: string
+
+  # DWH の患者番号。resolver が返すのは先頭の 0 を落とした数字列で、
+  # DWH が持つ10桁ゼロ詰めの形には接続側の key_formats で直す。
+  mrn:
+    label: 院内MRN
+    system: "urn:kawasemi:e2e:mrn"
+    canonical:
+      kind: numeric_string
+      description: "先頭の 0 を落とした数字列"
+
+  # 医事会計（接続 billing）の患者番号。mrn とは別の番号体系。
+  billing_id:
+    label: 医事患者番号
+    system: "urn:kawasemi:e2e:billing"
+    canonical:
+      kind: string
+
+  # レポート置き場のディレクトリ名（reports/{report_key}/）
+  report_key:
+    label: レポート格納キー
+    system: "urn:kawasemi:e2e:report"
+    canonical:
+      kind: string
+
+  # FHIR Patient のリソース id（identifier ではない）
+  fhir_patient_id:
+    label: FHIR Patient.id
+    canonical:
+      kind: string

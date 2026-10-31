@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+
+{% block title %}臨床的コンテキストアノテーション - {{ questionnaire.title or questionnaire.fhir_id }} - KAWASEMI{% endblock %}
+
+{% block content %}
+<div class="card">
+  {% include "ai_input/_stepper.html" %}
+  <h2>ステップ1（役割1）: 臨床的コンテキスト — {{ questionnaire.title or questionnaire.fhir_id }}</h2>
+  <p class="hint">各項目の臨床ロジック（起点イベント・時間窓・検体優先順・条件分岐など）を自由記述で入力します。治験実施計画書の記述をそのまま転記できます。施設非依存の情報です。</p>
+  <p class="hint">記述の根拠となった規約文書（入力マニュアル・記入の手引き・実施計画書など）の該当箇所を<strong>典拠</strong>として登録できます。典拠は「典拠を追加」→「索引から選ぶ」でページ番号や語から選べます（AIは使いません）。内容を確認した項目は、その項目の「この項目を確認」で確定してください（確定済みの記述は確認者と日時が記録されます）。確認は項目単位です。</p>
+
+  <div class="toolbar">
+    {% if enable_ai_drafting %}
+    <button type="button" class="btn btn--secondary" onclick="aiDraft(this)" title="規約文書（リソース索引の reference 文書）を検索し、典拠つきの下書きを未入力項目へ差し込みます">AI下書き（規約文書から）</button>
+    {% endif %}
+    <button type="button" class="btn btn--primary" onclick="saveAndExport()">保存してQuestionnaireへ反映</button>
+    <button type="button" class="btn btn--secondary" onclick="save(false)">下書き保存</button>
+    <button type="button" class="btn btn--secondary" onclick="importExtension()" title="QuestionnaireのExtensionから読み込みます（上書き）">Questionnaireから読み込み</button>
+    <a class="btn btn--secondary" href="{{ base_path() }}/ai-input/questionnaires/{{ questionnaire.id }}/source-survey">データソース調査へ</a>
+    <span id="status"></span>
+  </div>
+
+  {% if not fields %}
+  <div class="alert alert-error">このQuestionnaireには入力項目がありません。</div>
+  {% else %}
+  <div id="items">
+    {% for field in fields %}
+    {% set ann = annotations.get(field.link_id) %}
+    {# data-llm-model は記述の来歴。AI下書きを差し込んだら JS が上書きし、保存時に
+       そのまま送る（典拠行を消しても「AIが書いた記述」の事実を失わせない）。 #}
+    <div class="item-card" data-link-id="{{ field.link_id }}" data-llm-model="{{ ann.llm_model if ann and ann.llm_model else '' }}">
+      <div class="item-head item-head--split">
+        <span>
+          <span class="link-id-badge">{{ field.link_id }}</span>
+          <span class="item-text">{{ field.text or '（テキストなし）' }}</span>
+        </span>
+        <span style="display:flex;gap:0.4rem;align-items:center;">
+          {% if ann and ann.annotation %}
+          <span class="status-pill {{ 'st-confirmed' if ann.is_confirmed else 'st-draft' }}">{{ annotation_status_labels.get(ann.status, ann.status) }}</span>
+          {% elif ann and ann.no_citation_reason %}
+          {# 記述が空でも「人が探して、規約文書に無いと判断した」項目は未入力と別。
+             確定ワークフローには乗らない（記述が空だと confirmed へ昇格できない）ので、
+             ここで見分けが付かないと、対象項目を書き切ったのか途中なのかが画面から読めない。 #}
+          <span class="status-pill st-na" title="規約文書に該当箇所が無いと判断し、記述を空欄のまま残した項目です">該当箇所なし（記録済み）</span>
+          {% else %}
+          <span class="status-pill st-none">未入力</span>
+          {% endif %}
+          {% if ann and ann.is_confirmed and ann.confirmed_at %}
+          <span class="cite-meta">確認: {{ ann.confirmed_at.strftime('%Y-%m-%d %H:%M') }} UTC</span>
+          {% endif %}
+          {% if ann and ann.llm_model %}
+          <span class="cite-meta">AI下書き: {{ ann.llm_model }}</span>
+          {% endif %}
+          {% if enable_ai_drafting %}
+          <button type="button" class="btn btn--secondary btn--sm" onclick="aiDraftItem(this)" title="この項目だけ規約文書から下書きを引き直します（既存の記述は上書きされます）">AI下書き</button>
+          {% endif %}
+          <button type="button" class="btn btn--success btn--sm" onclick="confirmItem(this)" title="この項目だけを保存し、確認済み（confirmed）にします">この項目を確認</button>
+        </span>
+      </div>
+      <input type="hidden" class="item-text-val" value="{{ field.text or '' }}">
+      <textarea class="annotation-input" placeholder="項目の詳細な定義を記述してください">{{ ann.annotation if ann and ann.annotation else '' }}</textarea>
+      <div class="cite-block">
+        <div class="cite-head">
+          <span>典拠（規約文書の該当箇所）</span>
+          <button type="button" class="btn btn--secondary btn--sm" onclick="addCitation(this)">典拠を追加</button>
+        </div>
+        <div class="cite-list"></div>
+        <div class="cite-nocite" hidden>規約文書に該当箇所が見つかりませんでした（典拠なし）。手入力で記述する場合は、根拠が規約文書に無いことを踏まえてください。</div>
+        <div class="cite-unattempted" hidden>この項目の下書きが返りませんでした（未試行）。規約文書に該当箇所が無いという結果ではありません。もう一度「AI下書き」を実行してください。</div>
+        {# **人が「探したが規約文書に該当箇所が無い」と判断した記録**。
+           これが無いと、記述が空の項目が「まだ書いていない」のか「該当箇所が無いので
+           空欄にした」のかを DB から区別できない。AI下書きはこの欄に書き込まない。 #}
+        <label class="fld" for="nocite-{{ loop.index }}">典拠が見つからなかった理由（規約文書に該当箇所が無いと判断した場合。記述は空欄のままにします）</label>
+        <textarea id="nocite-{{ loop.index }}" class="no-citation-reason" placeholder="例: 様式の定義書には定義が無く、記入の手引きにも記載が見当たらない">{{ ann.no_citation_reason if ann and ann.no_citation_reason else '' }}</textarea>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+
+<script id="init-state" type="application/json">{{ initial | tojson }}</script>
+{% endblock %}
+
+{% block extra_js %}
+{# **JS は静的ファイルへ切り出してある**。インラインのままでは
+   `node --check` に掛けられず、構文エラーを注入しても全テストが緑のままだった。
+   Jinja の値はここで JSON として渡す（JS 側は `#page-config` を読む）。 #}
+<script id="page-config" type="application/json">{{ {"questionnaire_id": questionnaire.id, "base_path": base_path()} | tojson }}</script>
+<script src="{{ base_path() }}/static/js/design_clinical.js?v={{ static_v('js/design_clinical.js') }}"></script>
+{% endblock %}

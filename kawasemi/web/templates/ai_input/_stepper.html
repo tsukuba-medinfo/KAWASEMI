@@ -1,0 +1,16 @@
+{# データ自動収集 共通ステッパー（進捗ナビ）。
+   呼び出し側で current_stage（1〜4）と questionnaire を渡すこと。
+   STAGES は Jinja グローバル（routes.py で登録）。
+   見た目は app.css の .stepper / .stepper__step（正本）を使用する。 #}
+<div class="stepper">
+  {% for s in STAGES %}
+    {% if not loop.first %}<span class="stepper__arrow">→</span>{% endif %}
+    {% if s.no == current_stage %}
+      <span class="stepper__step is-active">{{ s.no }}. {{ s.name }}</span>
+    {% elif s.no < current_stage %}
+      <a class="stepper__step is-done" href="{{ base_path() }}/ai-input/questionnaires/{{ questionnaire.id }}/{{ s.path }}">{{ s.no }}. {{ s.name }}</a>
+    {% else %}
+      <a class="stepper__step" href="{{ base_path() }}/ai-input/questionnaires/{{ questionnaire.id }}/{{ s.path }}">{{ s.no }}. {{ s.name }}</a>
+    {% endif %}
+  {% endfor %}
+</div>

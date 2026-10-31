@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+
+{% block title %}データ自動収集 - KAWASEMI{% endblock %}
+
+{% block content %}
+<div class="page-head">
+    <div>
+        <h2>データ自動収集</h2>
+        <div class="page-head__sub">Questionnaire ごとの取得設計を進めます。行を選んで該当ステップに進めます。</div>
+    </div>
+</div>
+
+{% macro bucket_table(items, kind) %}
+<div class="bucket">
+    <h3 class="section-title">
+        {% if kind == 'todo' %}未着手{% elif kind == 'in_progress' %}進行中{% else %}完了{% endif %}
+        <span class="badge badge--neutral">{{ items | length }}</span>
+    </h3>
+    {% if items %}
+    <div class="table-wrap">
+    <table class="table">
+        <thead>
+            <tr>
+                <th>Questionnaire</th>
+                <th>進捗</th>
+                <th style="width: 260px;">操作</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for item in items %}
+            {% set q = item.questionnaire %}
+            {% set s = item.status %}
+            <tr>
+                <td>{{ q.title or 'タイトルなし' }}</td>
+                <td>
+                    {% if kind == 'todo' %}
+                    <span class="badge badge--danger">未着手</span>
+                    {% elif kind == 'in_progress' %}
+                    <span class="badge badge--warning">進行中</span>
+                    <span class="databar__text">プラン {{ s.plan_done }}/{{ s.designed_count }}</span>
+                    {% else %}
+                    <span class="badge badge--success">設計完了</span>
+                    <span class="databar__text">プラン {{ s.plan_done }}/{{ s.designed_count }}</span>
+                    {% endif %}
+                </td>
+                <td>
+                    <div class="actions-cell">
+                    {% if kind == 'todo' %}
+                        <a class="btn btn--primary btn--sm" href="{{ base_path() }}/ai-input/questionnaires/{{ q.id }}/{{ s.next_path }}">開始</a>
+                        <a class="btn btn--secondary btn--sm" href="{{ base_path() }}/ai-input/questionnaires/{{ q.id }}/canvas">設計キャンバス</a>
+                    {% elif kind == 'in_progress' %}
+                        <a class="btn btn--primary btn--sm" href="{{ base_path() }}/ai-input/questionnaires/{{ q.id }}/canvas">設計キャンバス</a>
+                        <a class="btn btn--secondary btn--sm" href="{{ base_path() }}/ai-input/questionnaires/{{ q.id }}/{{ s.next_path }}">続き</a>
+                    {% else %}
+                        <a class="btn btn--primary btn--sm" href="{{ base_path() }}/ai-input/questionnaires/{{ q.id }}/autofill">実行</a>
+                        <a class="btn btn--secondary btn--sm" href="{{ base_path() }}/ai-input/questionnaires/{{ q.id }}/canvas">設計キャンバス</a>
+                    {% endif %}
+                    </div>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    </div>
+    {% else %}
+    <p class="help-text">該当する Questionnaire はありません。</p>
+    {% endif %}
+</div>
+{% endmacro %}
+
+{{ bucket_table(buckets.in_progress, 'in_progress') }}
+{{ bucket_table(buckets.todo, 'todo') }}
+{{ bucket_table(buckets.done, 'done') }}
+{% endblock %}

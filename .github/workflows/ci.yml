@@ -1,0 +1,166 @@
+name: CI
+
+# 運用は feature ブランチから main への PR のみ（docs/development_flow.md）。
+# develop ブランチは実在しないためトリガ対象から外している。
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  quality:
+    name: コード品質チェック
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: uv のセットアップ
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Python のセットアップ
+        run: uv python install 3.12
+
+
+      - name: dev 依存パッケージのインストール
+        run: uv sync --all-packages --all-groups --all-extras
+
+      - name: Ruff（リント）
+        # ruff check はリポジトリ全体を見る。pre-commit の ruff フックは
+        # パス引数を持たずステージ全体を対象にするため、CI の範囲を kawasemi/ に絞ると
+        # 検査をすり抜けた違反が、無関係な変更を commit した人の手元で突然表面化する。
+        run: uv run ruff check .
+
+      - name: Ruff（フォーマットチェック）
+        # ruff check と同じ理由（上のコメント）で範囲もリポジトリ全体に揃える。
+        run: uv run ruff format --check .
+
+      - name: Mypy（型チェック）
+        run: |
+          uv run mypy kawasemi/ scripts/
+          cd indexer && uv run mypy kawasemi_indexer/
+
+      # **JS の構文検査**。画面の JS に構文エラーを注入しても全テストが緑のままだった
+      # ことが実測されている（ページの JS が丸ごと
+      # パースエラーになり、AI 下書きも保存も確認も動かない状態）。テンプレートのインライン
+      # `<script>` は検査に掛けられないので、静的ファイルへ切り出したうえでここで見る。
+      #
+      # **skip しない。** node が無ければこのジョブは落ちる（`development_flow.md` §4.3
+      # 「skip は通ったではない」）。ubuntu-latest の runner は node を同梱している。
+      - name: JS 構文チェック
+        run: |
+          node --version
+          # 対象を明示的に数える。glob が0件にマッチしても静かに通る形にしない。
+          count=0
+          for f in kawasemi/web/static/js/*.js; do
+            case "$f" in
+              *.min.js) continue ;;   # vendor 済みの縮小版（mermaid）は対象外
+            esac
+            node --check "$f"
+            count=$((count + 1))
+          done
+          if [ "$count" -eq 0 ]; then
+            echo "エラー: 検査対象の JS が1件も見つかりませんでした" >&2
+            exit 1
+          fi
+          echo "OK: ${count} 件の JS を検査しました"
+
+      # **生成した mermaid が構文として解釈できるか**。上の JS の構文検査と同じ穴で、`viz.py` のテストは生成文字列の部分一致しか見ていなかった。
+      # ラベルに入る自由文が図を壊しても、テストは緑のまま画面には何も描かれない。
+      #
+      # **画面と同じパーサで見る**（`kawasemi/web/static/js/mermaid.min.js`）。ブラウザ向けの
+      # バンドルなので DOM が要り、そのためだけに jsdom を devDependency として持つ。
+      - name: mermaid 構文チェック
+        run: |
+          npm ci
+          uv run python scripts/emit_mermaid_fixtures.py "${RUNNER_TEMP}/mermaid"
+          node scripts/check_mermaid.js "${RUNNER_TEMP}/mermaid"
+
+  test:
+    name: テスト
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: uv のセットアップ
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Python のセットアップ
+        run: uv python install 3.12
+
+
+      - name: dev 依存パッケージのインストール
+        run: uv sync --all-packages --all-groups --all-extras
+
+      - name: pytest
+        env:
+          # CI 専用のダミー鍵。本物の秘密ではなく Settings バリデーション通過用（32文字以上）。
+          SECRET_KEY: ci-dummy-secret-key-not-a-real-secret-0000
+          CSRF_SECRET_KEY: ci-dummy-csrf-secret-key-not-a-real-secret-0000
+          # AI機能フラグ（docs/ai_flags_spec.md）。ガード分岐の双方を検証できるよう有効化。
+          # tests/e2e/test_pipeline_e2e.py（決定的層の関門 a〜e）は Ollama を使わないので
+          # skip されずに走る。Ollama 依存の残り（test_handwritten_consent_real_vision）は
+          # ollama_available() で個別 skip される。
+          ENABLE_AI_DRAFTING: "true"
+          ENABLE_AI_EXTRACTION: "true"
+        # **CI は直列のままにする**（`make test` の並列化はローカルの反復速度のため）。
+        # 理由は3つ。
+        #   1. CI は既に約 2分40秒 で回る（実 Ollama が無く重い2件が skip されるため）。
+        #      ローカルの約7分とは事情が違う。
+        #   2. GitHub の無料ランナーは 2 vCPU で、worker を増やす余地が小さい。
+        #   3. `-v` の1件ずつの出力が worker で混ざらない。CI のログは失敗の切り分けに読む。
+        # 並列でしか通らない／直列でしか通らない状態を作らないため、**関門は直列で見る**。
+        run: uv run pytest -v --tb=short
+
+  # **PostgreSQL で移行を通す。** テストは SQLite で回るので、SQLite にしか無い関数
+  # （char(10) など）や、boolean 列への数値の既定値が混ざっても気付けない。
+  # 空の DB から head まで上げ、base まで下げ、もう一度上げる。下げ側も検査に含める。
+  migrations-postgres:
+    name: 移行（PostgreSQL）
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: kawasemi
+          POSTGRES_PASSWORD: kawasemi
+          POSTGRES_DB: kawasemi
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U kawasemi"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+asyncpg://kawasemi:kawasemi@localhost:5432/kawasemi
+      # CI 専用のダミー鍵（test ジョブと同じ。Settings バリデーション通過用）。
+      SECRET_KEY: ci-dummy-secret-key-not-a-real-secret-0000
+      CSRF_SECRET_KEY: ci-dummy-csrf-secret-key-not-a-real-secret-0000
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: uv のセットアップ
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Python のセットアップ
+        run: uv python install 3.12
+
+      # PostgreSQL のドライバ（asyncpg）は本体の依存に含まれている。
+      - name: 依存パッケージのインストール
+        run: uv sync
+
+      - name: upgrade head → downgrade base → upgrade head
+        run: |
+          uv run alembic upgrade head
+          uv run alembic downgrade base
+          uv run alembic upgrade head
+
+      - name: 実スキーマとモデル宣言の照合
+        run: uv run kawasemi check_schema

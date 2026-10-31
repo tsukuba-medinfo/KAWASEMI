@@ -1,0 +1,52 @@
+表物理名,表論理名,カラム物理名,カラム論理名,備考
+patients,患者基本,patient_no,患者番号,院内患者番号（10桁ゼロ詰め）
+patients,患者基本,full_name,患者氏名,
+patients,患者基本,birth_date,生年月日,YYYY-MM-DD
+patients,患者基本,sex_code,性別コード,sex_codes 参照（1=男 2=女）
+admissions,入院歴,patient_no,患者番号,
+admissions,入院歴,admission_no,入院連番,
+admissions,入院歴,admitted_on,入院日,YYYY-MM-DD
+admissions,入院歴,discharged_on,退院日,YYYY-MM-DD。在院中は NULL
+admissions,入院歴,ward_code,病棟コード,
+infection_cases,感染症症例,patient_no,患者番号,
+infection_cases,感染症症例,case_no,症例連番,
+infection_cases,感染症症例,onset_date,発症日,感染管理部門が入力。未入力なら NULL
+infection_cases,感染症症例,specimen_date,検体採取日,
+infection_cases,感染症症例,is_reportable,報告対象フラグ,1=報告対象
+vital_signs,バイタルサイン,patient_no,患者番号,
+vital_signs,バイタルサイン,item_code,項目コード,observation_items 参照。何の値かはこの列で決まる（体温・脈拍・SpO2）
+vital_signs,バイタルサイン,measured_at,測定日時,YYYY-MM-DD HH:MM:SS
+vital_signs,バイタルサイン,value_num,数値,項目コードごとの測定値
+vital_signs,バイタルサイン,is_deleted,削除フラグ,0=有効 1=削除
+observations,観察記録,patient_no,患者番号,
+observations,観察記録,item_code,項目コード,observation_items 参照（体重測定・咳嗽など）
+observations,観察記録,measure_code,測定コード,measurements 参照
+observations,観察記録,seq,測定連番,measurements の seq。同じ項目に複数の測定が同居する
+observations,観察記録,recorded_on,記録日,YYYY-MM-DD
+observations,観察記録,value_text,結果,文字列。数値も文字列で入る
+observations,観察記録,is_deleted,削除フラグ,0=有効 1=削除
+observations,観察記録,is_active,有効フラグ,1=有効
+lab_results,検査結果,patient_no,患者番号,
+lab_results,検査結果,test_code,検査コード,lab_tests 参照（検査名・単位はマスタ側）
+lab_results,検査結果,tested_on,検査日,YYYY-MM-DD
+lab_results,検査結果,result_value,結果値,
+sex_codes,性別マスタ,sex_code,性別コード,
+sex_codes,性別マスタ,label,性別名称,
+lab_tests,検査マスタ,test_code,検査コード,
+lab_tests,検査マスタ,test_name,検査名,
+lab_tests,検査マスタ,unit,単位,
+observation_items,観察項目マスタ,item_code,項目コード,
+observation_items,観察項目マスタ,item_name,項目名称,
+observation_items,観察項目マスタ,measure_code,測定コード,measurements 参照
+measurements,測定マスタ,measure_code,測定コード,
+measurements,測定マスタ,seq,測定連番,
+measurements,測定マスタ,measure_name,測定名称,
+measurements,測定マスタ,unit,単位,
+item_counts,観察項目件数,source_table,表名,vital_signs / observations
+item_counts,観察項目件数,item_code,項目コード,
+item_counts,観察項目件数,measure_code,測定コード,
+item_counts,観察項目件数,seq,測定連番,
+item_counts,観察項目件数,is_deleted,削除フラグ,
+item_counts,観察項目件数,is_active,有効フラグ,
+item_counts,観察項目件数,n_rows,行数,
+item_counts,観察項目件数,n_patients,患者数,

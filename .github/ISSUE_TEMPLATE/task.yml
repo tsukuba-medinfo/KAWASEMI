@@ -1,0 +1,29 @@
+name: タスク / 調査
+description: リファクタ・テスト・調査・ドキュメントなどの作業
+title: "[task] "
+labels: ["type:task"]
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: 目的 / ゴール
+      description: 何を達成するか。
+    validations:
+      required: true
+  - type: textarea
+    id: todo
+    attributes:
+      label: やること
+      description: 作業項目をチェックボックスで分解。
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: 完了条件
+      description: どうなったら closed にできるか。
+    validations:
+      required: false

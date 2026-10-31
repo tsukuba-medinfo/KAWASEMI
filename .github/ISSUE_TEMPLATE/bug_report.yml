@@ -1,0 +1,42 @@
+name: バグ報告
+description: 不具合・想定外の挙動を報告する
+title: "[bug] "
+labels: ["type:bug"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: 概要
+      description: 何が起きているかを一文で。
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 再現手順
+      description: 最小の再現手順を箇条書きで。
+      placeholder: |
+        1. ...
+        2. ...
+        3. エラー発生
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期待する挙動
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 実際の挙動 / ログ
+      description: エラーメッセージ・スタックトレース・スクリーンショットなど。
+      render: shell
+  - type: textarea
+    id: env
+    attributes:
+      label: 環境
+      description: ブランチ / コミット、Python・依存バージョン、E2E の層（決定的層 / 実機層）、Ollama 有無など。
+    validations:
+      required: false

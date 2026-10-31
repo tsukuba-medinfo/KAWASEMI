@@ -1,0 +1,51 @@
+# 接続レジストリ（connections.yaml）サンプル
+#
+# リソース索引(2層)が参照する connection_id → 接続詳細/認証/scope を定義する。
+# 索引は connection_id を持つだけで接続詳細・秘匿情報を持たない（3層分離）。
+# 施設はこのファイルを site/connections.yaml に置き、secret は env/金庫参照にする
+# （生のパスワード・DSN をリポジトリに置かないこと）。本体はコミットしない（.gitignore 済）。
+#
+# scope:
+#   self     = KAWASEMI 自身のアプリDB（→ source_category=local_db）
+#   external = 外部DB/外部FHIR/外部ファイル（db は → source_category=external_db）
+#
+# 患者キー（任意。コンパイラが DSL step の key_type / physical_format へ焼き込む）:
+#   key_type     file / csv / fhir で {{patient_id}} を埋める名前空間（key_types.yaml の ID）。
+#                DB は索引の payload.key_type が列ごとに決めるので書かなくてよい
+#   key_formats  この接続が名前空間ごとに格納している物理形（例 {mrn: {pad: 10}} = 10桁ゼロ詰め）
+#
+# 実際の接続確立・データ取得は実行時（external_db_extract / file_extract）の責務で、
+# 現時点では未実装。本レジストリは scope/kind の参照と将来の実行のための宣言。
+
+connections:
+  # KAWASEMI 自身のアプリDB（自己保持データ）
+  app_db:
+    kind: db
+    scope: self
+
+  # 院内DWH（外部DB）。secret は環境変数参照。
+  dwh:
+    kind: db
+    scope: external
+    driver: postgres
+    host: 198.51.100.3
+    port: 5432
+    database: dwh
+    secret_ref: env:DWH_DSN
+    # key_formats:
+    #   mrn: {pad: 10}
+
+  # 院内FHIRサーバ（外部）
+  hosp_fhir:
+    kind: fhir
+    scope: external
+    base_url: https://fhir.example-hospital.local/fhir
+    secret_ref: env:HOSP_FHIR_TOKEN
+    # key_type: fhir_patient_id
+
+  # 患者ごとの外部検査レポート格納（ファイル）
+  report_fs:
+    kind: file
+    scope: external
+    root_path: /mnt/reports
+    # key_type: report_key

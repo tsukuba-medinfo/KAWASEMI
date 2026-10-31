@@ -1,0 +1,17 @@
+# 集計の対象項目（kawasemi/ai_input/target_items.py）の雛形。値は架空のもの。
+#
+# 様式（Questionnaire.url の完全一致）ごとに、集計の分母に入れる項目番号を書く。
+# 項目番号は問診票の項目テキスト先頭の [NNN] である。
+#
+# target_item_numbers:   分母に入れる項目番号。期待件数はこのリストの件数になり、
+#                        問診票に見つからなかった番号は集計の missing_item_numbers に出る。
+# excluded_item_numbers: 意図して分母から外す項目番号（任意。記録用で、target と重ねると誤り）。
+#                        target に無い番号の項目は、ここに書かなくても対象外になる。
+#
+# ここに無い様式（このファイルが無い場合も含む）は、項目番号を持つ項目すべてが対象になる
+# （番号を持つ項目が1つも無ければ、回答できる項目すべて）。
+questionnaires:
+  "http://kawasemi.example/Questionnaire/e2e-infection":
+    # 患者の背景と感染症の経過を分母にし、同意取得日（研究の管理項目）は外す例
+    target_item_numbers: ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"]
+    excluded_item_numbers: ["14"]

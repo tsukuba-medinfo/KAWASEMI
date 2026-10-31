@@ -1,0 +1,25 @@
+# E2E 決定的層の台本: 実行工程の llm_extract（docs/e2e_pipeline.md §3.3）
+#
+# 実行時の llm_extract は、プロンプトの**指示部**（本文の区切り `===` より前）に `match` を
+# 含むタスクを1つだけ選び、**本文から** `pattern` で値を読む。値を正解（gold）から引かないので、
+# 本文がプロンプトへ届かなければ失敗する（ファイル経路の検証になる）。
+#
+# - 患者は指示部の `被験者 E2E-0000`（DSL の {{patient_id}} が展開したもの）で引く
+# - 本文がその患者のものかを氏名で照合する（別の患者のファイルを読んだら例外）
+# - タスクが0件・2件以上・pattern 不一致は例外（黙って空を返さない）
+#
+# format: text（そのまま）/ date（y, m, d の名前付きグループから YYYY-MM-DD）
+
+tasks:
+  - name: diagnosis_text
+    match: "感染症の診断名"
+    pattern: "診断: (?P<v>[^\\n]+)"
+    format: text
+  - name: onset_date
+    match: "発症日"
+    pattern: "現病歴: (?P<y>\\d{4})年(?P<m>\\d{1,2})月(?P<d>\\d{1,2})日より"
+    format: date
+  - name: consent_date
+    match: "同意日"
+    pattern: "同意日 : (?P<y>\\d{4})年 (?P<m>\\d{1,2})月 (?P<d>\\d{1,2})日"
+    format: date

@@ -1,0 +1,2 @@
+{"label": "白血球数", "aliases": ["WBC", "白血球"], "resource_type": "Observation", "query_template": "Observation?code=http://loinc.org|6690-2&patient={{patient_id}}", "fhir_path": "valueQuantity.value", "code": "LOINC|6690-2", "connection_id": "hosp_fhir", "notes": "血液一般検査の白血球数"}
+{"label": "生年月日", "aliases": ["誕生日"], "resource_type": "Patient", "query_template": "Patient/{{patient_id}}", "fhir_path": "birthDate", "code": null, "connection_id": "hosp_fhir", "notes": "患者の生年月日"}

@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+
+{% block title %}症例割り当て管理 - KAWASEMI{% endblock %}
+
+{% block content %}
+{% if filter_warnings %}
+<div class="alert alert-warning" role="alert">
+    {% for w in filter_warnings %}<div>{{ w }}</div>{% endfor %}
+</div>
+{% endif %}
+<div class="card">
+    <div class="page-head">
+        <h2>症例割り当て管理</h2>
+        <div class="page-head__actions">
+            <a href="{{ base_path() }}/assignments/new" class="btn btn--sm btn--primary">新規登録</a>
+        </div>
+    </div>
+
+    <form method="get" class="filter-bar">
+        <select name="questionnaire_id" onchange="this.form.submit()">
+            <option value="">すべてのQuestionnaire</option>
+            {% for q in questionnaires %}
+            <option value="{{ q.id }}" {% if filters.questionnaire_id == q.id %}selected{% endif %}>
+                {{ q.title or q.fhir_id }}
+            </option>
+            {% endfor %}
+        </select>
+
+        <select name="status" onchange="this.form.submit()">
+            <option value="">すべてのステータス</option>
+            {% for s in statuses %}
+            <option value="{{ s }}" {% if filters.status == s %}selected{% endif %}>
+                {{ status_labels[s] }}
+            </option>
+            {% endfor %}
+        </select>
+
+        <select name="assigned_to_id" onchange="this.form.submit()">
+            <option value="">すべての担当者</option>
+            {% for u in users %}
+            <option value="{{ u.id }}" {% if filters.assigned_to_id == u.id %}selected{% endif %}>
+                {{ u.full_name }}
+            </option>
+            {% endfor %}
+        </select>
+
+        {% if filters.questionnaire_id or filters.status or filters.assigned_to_id %}
+        <a href="{{ base_path() }}/assignments" class="btn btn--sm btn--secondary">フィルターをクリア</a>
+        {% endif %}
+    </form>
+
+    {% if assignments %}
+    <div class="table-wrap">
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Questionnaire</th>
+                    <th>患者ID</th>
+                    <th>患者名</th>
+                    <th>担当者</th>
+                    <th>ステータス</th>
+                    <th>期限</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for a in assignments %}
+                <tr>
+                    <td>{{ a.id }}</td>
+                    <td>{{ a.questionnaire.title or a.questionnaire.fhir_id }}</td>
+                    <td>{{ a.patient_id }}</td>
+                    <td>{{ a.patient_name or '-' }}</td>
+                    <td>{{ a.assigned_to.full_name }}</td>
+                    <td>
+                        {% set badge = {'pending': 'neutral', 'in_progress': 'info', 'completed': 'success', 'cancelled': 'danger'}.get(a.status, 'neutral') %}
+                        <span class="badge badge--{{ badge }}">{{ status_labels[a.status] }}</span>
+                    </td>
+                    <td>
+                        {% if a.due_date %}
+                            {% if a.is_overdue %}
+                            {{ a.due_date }} <span class="badge badge--danger">期限切れ</span>
+                            {% else %}
+                            {{ a.due_date }}
+                            {% endif %}
+                        {% else %}
+                        -
+                        {% endif %}
+                    </td>
+                    <td>
+                        <div class="row-actions">
+                            <a href="{{ base_path() }}/assignments/{{ a.id }}/edit">編集</a>
+                            <form action="{{ base_path() }}/assignments/{{ a.id }}/delete" method="post" style="margin: 0;"
+                                  onsubmit="return confirm('この割り当てを削除しますか？');">
+                                <button type="submit" class="btn btn--sm btn--danger">削除</button>
+                            </form>
+                        </div>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="empty-state">
+        <p>症例割り当てがありません。</p>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
