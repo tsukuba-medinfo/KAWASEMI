@@ -589,7 +589,7 @@ def _version_token(payload: dict[str, Any]) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
-def _plan_version(plan: InputPlan | None) -> str | None:
+def plan_version(plan: InputPlan | None) -> str | None:
     """取得プランの版トークン（楽観的排他用）。行が無ければ None。
 
     `updated_at` ではなく内容から作る。`updated_at` は DB の `now()` で、SQLite では秒
@@ -608,8 +608,8 @@ def _plan_version(plan: InputPlan | None) -> str | None:
     )
 
 
-def _runbook_version(rb: InputRunbook | None) -> str | None:
-    """手順書の版トークン（`_plan_version` と同じ考え方）。"""
+def runbook_version(rb: InputRunbook | None) -> str | None:
+    """手順書の版トークン（`plan_version` と同じ考え方）。"""
     if rb is None:
         return None
     return _version_token(
@@ -623,10 +623,33 @@ def _runbook_version(rb: InputRunbook | None) -> str | None:
 
 
 def _version_conflict(
-    payload: PlanSaveRequest | PlanDemoteRequest | RunbookSaveRequest, current: str | None
+    payload: PlanSaveRequest | PlanDemoteRequest | RunbookSaveRequest,
+    current: str | None,
+    *,
+    required: bool,
 ) -> JSONResponse | None:
-    """送られた版がサーバの現在の版と違えば 409 を返す（送られていなければ検査しない）。"""
-    if "base_version" not in payload.model_fields_set or payload.base_version == current:
+    """送られた版がサーバの現在の版と違えば 409 を返す。
+
+    **確認（confirm=true）と下書きへ戻す操作では版を必須にする**（無ければ 428）。
+    どちらも「人が見た内容」に対する判断なので、何を見て判断したかを版で示させる。
+    明示の null は「行がまだ無い」の意味で受け付ける。confirm=false の下書き保存だけは
+    省略を許し、省略時は検査しない（API・移行スクリプトの互換）。
+    """
+    if "base_version" not in payload.model_fields_set:
+        if not required:
+            return None
+        return JSONResponse(
+            {
+                "success": False,
+                "message": (
+                    "確認・下書きへ戻す操作には base_version（画面で読み込んだ時点の版。"
+                    "行がまだ無ければ null）が必要です"
+                ),
+                "version": current,
+            },
+            status_code=428,
+        )
+    if payload.base_version == current:
         return None
     return JSONResponse(
         {
@@ -640,6 +663,31 @@ def _version_conflict(
         },
         status_code=409,
     )
+
+
+async def _commit_or_conflict(db: AsyncSession) -> JSONResponse | None:
+    """commit し、同じ項目の行を同時に新規作成して一意制約に当たったら 409 にする。
+
+    行がまだ無いときは `_lock_row` で押さえる行が無いので、2つの要求がともに「無い」と
+    読んで INSERT し得る。後着は一意制約（questionnaire_id, link_id）で落ちる。500 では
+    なく、版の競合と同じ 409 で返す。
+    """
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        return JSONResponse(
+            {
+                "success": False,
+                "conflict": True,
+                "message": (
+                    "この項目は同時に別の操作で作成されました。"
+                    "上書きしないよう保存を止めました。再読み込みして内容を確かめてください"
+                ),
+            },
+            status_code=409,
+        )
+    return None
 
 
 def _is_designed(ann: ClinicalAnnotation | None, loc: SystemLocation | None) -> bool:
@@ -2590,7 +2638,7 @@ def _build_runbook_items(
                 "has_runbook": rb is not None,
                 "stale": stale,
                 "llm_model": (rb.llm_model if rb else None),
-                "version": _runbook_version(rb),
+                "version": runbook_version(rb),
             }
         )
     return items
@@ -2962,7 +3010,9 @@ async def regenerate_runbook(
         runbooks,
         db,
     )
-    await db.commit()
+    conflict = await _commit_or_conflict(db)
+    if conflict is not None:
+        return conflict
     logger.info(
         f"手順書再生成: questionnaire_id={questionnaire_id}, link_id={link_id}, model={used_model}"
     )
@@ -2973,7 +3023,7 @@ async def regenerate_runbook(
             "steps": [_serialize_step(s) for s in steps],
             "status": RunbookStatus.DRAFT,
             "model": used_model,
-            "version": _runbook_version(saved),
+            "version": runbook_version(saved),
         }
     )
 
@@ -3045,7 +3095,7 @@ async def save_runbook(
     runbooks = await _runbook_map(questionnaire_id, db)
     existing = runbooks.get(link_id)
     await _lock_row(db, existing)
-    conflict = _version_conflict(payload, _runbook_version(existing))
+    conflict = _version_conflict(payload, runbook_version(existing), required=confirm)
     if conflict is not None:
         return conflict
 
@@ -3076,7 +3126,7 @@ async def save_runbook(
                 "steps": [_serialize_step(s) for s in existing.steps],
                 "dropped_action_types": dropped_action_types,
                 "unchanged": True,
-                "version": _runbook_version(existing),
+                "version": runbook_version(existing),
             }
         )
 
@@ -3107,7 +3157,9 @@ async def save_runbook(
         confirmed_at=confirmed_at,
         dropped_action_types=dropped_action_types,
     )
-    await db.commit()
+    conflict = await _commit_or_conflict(db)
+    if conflict is not None:
+        return conflict
     logger.info(
         f"手順書保存: questionnaire_id={questionnaire_id}, link_id={link_id}, "
         f"status={status}, steps={len(steps)}"
@@ -3120,7 +3172,7 @@ async def save_runbook(
         "status": status,
         "steps": [_serialize_step(s) for s in steps],
         "dropped_action_types": dropped_action_types,
-        "version": _runbook_version(saved),
+        "version": runbook_version(saved),
     }
     if demoted:
         response["demoted"] = True
@@ -3197,7 +3249,7 @@ def _build_plan_items(
                 "llm_model": plan.llm_model if plan else None,
                 # False なら読み取り専用（確認・編集・再作成は手順書の確認待ち。下書きへ戻すのみ可）
                 "runbook_confirmed": runbook_confirmed,
-                "version": _plan_version(plan),
+                "version": plan_version(plan),
             }
         )
     return items
@@ -3605,7 +3657,9 @@ async def recompile_plan(
         plans,
         db,
     )
-    await db.commit()
+    conflict = await _commit_or_conflict(db)
+    if conflict is not None:
+        return conflict
     logger.info(
         f"取得プラン再作成: questionnaire_id={questionnaire_id}, link_id={link_id}, "
         f"検証エラー{len(errors)}件, model={used_model}"
@@ -3619,7 +3673,7 @@ async def recompile_plan(
             "needs_input": has_needs_input(program),
             "errors": errors,
             "model": used_model,
-            "version": _plan_version(saved),
+            "version": plan_version(saved),
         }
     )
 
@@ -3693,7 +3747,7 @@ async def save_plan(
     plans = await _plan_map(questionnaire_id, db)
     existing = plans.get(link_id)
     await _lock_row(db, existing)
-    conflict = _version_conflict(payload, _plan_version(existing))
+    conflict = _version_conflict(payload, plan_version(existing), required=confirm)
     if conflict is not None:
         return conflict
 
@@ -3727,7 +3781,7 @@ async def save_plan(
                 "link_id": link_id,
                 "status": existing.status,
                 "unchanged": True,
-                "version": _plan_version(existing),
+                "version": plan_version(existing),
             }
         )
 
@@ -3777,7 +3831,9 @@ async def save_plan(
         confirmed_by_id=confirmed_by_id,
         confirmed_at=confirmed_at,
     )
-    await db.commit()
+    conflict = await _commit_or_conflict(db)
+    if conflict is not None:
+        return conflict
     logger.info(
         f"取得プラン保存: questionnaire_id={questionnaire_id}, link_id={link_id}, status={status}"
         + ("（内容変更により確認済みから draft へ戻した）" if demoted else "")
@@ -3786,7 +3842,7 @@ async def save_plan(
         "success": True,
         "link_id": link_id,
         "status": status,
-        "version": _plan_version(saved),
+        "version": plan_version(saved),
     }
     if demoted:
         response["demoted"] = True
@@ -3829,7 +3885,7 @@ async def demote_plan(
     if plan is None:
         raise ResourceNotFoundException("InputPlan", link_id)
     await _lock_row(db, plan)
-    conflict = _version_conflict(payload, _plan_version(plan))
+    conflict = _version_conflict(payload, plan_version(plan), required=True)
     if conflict is not None:
         return conflict
 
@@ -3848,7 +3904,7 @@ async def demote_plan(
             "link_id": link_id,
             "status": PlanStatus.DRAFT,
             "demoted": demoted,
-            "version": _plan_version(plan),
+            "version": plan_version(plan),
         }
     )
 

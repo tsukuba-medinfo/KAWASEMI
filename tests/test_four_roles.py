@@ -233,13 +233,17 @@ async def test_a_single_designer_completes_the_design_without_switching(
     assert resp.status_code == 200, resp.text
 
     # 手順書（旧 plan_designer）
-    resp = await client.post(f"{base}/runbook/item1?confirm=true", json={"steps": []}, headers=h)
+    resp = await client.post(
+        f"{base}/runbook/item1?confirm=true", json={"base_version": None, "steps": []}, headers=h
+    )
     assert resp.status_code == 200, resp.text
     assert resp.json()["status"] == "confirmed"
 
     # 取得プラン（旧 plan_designer + data_manager の協働）
     resp = await client.post(
-        f"{base}/plan/item1?confirm=true", json={"program": _SQL_PROGRAM}, headers=h
+        f"{base}/plan/item1?confirm=true",
+        json={"base_version": None, "program": _SQL_PROGRAM},
+        headers=h,
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["status"] == "confirmed"

@@ -249,7 +249,9 @@ async function saveCurrent(confirm) {
     const data = await post(`{{ base_path() }}/ai-input/questionnaires/${QID}/runbook/${encodeURIComponent(it.link_id)}?confirm=${confirm}`, { steps: it.steps, base_version: it.version ?? null });
     if (data.conflict) { setStatus(`⚠ ${data.message}`, false); return false; }
     if (data.success) {
-      it.status = data.status; it.has_runbook = true; it.stale = false;
+      // 何も書かなかった保存（unchanged）は「設計が更新された」の印を消さない
+      it.status = data.status; it.has_runbook = true;
+      if (!data.unchanged) it.stale = false;
       it.version = data.version; it.saved = canonSteps(it.steps);
       // 確認済みの内容を変えて保存すると、サーバが未確認（draft）へ戻す
       if (data.demoted) setStatus(`⚠ 保存しました。${data.warning}`, false);

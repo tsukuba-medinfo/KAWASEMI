@@ -75,7 +75,7 @@ async def test_runbook_confirm_records_confirmed_by(
 
     resp = await designer_client.post(
         f"/ai-input/questionnaires/{q.id}/runbook/item1?confirm=true",
-        json={"steps": []},
+        json={"base_version": None, "steps": []},
         headers={"X-CSRF-Token": csrf_token},
     )
     assert resp.status_code == 200
@@ -126,7 +126,7 @@ async def test_runbook_edit_after_confirm_preserves_confirmer(
     _act_as(designer_client, designer_user, RoleType.DESIGNER)
     await designer_client.post(
         f"/ai-input/questionnaires/{q.id}/runbook/item1?confirm=true",
-        json={"steps": []},
+        json={"base_version": None, "steps": []},
         headers={"X-CSRF-Token": csrf_token},
     )
     rb = await _get_runbook(db_session, q.id, "item1")
@@ -169,7 +169,7 @@ async def test_plan_confirm_records_confirmed_by(
     _act_as(designer_client, designer_user, RoleType.DESIGNER)
     resp = await designer_client.post(
         f"/ai-input/questionnaires/{q.id}/plan/item1?confirm=true",
-        json={"program": _SQL_PROGRAM},
+        json={"base_version": None, "program": _SQL_PROGRAM},
         headers={"X-CSRF-Token": csrf_token},
     )
     assert resp.status_code == 200
@@ -224,7 +224,7 @@ async def test_runbook_edit_by_other_user_preserves_original_confirmer(
     _act_as(designer_client, designer_user, RoleType.DESIGNER)
     await designer_client.post(
         f"/ai-input/questionnaires/{q.id}/runbook/item1?confirm=true",
-        json={"steps": []},
+        json={"base_version": None, "steps": []},
         headers={"X-CSRF-Token": csrf_token},
     )
     rb = await _get_runbook(db_session, q.id, "item1")

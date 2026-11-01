@@ -363,6 +363,18 @@ def effective_llm_model(step: dict[str, Any], override: str | None) -> tuple[str
     return settings.ollama_model.strip(), "default"
 
 
+def overridden_from(step: dict[str, Any], effective: str, source: str) -> str | None:
+    """実行時指定が承認された step.llm_model と違うモデルに替えたとき、承認されたモデルを返す。
+
+    比較は前後の空白を除いて行う（`effective_llm_model` が strip した値を返すため、
+    承認側に空白が残っていると同じモデルでも「替えた」と誤記録する）。
+    """
+    approved = step.get("llm_model")
+    if source != "request_override" or not isinstance(approved, str) or not approved.strip():
+        return None
+    return approved if approved.strip() != effective.strip() else None
+
+
 def _llm_models_of(program: dict[str, Any], override: str | None) -> dict[str, dict[str, Any]]:
     """program 内の LLM op ごとに、承認されたモデルと実行時に使うモデルを並べる。"""
     out: dict[str, dict[str, Any]] = {}
@@ -375,8 +387,9 @@ def _llm_models_of(program: dict[str, Any], override: str | None) -> dict[str, d
         effective, source = effective_llm_model(step, override)
         approved = step.get("llm_model")
         entry: dict[str, Any] = {"effective": effective, "source": source, "approved": approved}
-        if source == "request_override" and approved and approved != effective:
-            entry["overridden_from"] = approved
+        replaced = overridden_from(step, effective, source)
+        if replaced is not None:
+            entry["overridden_from"] = replaced
         out[str(step.get("id"))] = entry
     return out
 
@@ -2196,13 +2209,9 @@ class DSLInterpreter:
             # ので、承認と違うモデルで動いたことを trace だけで読めるようにする。
             "model_source": model_source,
         }
-        approved_model = step.get("llm_model")
-        if (
-            model_source == "request_override"
-            and approved_model
-            and approved_model != selected_model
-        ):
-            llm["overridden_from"] = approved_model
+        replaced = overridden_from(step, selected_model, model_source)
+        if replaced is not None:
+            llm["overridden_from"] = replaced
         # **モデルの中身のダイジェストも残す**（設計ロールでも記録している）。
         # タグだけでは、`ollama pull` で上流が更新されても同名タグを作り直しても記録が
         # 変わらない。取れなかったときは理由つきの null で、**「記録していない」とは区別

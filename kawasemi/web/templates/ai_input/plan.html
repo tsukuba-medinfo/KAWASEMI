@@ -397,7 +397,10 @@ async function saveCurrent(confirm) {
     const data = await post(`{{ base_path() }}/ai-input/questionnaires/${QID}/plan/${encodeURIComponent(it.link_id)}?confirm=${confirm}`, { program: programOf(it), base_version: it.version ?? null });
     if (data.conflict) { setStatus(`⚠ ${data.message}`, false); return false; }
     if (data.success) {
-      it.status = data.status; it.has_plan = true; it.stale = false;
+      // 何も書かなかった保存（unchanged）は「手順書より古い」の印を消さない。
+      // 印を外すのは内容の保存か、確認（確認が「見た」の意思表示）である。
+      it.status = data.status; it.has_plan = true;
+      if (!data.unchanged) it.stale = false;
       it.version = data.version; it.saved = canon(programOf(it));
       it.needs_input = programOf(it).steps.some(s => s.needs_input);
       // 確認済みの program を変えて保存すると、サーバが未確認（draft）へ戻す。
