@@ -612,7 +612,7 @@ class DSLParam(BaseModel):
              prompt は読み取り対象ではなく解析されるデータであるため。
 
     組み込みパラメータ patient_id / study_id は宣言不要で参照でき（study_id は
-    バッチ実行でのみ供給される）、
+    バッチのジョブか autofill の要求本文から供給され、空なら参照した step が失敗する）、
     再宣言はできない（なりすまし防止）。
     """
 

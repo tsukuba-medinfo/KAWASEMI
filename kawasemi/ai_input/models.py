@@ -942,7 +942,8 @@ class InputPlan(Base, TimestampMixin):
         - prompt の ``{{name}}``  → 外部データ由来の値はデータデリミタで囲む
 
     patient_id / study_id は宣言不要の組み込みパラメータ（再宣言不可）。
-    study_id はバッチ実行でのみ供給される（単一被験者の実行では未指定＝step が失敗）。
+    study_id はバッチ実行ではジョブの値、単発・逐次の実行では要求本文の値（任意）が
+    供給される（空のまま参照すると step が失敗）。
 
     status は draft/confirmed。program 内に needs_input=true の step が残る限り
     confirmed へ昇格できず、ステップ4では confirmed のみ実行可能。
