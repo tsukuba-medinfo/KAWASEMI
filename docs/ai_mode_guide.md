@@ -1,6 +1,6 @@
 # KAWASEMI データ自動収集（AIモード）— アーキテクチャ・操作ガイド
 
-KAWASEMI のデータ自動収集機能（旧称: AI支援入力）の、アーキテクチャ・データモデル・各ステップの操作・通しの作例・トラブルシューティング。**起動して動かすまで**は [QUICKSTART_AI.md](../QUICKSTART_AI.md)、**DSL の op とその意味論**は [dsl_reference.md](dsl_reference.md) を参照。
+KAWASEMI のデータ自動収集機能（旧称: AI支援入力）の、アーキテクチャ・データモデル・各ステップの操作・通しの作例・トラブルシューティング。**起動して動かすまで**は [QUICKSTART_AI.md](../QUICKSTART_AI.md)、**DSL の仕様**（op・実行意味論・検証・再現性と監査）は [dsl_specification.md](dsl_specification.md) を参照。
 
 > **ロール体系**: 正本は [roles_and_permissions.md](roles_and_permissions.md) を参照してください。
 
@@ -124,7 +124,7 @@ KAWASEMI のデータ自動収集機能（旧称: AI支援入力）の、アー�
 
 ### ステップ3: 取得プラン（DSL プログラム）
 
-`ai_input_plans` テーブル。`program` カラム（JSON）に DSL プログラムを保持します。詳細は [DSL リファレンス](dsl_reference.md) を参照。
+`ai_input_plans` テーブル。`program` カラム（JSON）に DSL プログラムを保持します。DSL の正本は [DSL 仕様](dsl_specification.md)。
 
 ステータス: `draft`（生成直後）→ `confirmed`（人が確認済み）。`confirmed` のプランのみステップ4で実行可能です。  
 `needs_input: true` の step が残る限り `confirmed` に昇格できません（SQL 等を人間が補完してから確認してください）。

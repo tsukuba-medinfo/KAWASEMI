@@ -291,6 +291,17 @@ def test_mrn_keyed_steps_carry_zero_padding(pipeline: PipelineRun) -> None:
     assert seen >= 7
 
 
+def test_spec_worked_example_is_the_compiled_program(pipeline: PipelineRun) -> None:
+    """DSL 仕様（`docs/dsl_specification.md` §12）の作例が、この E2E でコンパイルされ確定された
+    `onset_date` のプログラムそのものであること。
+
+    作例を手で書き換えたり、コンパイラの是正が変わったりして実物とずれたら落ちる。
+    """
+    from tests.ai_input.test_dsl_specification import spec_example
+
+    assert pipeline.programs["onset_date"] == spec_example("onset_date")
+
+
 def test_unscoped_db_units_get_no_patient_key(pipeline: PipelineRun) -> None:
     """患者で絞らない表（item_counts・マスタ）の取得 step に患者キーが付かない。
 

@@ -8,7 +8,7 @@ KAWASEMI のデータ自動収集機能（旧称: AI支援入力）を使うと�
 
 ---
 
-> このファイルは**起動して動かすまで**に絞っている。アーキテクチャ・データモデル・各ステップの操作・通しの作例・トラブルシューティングは [docs/ai_mode_guide.md](docs/ai_mode_guide.md)、**DSL の op とその意味論**は [docs/dsl_reference.md](docs/dsl_reference.md)（こちらが正本）。
+> このファイルは**起動して動かすまで**に絞っている。アーキテクチャ・データモデル・各ステップの操作・通しの作例・トラブルシューティングは [docs/ai_mode_guide.md](docs/ai_mode_guide.md)、**DSL の仕様**（op・意味論・検証・監査）は [docs/dsl_specification.md](docs/dsl_specification.md)（こちらが正本）。
 
 ## 1. 前提条件
 
@@ -79,5 +79,5 @@ http://localhost:8000/login
 
 - [アーキテクチャ・データモデル](docs/ai_mode_guide.md)（1・2章）
 - [ステップごとの操作](docs/ai_mode_guide.md)（6〜9章: データソース調査 → 取得手順書 → 取得プラン → AI自動入力）
-- [DSL リファレンス](docs/dsl_reference.md)（op 一覧・`guard`・フォールバック・`params`）
+- [DSL 仕様](docs/dsl_specification.md)（op 一覧・`guard`・フォールバック・`params`・検証・監査）
 - [トラブルシューティング](docs/ai_mode_guide.md)

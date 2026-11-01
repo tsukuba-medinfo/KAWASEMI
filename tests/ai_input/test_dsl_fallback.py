@@ -693,16 +693,16 @@ def _prompt_fallback_examples() -> list[list[dict[str, Any]]]:
 
 
 def test_quickstart_fallback_example_is_a_valid_program() -> None:
-    """`docs/dsl_reference.md` のフォールバックの例も検証を通ること。
+    """`docs/dsl_specification.md` のフォールバックの例も検証を通ること。
 
     プロンプトの例は字面を抽出して実行しているが、QUICKSTART は誰も検証していなかった。
     人が手で書くときに読むのはこちらなので、壊れていても気づけない状態だった。
     """
-    # op 表の正本は docs/dsl_reference.md（QUICKSTART_AI.md から移した）
-    text = (Path(__file__).resolve().parents[2] / "docs/dsl_reference.md").read_text(
+    # DSL の正本は docs/dsl_specification.md（§8.5 がフォールバック）
+    text = (Path(__file__).resolve().parents[2] / "docs/dsl_specification.md").read_text(
         encoding="utf-8"
     )
-    section = text.split("## フォールバック（所在候補が複数あるとき）")[1].split("\n## ")[0]
+    section = text.split("### 8.5 フォールバック（所在の候補が複数あるとき）")[1].split("\n### ")[0]
     blocks = [b.split("```")[0] for b in section.split("```json")[1:]]
 
     assert blocks, "フォールバックの節に JSON の例が無い"

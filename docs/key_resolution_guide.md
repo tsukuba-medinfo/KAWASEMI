@@ -37,7 +37,7 @@
     この形で持つ」）。**接続単位**で、列ごとには宣言できません（indexer に語彙が無いため）
   - LLM が別の値を書いていたら宣言の値に置き換えて `needs_input` にします
   - 付けない step（患者で絞らない表、自アプリDBの anchor）と、宣言もカタログも無い名前の扱いは
-    [dsl_reference.md](dsl_reference.md) の「患者キーの解決」
+    [dsl_specification.md](dsl_specification.md) の §7「患者キーの解決」
 
   ```yaml
   connections:

@@ -520,7 +520,7 @@ class DSLStep(BaseModel):
     # 名前に反して FHIRPath ではない。executor.resolve_fhir_path が解釈する独自の
     # 簡易ドット記法で、対応するのは "." 区切りの辿りと "name[0]" 形式の添字のみ
     # （先頭のリソース型は読み飛ばす）。where()/ofType()/as/| 等の FHIRPath 構文、
-    # 関数・演算子・条件式は一切解釈しない。詳細は docs/dsl_reference.md。
+    # 関数・演算子・条件式は一切解釈しない。詳細は docs/dsl_specification.md §5.2。
     fhir_path: str | None = None  # 例: Observation.valueQuantity.value
 
     # --- 抽出系（csv_extract; 全患者横断CSVを決定的に行絞り＋列取得） ---
