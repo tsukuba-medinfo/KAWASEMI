@@ -54,6 +54,117 @@ def test_is_select_only_sql(sql: str, ok: bool) -> None:
     assert is_select_only_sql(sql) is ok
 
 
+# 文字列リテラルの中の `--` / `/*` から後ろをコメントとして消していたため、禁止語・複文・
+# `U&` の検査の前に本体が見えなくなっていた（レビューの再現。PostgreSQL 17 の開発用
+# フォールバックで dblink_exec が実際に書けた）
+_COMMENT_IN_LITERAL_BYPASSES = [
+    "SELECT '--', dblink_exec('host=x', 'INSERT INTO t VALUES (1)')",
+    "SELECT '--', pg_sleep(100)",
+    "SELECT '--'; DROP TABLE users",
+    "SELECT x FROM t WHERE a='--' UNION SELECT password_hash FROM users",
+    "SELECT '--' AS x, dblink_exec('host=x', 'INSERT ...') WHERE :patient_id = :patient_id",
+    # `/*` がリテラルの中にあると、以前は後ろの `*/` までが消えた
+    "SELECT '/*', pg_sleep(1) -- */",
+    "SELECT '/*' AS a, dblink_exec('x', 'y') /* */",
+    # ドル引用の本体の `--` はコメントではない
+    "SELECT $$--$$, pg_sleep(1)",
+    "SELECT $q$ -- $q$, pg_sleep(1)",
+    # 識別子の中のコメント記号
+    'SELECT "--", pg_sleep(1) FROM t',
+    'SELECT "/*", pg_sleep(1) FROM t -- */',
+    "SELECT `--`, pg_sleep(1) FROM t",
+    # E 文字列の `\'` で閉じたと見なすと、後ろの `--` がコメントになる
+    "SELECT E'\\'--', pg_sleep(1)",
+    "SELECT E'\\'' -- ', pg_sleep(1)",
+    # 引用の中の `U&`
+    "SELECT '--', U&\"\\0064blink_exec\"('x', 'y')",
+]
+
+
+@pytest.mark.parametrize("sql", _COMMENT_IN_LITERAL_BYPASSES)
+def test_comment_markers_inside_literals_do_not_hide_the_rest(sql: str) -> None:
+    assert is_select_only_sql(sql) is False
+    prog = {"steps": [{"op": "sql_extract", "id": "s", "sql": sql}], "return": "$s"}
+    assert any("SELECT" in e for e in validate_program(prog))
+    prog["steps"][0]["op"] = "external_db_extract"
+    prog["steps"][0]["connection_id"] = "c"
+    assert any("SELECT" in e for e in validate_program(prog))
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # 閉じていない引用・コメントは、境界が決まらないので拒否する
+        "SELECT 'abc FROM t",
+        'SELECT "abc FROM t',
+        "SELECT $$abc FROM t",
+        "SELECT 1 /* c",
+        "SELECT a[1 FROM t",
+        # バックスラッシュでエスケープした引用符は、方言（SQLite、
+        # standard_conforming_strings=off）で終端の位置が変わる。`''` で書けるので拒否する
+        "SELECT E'it\\'s' AS x",
+        "SELECT 'a\\' AS x",
+        # 入れ子のブロックコメント（SQLite は最初の `*/` で閉じる）
+        "SELECT /* /* */ pg_sleep(1) */ 1",
+        "SELECT /* /* */ 1 */ 1",
+        # MySQL の実行されるコメント
+        "SELECT 1 /*! , pg_sleep(1) */",
+        # SQLite の [識別子] の中のコメント記号
+        "SELECT [--], pg_sleep(1)",
+        "SELECT [--] FROM t",
+        # ドル引用の本体は SQLite ではコード。引用符・; を含むものは読みが割れる
+        "SELECT $a$ ' $a$ -- ', pg_sleep(1)",
+        "SELECT $a$ ; $a$",
+        # 文末のセミコロンは1つだけ
+        "SELECT 1;;",
+        "SELECT 1;;;",
+        "SELECT 1; ;",
+        "SELECT 1; SELECT 2",
+        "SELECT 1; -- c\n;",
+        ";",
+        "-- only a comment",
+    ],
+)
+def test_ambiguous_or_unterminated_sql_is_rejected(sql: str) -> None:
+    assert is_select_only_sql(sql) is False
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT 1;",
+        "SELECT 1 ; ",
+        "SELECT 1; -- trailing comment",
+        "SELECT 1; /* c */",
+        "SELECT '--' AS x FROM t WHERE patient_id = :patient_id",
+        "SELECT '/*' AS x FROM t",
+        "SELECT 'it''s' AS x",
+        "SELECT 'a;b' AS x",
+        "SELECT E'a\\nb' AS x",
+        "SELECT E'a\\\\' AS x",
+        "SELECT $$--$$ AS x",
+        "SELECT $tag$ /* $tag$ AS x",
+        'SELECT "--" FROM t',
+        'SELECT "a""b" FROM t',
+        "SELECT a[1] FROM t",
+        "SELECT v -- コメント 'x\nFROM labs /* 'y */ WHERE patient_id = :patient_id",
+        "SELECT x::int FROM t WHERE c = $1",
+        "SELECT a$b$ FROM t",
+    ],
+)
+def test_legitimate_sql_still_passes(sql: str) -> None:
+    assert is_select_only_sql(sql) is True
+
+
+def test_forbidden_words_inside_literals_are_still_rejected() -> None:
+    """リテラルの中身も禁止語の検査に含める（未知の「文字列を実行する関数」への網）。
+
+    `WHERE status = 'delete'` は誤検知になるが、以前からの挙動で、フェイルクローズ側。
+    """
+    assert is_select_only_sql("SELECT x FROM t WHERE status = 'delete'") is False
+    assert is_select_only_sql("SELECT some_ext_exec('INSERT INTO t VALUES (1)')") is False
+
+
 # --------------------------------------------------------------------------- #
 # 安全な算術評価
 # --------------------------------------------------------------------------- #

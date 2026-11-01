@@ -154,26 +154,171 @@ _SQL_FORBIDDEN = re.compile(
 # 禁止語を字面に出さずに書けるので、エスケープそのものを拒否する（抽出に使う理由が無い）。
 _SQL_UNICODE_ESCAPE = re.compile(r"\bu&\s*[\"']", re.IGNORECASE)
 
-# SQL コメント（行/ブロック）。複文判定・キーワード検査の前に除去して、
-# コメントによるすり抜け（`SELECT ... ; -- DROP ...`）や、コメント内キーワード
-# による誤検知を防ぐ。
-_SQL_LINE_COMMENT = re.compile(r"--[^\n]*")
-_SQL_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
+# SQL コメント・引用の字句解析（引用を意識したコメント除去）。
+#
+# 以前は正規表現でコメントを消していた。引用を見ないので、文字列リテラルの中の `--` や `/*`
+# から後ろが丸ごと消え、禁止語・複文・`U&` の検査の前に本体が見えなくなっていた
+# （`SELECT '--', dblink_exec(...)` が通り、PostgreSQL 17 の開発用フォールバックで実際に書けた）。
+#
+# 方針:
+#
+# - **対象の方言は PostgreSQL と SQLite**（入っているドライバが asyncpg と aiosqlite だけ）。
+#   PostgreSQL の字句規則で読み、2つの方言で引用・コメントの境界が食い違いうる書き方は
+#   **それ自体を拒否する**（フェイルクローズ）。境界が食い違うと、こちらがコメントとして
+#   消した範囲を DB が生きたコードとして実行しうるため。
+# - コメントは**引用の外にあるものだけ**を空白1つへ置き換える。
+# - **リテラルの中身は禁止語の検査から外さない**（下の `is_select_only_sql` を参照）。
+#
+# 個々の規則:
+#
+# - `'…'`（`''` で引用符）、`"…"`（識別子、`""` で引用符）、`` `…` ``（SQLite の識別子）。
+# - `E'…'`（バックスラッシュエスケープ）。**奇数個のバックスラッシュの直後の引用符は全種で
+#   拒否する**。`E'\''` は PostgreSQL では1文字の `'` だが、SQLite と
+#   `standard_conforming_strings=off` の PostgreSQL では文字列の終端の位置が変わる。
+#   引用符は `''` で書けるので表現力は失わない。この規則のもとでは E 文字列の終端は普通の
+#   文字列と同じ位置に来るので、同じ処理で読める（`\n` などの他のエスケープは終端を動かさない）。
+# - `$tag$…$tag$`（PostgreSQL のドル引用）。SQLite では本体がコードとして読まれるので、
+#   本体に引用符・`[`・`;` を含むものは拒否する。本体の `--` / `/*` は消さずに残す
+#   （検査側が多く見る向きの食い違いなので安全）。
+# - `--` 行コメント、`/* */` ブロックコメント。**入れ子は拒否する**。PostgreSQL は入れ子を
+#   数えるが SQLite は最初の `*/` で閉じるので、`/* /* */ dblink_exec(...) */` は
+#   SQLite では関数呼び出しが生きる。MySQL の実行されるコメント `/*!…*/` も拒否する。
+# - `[…]`（SQLite の識別子、PostgreSQL の添字）。中身に引用符・`$`・`;`・コメント記号を
+#   含むものは方言で読みが割れるので拒否する。それ以外は普通のコードとして読む。
+# - 閉じていない引用・コメントは拒否する（SQLite は閉じない `/*` を末尾までのコメントとして
+#   受け付けるが、ここでは受け付けない）。
+_SQL_IDENT_CHAR = re.compile(r"[A-Za-z0-9_$\x80-\U0010ffff]")
+_SQL_DOLLAR_TAG = re.compile(r"\$(?:[A-Za-z_\x80-\U0010ffff][A-Za-z0-9_\x80-\U0010ffff]*)?\$")
+_SQL_BRACKET_AMBIGUOUS = ("'", '"', "`", "$", ";", "--", "/*")
+_SQL_DOLLAR_BODY_AMBIGUOUS = ("'", '"', "`", "[", ";")
+
+
+class _SqlLexError(ValueError):
+    """引用・コメントの境界が決まらない（閉じていない・方言で読みが割れる）SQL"""
+
+
+def _end_of_quoted(sql: str, start: int) -> int:
+    """`sql[start]` の引用符で始まる引用の、閉じ引用符の次の位置を返す"""
+    quote = sql[start]
+    i = start + 1
+    n = len(sql)
+    while i < n:
+        ch = sql[i]
+        if ch == "\\":
+            run = 1
+            while i + run < n and sql[i + run] == "\\":
+                run += 1
+            if run % 2 == 1 and sql[i + run : i + run + 1] == quote:
+                raise _SqlLexError("バックスラッシュでエスケープした引用符は方言で読みが割れる")
+            i += run
+            continue
+        if ch == quote:
+            if sql[i + 1 : i + 2] == quote:
+                i += 2
+                continue
+            return i + 1
+        i += 1
+    raise _SqlLexError("閉じていない引用")
+
+
+def _lex_sql(sql: str) -> tuple[str, str]:
+    """SQL を (コメント除去済み, コメント除去かつ引用を空白へ置換済み) の2つへ分ける。
+
+    1つ目は禁止語・`U&` の検査に、2つ目はセミコロン・先頭語の検査に使う。
+
+    Raises:
+        _SqlLexError: 閉じていない引用・コメント、または方言で境界の読みが割れる書き方。
+    """
+    kept: list[str] = []
+    code: list[str] = []
+    i = 0
+    n = len(sql)
+    while i < n:
+        ch = sql[i]
+        two = sql[i : i + 2]
+        if two == "--":
+            end = sql.find("\n", i)
+            i = n if end < 0 else end
+            kept.append(" ")
+            code.append(" ")
+            continue
+        if two == "/*":
+            if sql.startswith("/*!", i):
+                raise _SqlLexError("実行されるコメント（/*!）")
+            end = sql.find("*/", i + 2)
+            if end < 0:
+                raise _SqlLexError("閉じていないブロックコメント")
+            if "/*" in sql[i + 2 : end]:
+                raise _SqlLexError("入れ子のブロックコメント")
+            i = end + 2
+            kept.append(" ")
+            code.append(" ")
+            continue
+        if ch in "'\"`":
+            end = _end_of_quoted(sql, i)
+            kept.append(sql[i:end])
+            code.append(" ")
+            i = end
+            continue
+        if ch == "[":
+            end = sql.find("]", i)
+            if end < 0:
+                raise _SqlLexError("閉じていない [")
+            body = sql[i + 1 : end]
+            if any(s in body for s in _SQL_BRACKET_AMBIGUOUS):
+                raise _SqlLexError("[…] の中に引用・コメント記号")
+            kept.append(sql[i : end + 1])
+            code.append(sql[i : end + 1])
+            i = end + 1
+            continue
+        if ch == "$" and (i == 0 or not _SQL_IDENT_CHAR.match(sql[i - 1])):
+            m = _SQL_DOLLAR_TAG.match(sql, i)
+            if m:
+                tag = m.group()
+                end = sql.find(tag, m.end())
+                if end < 0:
+                    raise _SqlLexError("閉じていないドル引用")
+                body = sql[m.end() : end]
+                if any(s in body for s in _SQL_DOLLAR_BODY_AMBIGUOUS):
+                    raise _SqlLexError("ドル引用の本体に引用符・[・;")
+                kept.append(sql[i : end + len(tag)])
+                code.append(" ")
+                i = end + len(tag)
+                continue
+        kept.append(ch)
+        code.append(ch)
+        i += 1
+    return "".join(kept), "".join(code)
 
 
 def _strip_sql_comments(sql: str) -> str:
-    sql = _SQL_BLOCK_COMMENT.sub(" ", sql)
-    sql = _SQL_LINE_COMMENT.sub(" ", sql)
-    return sql
+    """引用の外のコメントを空白へ置き換えた SQL（字句が決まらなければ元の SQL）。
+
+    バインド名の走査（`sql_bind_names`）用。SQLAlchemy の `text()` も引用を見ずに `:name` を
+    拾うので、リテラルの中身は残す。字句が決まらない SQL は `is_select_only_sql` が拒否するので、
+    ここでは消しすぎない向き（元の SQL）へ倒す。
+    """
+    try:
+        return _lex_sql(sql)[0]
+    except _SqlLexError:
+        return sql
 
 
 def is_select_only_sql(sql: str) -> bool:
     """SELECT（または WITH ... SELECT）のみで、書込/DDL/複文を含まないか
 
-    - コメントを除去したうえで判定する
+    - 引用を意識してコメントを除去したうえで判定する（`_lex_sql`）。閉じていない引用・
+      コメント、方言で境界の読みが割れる書き方は拒否する
     - 先頭が select または with で始まる
     - 危険なキーワードを含まない
-    - 文末以外のセミコロン（複文）を含まない
+    - 引用・コメントの外のセミコロンは、文末の1つだけ許す（`SELECT 1;;` は複文として拒否）
+
+    **禁止語はリテラルの中身も含めて探す**。リテラルを空白にしてから探せば
+    `WHERE status = 'delete'` のような誤検知は消えるが、それが安全なのは「文字列を SQL として
+    実行する関数が全部禁止語に入っている」ときに限る。PostgreSQL 本体の分は洗い出してある
+    （下の `_SQL_FORBIDDEN`）ものの、`external_db_extract` はこの検査が唯一のコード上の関門で、
+    接続先に入っている拡張（`dblink` と同類のもの）までは列挙できない。リテラルの中の禁止語は
+    そうした未知の関数に渡ったときの最後の網になるので、誤検知（以前からの挙動）を取って残す。
 
     注: これは多層防御の一層であり、文字列パースだけに依存しない。**保証の根拠は接続の
     権限側**である——`_op_sql` はアプリDBを**読み取り専用セッション**で読み、
@@ -185,17 +330,23 @@ def is_select_only_sql(sql: str) -> bool:
     """
     if not sql or not sql.strip():
         return False
-    stripped = _strip_sql_comments(sql).strip().rstrip(";").strip()
-    if not stripped:
+    try:
+        kept, code = _lex_sql(sql)
+    except _SqlLexError:
         return False
-    lowered = stripped.lower()
+    code = code.strip()
+    if code.endswith(";"):
+        code = code[:-1].rstrip()
+    if not code:
+        return False
+    if ";" in code:  # 文末の1つは上で除去済み → 残れば複文
+        return False
+    lowered = code.lower()
     if not (lowered.startswith("select") or lowered.startswith("with")):
         return False
-    if ";" in stripped:  # 文末セミコロンは上で除去済み → 残れば複文
+    if _SQL_FORBIDDEN.search(kept):
         return False
-    if _SQL_FORBIDDEN.search(stripped):
-        return False
-    if _SQL_UNICODE_ESCAPE.search(stripped):
+    if _SQL_UNICODE_ESCAPE.search(kept):
         return False
     return True
 

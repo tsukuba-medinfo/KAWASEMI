@@ -443,3 +443,25 @@ async def test_dblink_escapes_the_readonly_transaction_but_sql_extract_rejects_i
     assert evidence["q"]["trace"] == []
     assert "SELECT" in evidence["q"]["error"], evidence
     assert await _rows(pg_engine) == [("P1", "original")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("marker", ["--", "/*"], ids=["line_comment", "block_comment"])
+async def test_a_comment_marker_inside_a_literal_does_not_hide_dblink_exec(
+    app_session: AsyncSession, pg_engine: AsyncEngine, dblink: str, marker: str
+) -> None:
+    """リテラルの中の `--` / `/*` から後ろをコメントとして消していたため、`dblink_exec` が
+    禁止語の検査に見えず、開発用フォールバック（READONLY_DATABASE_URL 無し）で書けていた
+    （レビューの再現）。引用を意識した字句解析で拒否され、何も書かれないこと。"""
+    insert = f"INSERT INTO {TABLE} VALUES (''P8'', ''via-comment-in-literal'')"
+    sql = (
+        f"SELECT '{marker}' AS x, dblink_exec('{dblink}', '{insert}') "
+        "WHERE :patient_id = :patient_id"
+    )
+
+    assert not is_select_only_sql(sql)
+    prefill, evidence = await DSLInterpreter().execute([_plan(sql)], "P1", app_session)
+    assert "q" not in prefill
+    assert evidence["q"]["trace"] == []
+    assert "SELECT" in evidence["q"]["error"], evidence
+    assert await _rows(pg_engine) == [("P1", "original")]
