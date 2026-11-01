@@ -445,19 +445,30 @@ async def test_dblink_escapes_the_readonly_transaction_but_sql_extract_rejects_i
     assert await _rows(pg_engine) == [("P1", "original")]
 
 
+# レビューで PostgreSQL 17 の `sql_extract` から実際に書けた形。`{db}` に dblink_exec を入れる
+_COMMENT_BYPASSES = {
+    # リテラルの中の `--` / `/*` から後ろをコメントとして消していた（1回目）
+    "line_comment_in_literal": "SELECT '--' AS x, {db} WHERE :patient_id = :patient_id",
+    "block_comment_in_literal": "SELECT '/*' AS x, {db} WHERE :patient_id = :patient_id",
+    # PostgreSQL は `--` を `\r` でも終える（2回目）
+    "line_comment_ended_by_cr": "SELECT 1 --\r, {db} WHERE :patient_id = :patient_id\n",
+    # PostgreSQL の入れ子の開き `/*/` が閉じ `*/` と重なる（2回目）
+    "overlapping_nested_opener": (
+        "SELECT 1 /* /*/ -- */ */ , {db} WHERE :patient_id = :patient_id\n"
+    ),
+}
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("marker", ["--", "/*"], ids=["line_comment", "block_comment"])
-async def test_a_comment_marker_inside_a_literal_does_not_hide_dblink_exec(
-    app_session: AsyncSession, pg_engine: AsyncEngine, dblink: str, marker: str
+@pytest.mark.parametrize("template", list(_COMMENT_BYPASSES.values()), ids=list(_COMMENT_BYPASSES))
+async def test_comment_tricks_do_not_hide_dblink_exec(
+    app_session: AsyncSession, pg_engine: AsyncEngine, dblink: str, template: str
 ) -> None:
-    """リテラルの中の `--` / `/*` から後ろをコメントとして消していたため、`dblink_exec` が
-    禁止語の検査に見えず、開発用フォールバック（READONLY_DATABASE_URL 無し）で書けていた
-    （レビューの再現）。引用を意識した字句解析で拒否され、何も書かれないこと。"""
-    insert = f"INSERT INTO {TABLE} VALUES (''P8'', ''via-comment-in-literal'')"
-    sql = (
-        f"SELECT '{marker}' AS x, dblink_exec('{dblink}', '{insert}') "
-        "WHERE :patient_id = :patient_id"
-    )
+    """コメントで `dblink_exec` を禁止語の検査から隠し、開発用フォールバック
+    （READONLY_DATABASE_URL 無し）で書けていた形（レビューの再現）。コメントは引用の外では
+    一切拒否するので、`sql_extract` で拒否され、何も書かれないこと。"""
+    insert = f"INSERT INTO {TABLE} VALUES (''P8'', ''via-comment'')"
+    sql = template.format(db=f"dblink_exec('{dblink}', '{insert}')")
 
     assert not is_select_only_sql(sql)
     prefill, evidence = await DSLInterpreter().execute([_plan(sql)], "P1", app_session)

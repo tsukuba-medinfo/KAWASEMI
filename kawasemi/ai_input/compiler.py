@@ -274,6 +274,7 @@ program = { "params": [ ...引数宣言... ], "steps": [ ...命令(op)... ], "re
    "reasoning" に不足している情報（例「検査結果テーブル名が不明」）を日本語で書く。
    fhir_query が定まらない fhir_extract も同様に needs_input=true とする。
 2. SQLは必ずSELECT文のみ。INSERT/UPDATE/DELETE/DDL は絶対に生成しない。
+   SQL にコメント（`--` や `/* */`）を書かない。コメントを含む SQL は検証で拒否される。
 3. 手順書のステップ構造をできるだけ尊重し、1手順≒1op に分解する。
    起点取得→絞り込み(select)→比較(compare)→分岐(branch)→変換(transform) のように並べる。
    取得元が条件で分かれるときは、判定(llm_judge/compare)→guard 付き取得→branch の順に並べる。

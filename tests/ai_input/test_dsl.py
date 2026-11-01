@@ -21,6 +21,7 @@ from kawasemi.ai_input.dsl import (
     has_needs_input,
     is_select_only_sql,
     safe_arith,
+    sql_bind_names,
     validate_program,
 )
 from kawasemi.ai_input.executor import (
@@ -78,6 +79,13 @@ _COMMENT_IN_LITERAL_BYPASSES = [
     "SELECT E'\\'' -- ', pg_sleep(1)",
     # 引用の中の `U&`
     "SELECT '--', U&\"\\0064blink_exec\"('x', 'y')",
+    # PostgreSQL は `--` コメントを `\r` でも終える（2回目のレビューの再現。PG 17 で書けた）
+    "SELECT 1 --\r, dblink_exec('host=x', 'INSERT INTO t VALUES (1)')\n",
+    "SELECT 'x' --\rUNION SELECT rolname FROM pg_authid\n",
+    # PostgreSQL の入れ子の開き `/*/` は閉じ `*/` と重なる（同上）
+    "SELECT 1 /* /*/ -- */ */ , dblink_exec('host=x', 'INSERT INTO t VALUES (1)')\n",
+    "SELECT 1 /* /*/ -- */ */ , pg_sleep(2)\n",
+    "SELECT 'x' /* /*/ -- */ */ UNION SELECT rolpassword FROM pg_authid\n",
 ]
 
 
@@ -115,6 +123,32 @@ def test_comment_markers_inside_literals_do_not_hide_the_rest(sql: str) -> None:
         # ドル引用の本体は SQLite ではコード。引用符・; を含むものは読みが割れる
         "SELECT $a$ ' $a$ -- ', pg_sleep(1)",
         "SELECT $a$ ; $a$",
+        # コメントは引用の外では一切拒否する
+        "SELECT 1; -- trailing comment",
+        "SELECT 1; /* c */",
+        "SELECT 1 */",
+        "SELECT v -- コメント 'x\nFROM labs /* 'y */ WHERE patient_id = :patient_id",
+        "SELECT 1 +--x\n 1",
+        "SELECT '--'/*'*/, 1",
+        # ドル引用・[…] の中のコメント記号（SQLite ではコード）
+        "SELECT $$--$$ AS x",
+        "SELECT $tag$ /* $tag$ AS x",
+        "SELECT [a--b] FROM t",
+        # SQLite は [a'] を識別子と読むが、ここで引用と読むと間の ; が隠れる
+        "SELECT [a'] ; SELECT 1 ; ['] FROM t",
+        # 引用の外の制御文字・空白類（単独の \r、\f、\v、NUL、U+2028/2029、NBSP、ゼロ幅、BOM）
+        "SELECT 1\r, 2",
+        "SELECT 1\f, 2",
+        "SELECT 1\v, 2",
+        "SELECT 1\x00, 2",
+        "SELECT 1\u2028, 2",
+        "SELECT 1\u2029, 2",
+        "SELECT\u00a01",
+        "SELECT 1\u3000, 2",
+        "SELECT pg_sl\u200beep(1)",
+        "\ufeffSELECT 1",
+        # ESCAPE '\' は standard_conforming_strings=off で終端がずれる
+        "SELECT v FROM t WHERE a LIKE 'x\\_%' ESCAPE '\\'",
         # 文末のセミコロンは1つだけ
         "SELECT 1;;",
         "SELECT 1;;;",
@@ -134,26 +168,37 @@ def test_ambiguous_or_unterminated_sql_is_rejected(sql: str) -> None:
     [
         "SELECT 1;",
         "SELECT 1 ; ",
-        "SELECT 1; -- trailing comment",
-        "SELECT 1; /* c */",
+        "SELECT 1;\n",
         "SELECT '--' AS x FROM t WHERE patient_id = :patient_id",
         "SELECT '/*' AS x FROM t",
         "SELECT 'it''s' AS x",
         "SELECT 'a;b' AS x",
         "SELECT E'a\\nb' AS x",
         "SELECT E'a\\\\' AS x",
-        "SELECT $$--$$ AS x",
-        "SELECT $tag$ /* $tag$ AS x",
         'SELECT "--" FROM t',
         'SELECT "a""b" FROM t',
         "SELECT a[1] FROM t",
-        "SELECT v -- コメント 'x\nFROM labs /* 'y */ WHERE patient_id = :patient_id",
         "SELECT x::int FROM t WHERE c = $1",
         "SELECT a$b$ FROM t",
+        "SELECT $tag$ abc $tag$ AS x",
+        # Web 画面の textarea は CRLF を送る（保存された SQL に入る）
+        "SELECT v\r\nFROM t WHERE pid = :patient_id",
+        "SELECT v\n\tFROM t",
+        # 引用の中はデータ（コメント記号・制御文字・全角空白も許す）
+        "SELECT 'a\rb\u3000c' AS x",
+        "SELECT v FROM t WHERE a LIKE 'x!_%' ESCAPE '!'",
     ],
 )
 def test_legitimate_sql_still_passes(sql: str) -> None:
     assert is_select_only_sql(sql) is True
+
+
+def test_bind_names_are_counted_like_sqlalchemy_text() -> None:
+    """コメントは拒否するので、バインド名は SQLAlchemy の `text()` と同じく素の文字列で数える
+    （コメントの中の `:name` を片方だけが拾う食い違いが無い）。"""
+    sql = "SELECT v FROM t WHERE pid = :patient_id -- :hidden"
+    assert sql_bind_names(sql) == {"patient_id", "hidden"} == set(text(sql).compile().params)
+    assert is_select_only_sql(sql) is False
 
 
 def test_forbidden_words_inside_literals_are_still_rejected() -> None:
@@ -718,9 +763,9 @@ def test_safe_arith_rejects_non_finite() -> None:
         # コメントで危険句を隠した複文すり抜けを防ぐ
         ("SELECT 1 -- ; DROP TABLE labs\n; DELETE FROM labs", False),
         ("SELECT 1 /* ; DROP TABLE labs */ ; UPDATE labs SET v=1", False),
-        # コメント除去後に純粋な SELECT になるものは許可
-        ("SELECT v FROM labs -- コメント", True),
-        ("/* 先頭コメント */ SELECT v FROM labs", True),
+        # コメントは消さずに拒否する（方言ごとのコメントの終わり方を追わない）
+        ("SELECT v FROM labs -- コメント", False),
+        ("/* 先頭コメント */ SELECT v FROM labs", False),
         # 追加した禁止キーワード
         ("COPY labs TO '/tmp/x'", False),
         ("CALL do_something()", False),
