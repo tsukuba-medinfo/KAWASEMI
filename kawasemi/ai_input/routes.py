@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from fastapi_csrf_protect import CsrfProtect
+from pydantic import ValidationError
 from sqlalchemy import case, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -72,6 +73,7 @@ from kawasemi.ai_input.schemas import (
     AutofillRequest,
     ClinicalAnnotationDraftRequest,
     DraftState,
+    DSLProgram,
     LocationAssessmentIn,
     PlanCompileRequest,
     PlanSaveRequest,
@@ -2997,6 +2999,27 @@ def _program_dump(program: Any) -> dict[str, Any]:
     return data
 
 
+def _program_canonical(program: Any) -> str:
+    """program の同一性を比べるための正準形（キー順に依らない JSON 文字列）。
+
+    保存済みの program は経路（コンパイル・手保存・旧版）によって null の有無などの
+    表記が揺れ得るため、**保存時と同じ `DSLProgram` → `_program_dump` を通してから**
+    比べる。通らない旧データは生の dict のまま比べる（＝表記が違えば「変わった」側に
+    倒れ、確認済みが不当に残ることは無い）。
+    """
+    if isinstance(program, dict):
+        try:
+            program = _program_dump(DSLProgram.model_validate(program))
+        except ValidationError:
+            pass
+    return json.dumps(program, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+
+def _program_changed(before: Any, after: Any) -> bool:
+    """確認済みプランの program が実質的に変わったか（正準 JSON の比較）。"""
+    return _program_canonical(before) != _program_canonical(after)
+
+
 def _build_plan_items(
     runbooks: dict[str, InputRunbook],
     plans: dict[str, InputPlan],
@@ -3499,6 +3522,11 @@ async def save_plan(
 
     `confirm=true` のときは検証を通し、program が妥当かつ needs_input が残っていなければ
     status を confirmed にする。検証エラーや needs_input 残存時は 400 で拒否する。
+    **確認には手順書が確認済みであることを要する**（`compile` / `recompile` と同じ前提）。
+
+    `confirm=false` の保存で確認済みプランの program が変わったら **draft へ戻し、確認者・
+    確認日時を消す**（`recompile` と同じ扱い）。確認済みのまま残すと、誰も承認していない
+    program が元の確認者の名前で実行される。正準形が同一の保存だけは確認済みを保つ。
     """
     await csrf_protect.validate_csrf(request)
     await _get_questionnaire_or_404(questionnaire_id, db)
@@ -3530,7 +3558,19 @@ async def save_plan(
             status_code=400,
         )
 
+    demoted = False
     if confirm:
+        # 手順書が未確認のまま取得プランだけを確定させない。compile / recompile は
+        # 確認済み手順書しか扱わず、ウィザードも確認済み手順書の項目しか出さない。
+        # この経路だけが前提を飛ばせた。
+        if rb.status != RunbookStatus.CONFIRMED:
+            return JSONResponse(
+                {
+                    "success": False,
+                    "message": "手順書が確認済みでないため取得プランを確認できません",
+                },
+                status_code=400,
+            )
         if has_needs_input(program):
             return JSONResponse(
                 {
@@ -3547,11 +3587,19 @@ async def save_plan(
         plans = await _plan_map(questionnaire_id, db)
         existing = plans.get(link_id)
         status = existing.status if existing else PlanStatus.DRAFT
-        # 確認済みを維持する編集は元の確認者を保持、draft はクリア
-        if status == PlanStatus.CONFIRMED and existing:
+        if (
+            status == PlanStatus.CONFIRMED
+            and existing
+            and not _program_changed(existing.program, program)
+        ):
+            # 内容が同一の保存だけは確認済みと元の確認者を保つ
             confirmed_by_id = existing.confirmed_by_id
             confirmed_at = existing.confirmed_at
         else:
+            # 確認済みの program が変わったら draft へ戻す（recompile と同じ）。
+            # 人が承認したのは変更前の program であり、変更後の program ではない。
+            demoted = status == PlanStatus.CONFIRMED
+            status = PlanStatus.DRAFT
             confirmed_by_id = None
             confirmed_at = None
 
@@ -3571,8 +3619,15 @@ async def save_plan(
     await db.commit()
     logger.info(
         f"取得プラン保存: questionnaire_id={questionnaire_id}, link_id={link_id}, status={status}"
+        + ("（内容変更により確認済みから draft へ戻した）" if demoted else "")
     )
     response: dict[str, Any] = {"success": True, "link_id": link_id, "status": status}
+    if demoted:
+        response["demoted"] = True
+        response["warning"] = (
+            "確認済みの取得プランを変更したため未確認（draft）に戻しました。"
+            "実行するには内容を確かめて確認し直してください"
+        )
     if confirm and is_empty_program(program):
         # **step が空のプランは確定できる**（手入力への縮退という正当な形）が、**人が気付かずに
         # 確定すると、取得の設計ができたかのように母集団へ入る**。止めずに告げる。
@@ -4076,7 +4131,7 @@ async def execution_validation_report(
             continue
         plan = plans.get(link_id)
         # 監査図・トレースは「実行時に固定した program（設計根拠込み）」を優先する。
-        # 実行後に confirmed プランが in-place 編集されても実行記録の再現性を保つため
+        # 実行後にプランが編集・再確認されても実行記録の再現性を保つため
         # （CSV / データインテグリティ: Original・Consistent）。スナップショット未保持の
         # 旧記録のみ現行 plan.program にフォールバックし、その旨を program_pinned=False で示す。
         snap = snapshot.get(link_id) if isinstance(snapshot, dict) else None

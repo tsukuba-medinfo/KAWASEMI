@@ -6,7 +6,7 @@
 <div class="card">
   {% include "ai_input/_stepper.html" %}
   <h2>ステップ3: 取得プランの作成 — {{ questionnaire.title or questionnaire.fhir_id }}</h2>
-  <p class="hint">確認済みの手順書を、実行可能な取得プラン（限定された処理の組み合わせ）へAIで作成します。1項目ずつ確認・編集し、接続先やSQLが不明な「要入力」ステップは人が補完してください。確認済みの取得プランのみステップ4で実行できます。</p>
+  <p class="hint">確認済みの手順書を、実行可能な取得プラン（限定された処理の組み合わせ）へAIで作成します。1項目ずつ確認・編集し、接続先やSQLが不明な「要入力」ステップは人が補完してください。確認済みの取得プランのみステップ4で実行できます。確認済みの取得プランを編集して保存すると未確認に戻り、確認し直すまで実行されません。</p>
 
   <div class="toolbar">
     {% if enable_ai_drafting %}
@@ -347,10 +347,15 @@ async function saveCurrent(confirm) {
     if (data.success) {
       it.status = data.status; it.has_plan = true; it.stale = false;
       it.needs_input = programOf(it).steps.some(s => s.needs_input);
+      // 確認済みの program を変えて保存すると、サーバが未確認（draft）へ戻す。
+      // 承認したのは変更前の program なので、確認し直すまで実行されない。
+      if (data.demoted) setStatus(`⚠ 保存しました。${data.warning}`, false);
       // step が空のプランは確定できるが、取得の設計ができたわけではない。警告として出す。
-      if (data.warning) setStatus(`⚠ 確認しました。${data.warning}`, false);
+      else if (data.warning) setStatus(`⚠ 確認しました。${data.warning}`, false);
       else setStatus(confirm ? '✓ 確認しました' : '✓ 保存しました', true);
       renderProgress();
+      // 状態の表示（確認済み／未確認）を戻った状態に合わせる
+      if (data.demoted) renderItem();
       return true;
     }
     const extra = data.errors ? '\n' + data.errors.join('\n') : '';

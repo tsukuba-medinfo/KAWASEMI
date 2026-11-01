@@ -151,9 +151,15 @@ async def test_plan_confirm_records_confirmed_by(
 ) -> None:
     """取得プランの confirm 昇格で confirmed_by_id / confirmed_at が記録される。"""
     q = await _make_questionnaire(db_session)
-    # プラン確認には手順書が前提
+    # プラン確認には確認済みの手順書が前提（未確認の手順書では確認を拒否する）
     db_session.add(
-        InputRunbook(questionnaire_id=q.id, link_id="item1", item_text="項目1", steps=[])
+        InputRunbook(
+            questionnaire_id=q.id,
+            link_id="item1",
+            item_text="項目1",
+            steps=[],
+            status="confirmed",
+        )
     )
     await db_session.commit()
 

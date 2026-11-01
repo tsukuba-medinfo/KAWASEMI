@@ -337,21 +337,30 @@ def _step_trace_base(step: dict[str, Any]) -> dict[str, Any]:
 def program_snapshot(plans: list[Any]) -> dict[str, Any]:
     """実行に使った各プランの program（reasoning 込み）と版情報を固定する。
 
-    confirmed プランは版管理なしで in-place 編集され得るため（routes の save_plan）、
+    プランは版管理が無く、実行後に編集・再確認で上書きされ得るため（routes の save_plan）、
     実行時点の program・plan_id・updated_at を InputExecution.program_snapshot に固定
     保存し、後日の監査で「どの版の・どの設計根拠のプログラムで実行したか」を確定的に
     復元できるようにする（CSV / データインテグリティ: Original・Consistent）。
 
     本番の全実行経路（単発 autofill / stream / バッチ）から共通で使う。試行(trial)は
     結果を永続しないため呼び出し側で None を渡す。
+
+    確認（承認）の帰属 confirmed_by_id / confirmed_at も併せて固定する。確認済みプランは
+    program を変えると draft へ戻るため（save_plan）、(plan_id, confirmed_at) は
+    「どの承認の下で実行したか」を一意に指し、snapshot の program がその承認の対象と
+    同一であることを後から突き合わせられる。プランが後日編集・再確認されても、実行記録の
+    側に承認者が残る。
     """
     snapshot: dict[str, Any] = {}
     for p in plans:
         updated_at = getattr(p, "updated_at", None)
+        confirmed_at = getattr(p, "confirmed_at", None)
         snapshot[p.link_id] = {
             "program": p.program or {},
             "plan_id": getattr(p, "id", None),
             "plan_updated_at": updated_at.isoformat() if updated_at else None,
+            "confirmed_by_id": getattr(p, "confirmed_by_id", None),
+            "confirmed_at": confirmed_at.isoformat() if confirmed_at else None,
         }
     return snapshot
 
