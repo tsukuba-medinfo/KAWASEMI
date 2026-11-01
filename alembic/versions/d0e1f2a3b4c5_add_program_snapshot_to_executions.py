@@ -4,7 +4,7 @@
 - ai_input_executions に program_snapshot（JSON）を追加。実行時に使用した各プランの
   DSL program（各 step の reasoning 込み）と plan_id / plan_updated_at を固定保存する。
 
-confirmed プランは版管理なしで in-place 編集され得るため、実行記録がどの版の・どの
+プランは版管理が無く、実行後に編集・再確認で上書きされ得るため、実行記録がどの版の・どの
 設計根拠のプログラムで動いたかを、後日の監査で確定的に復元できるようにする。既存
 レコードは実行時スナップショットを持たないため NULL のまま。
 

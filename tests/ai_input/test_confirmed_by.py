@@ -1,7 +1,7 @@
 """AIドラフト確認操作の操作者記録のテスト。
 
 InputRunbook / InputPlan を confirmed へ昇格する際、確認操作者（confirmed_by_id）と
-日時（confirmed_at）が記録されること、確認済み維持の編集で保持され、draft では
+日時（confirmed_at）が記録されること、内容が同一の保存（confirm=false）で保持され、draft では
 記録されないことを検証する。
 """
 
@@ -118,7 +118,10 @@ async def test_runbook_edit_after_confirm_preserves_confirmer(
     db_session: AsyncSession,
     csrf_token: str,
 ) -> None:
-    """確認済みを維持する編集（confirm=false）では元の確認者を保持する。"""
+    """内容が同一の保存（confirm=false）では確認済みと元の確認者を保持する。
+
+    内容を変えた保存は draft へ戻る（test_plan_confirmation_integrity を参照）。
+    """
     q = await _make_questionnaire(db_session)
     _act_as(designer_client, designer_user, RoleType.DESIGNER)
     await designer_client.post(
@@ -130,7 +133,7 @@ async def test_runbook_edit_after_confirm_preserves_confirmer(
     original_confirmer = rb.confirmed_by_id
     original_at = rb.confirmed_at
 
-    # confirm=false の編集保存（status は confirmed のまま）
+    # confirm=false で同一内容を保存（status は confirmed のまま）
     resp = await designer_client.post(
         f"/ai-input/questionnaires/{q.id}/runbook/item1",
         json={"steps": []},
@@ -214,7 +217,7 @@ async def test_runbook_edit_by_other_user_preserves_original_confirmer(
     db_session: AsyncSession,
     csrf_token: str,
 ) -> None:
-    """別ユーザーが confirm=false で編集しても、元の確認者・確認日時が保持される。"""
+    """別ユーザーが confirm=false で同一内容を保存しても、元の確認者・確認日時が保持される。"""
     q = await _make_questionnaire(db_session)
 
     # ユーザーA（ai_designer）が確認
@@ -229,7 +232,7 @@ async def test_runbook_edit_by_other_user_preserves_original_confirmer(
     at_a = rb.confirmed_at
     assert confirmer_a == designer_user.id
 
-    # ユーザーB（設計者も保有する別の利用者）が confirm=false で編集
+    # ユーザーB（設計者も保有する別の利用者）が confirm=false で同一内容を保存
     _act_as(designer_client, multi_role_user, RoleType.DESIGNER)
     resp = await designer_client.post(
         f"/ai-input/questionnaires/{q.id}/runbook/item1",
