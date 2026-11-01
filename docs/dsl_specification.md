@@ -9,8 +9,9 @@ typed `params`, a linear list of `steps` (each one primitive `op` such as `sql_e
 `fhir_extract`, `csv_extract`, `file_extract`, `llm_extract`, `llm_judge`, `compare`, `branch`,
 `transform`, `select`, `aggregate`) in single-assignment form (`"$id"` references point only
 backwards), optional per-step `guard`s for conditional execution, and a `return` reference.
-There is no arbitrary code. SQL must pass a SELECT-only string check, and the database also
-enforces read-only access. On SQLite the application database is put in `PRAGMA query_only`
+There is no arbitrary code. SQL must pass a SELECT-only string check. That check is lexical
+and best-effort, can be bypassed, and is not a security boundary (§6.3); the boundary is the
+database's read-only access. On SQLite the application database is put in `PRAGMA query_only`
 mode. On PostgreSQL and other dialects the SQL runs on a separate connection inside a read-only
 transaction that is always rolled back. That connection uses the read-only role in
 `READONLY_DATABASE_URL`; without it, production refuses to run the SQL and other environments
@@ -25,8 +26,9 @@ is bound to content: changing a confirmed plan's program returns it to draft and
 confirmer, confirming requires a confirmed runbook and the version the reviewer saw, and each
 execution records the program together with the confirmation it ran under (§2.2, §10.1). Two
 things are not covered by the approval: the run-time model override, which takes precedence
-over a step's approved `llm_model` (recorded per step), and a batch job, which keeps running the
-plans it loaded at its start (§2.3). Re-running a program reproduces only the steps that depend neither on
+over a step's approved `llm_model` (recorded per step), and every run (single, streamed or
+batch), which keeps executing the plans it loaded at its start even if they are demoted
+meanwhile (§2.3). Re-running a program reproduces only the steps that depend neither on
 LLM output (directly or through guards and branches), Vision OCR, time or random SQL functions,
 nor the external key resolver's state (§10.4). LLM calls are not deterministic and are therefore
 *recorded* (model, digest, options, full prompt, raw output) rather than re-derived (§10). The
@@ -74,6 +76,11 @@ The machine-readable step schema is [`docs/schemas/dsl_step.schema.json`](schema
 | resolver | 登録番号を各名前空間の患者キーへ解決する仕組み。名寄せの対応表はプログラムの外にある（§7.1） |
 | 原資料 | 取得の対象になる院内のデータ（DB の行、FHIR のリソース、ファイル、CSV） |
 | 接続、接続レジストリ | 外部 DB、ファイル置き場、CSV の接続先と、それを宣言した `connections.yaml`。step は `connection_id` で接続を指す |
+| 接続ルート（`root_path`） | ファイル置き場と CSV の接続に宣言された基点のディレクトリ。`file_extract` と `csv_extract` のパスはここからの相対パスで、外へは出られない（§6.4） |
+| 名寄せ | 同じ被験者を指す、システムごとの識別子どうしを対応づけること。resolver が対応表を使って行う |
+| DWH | 院内のデータウェアハウス。§12 の作例では外部 DB の接続の1つとして現れる |
+| Vision（Vision の文字起こし） | 画像を読める LLM（`OLLAMA_VISION_MODEL`、未設定なら既定のモデル）で、テキスト層の無い PDF のページ画像を文字に起こすこと（OCR）。`file_extract` が使う（§5.4） |
+| バッチ実行、データセット画面 | 被験者の一覧（データセット）を画面で選び、その全員に対して確定済みのプランを順に実行するジョブ（§2.3） |
 | リソース索引（索引） | 院内のデータ資源（表と列、ファイルの種類、FHIR のリソースなど）を記述した検索用の成果物。設計の LLM が所在の候補を探すのに使う |
 | 単位 | 索引の1件。表の1列、1種類のファイルなど、所在として指せる記述の1件 |
 | `unit_id` | 単位の ID（例 `db:infection_cases.onset_date`）。step の `unit_id` はその step の典拠を指す |
@@ -82,7 +89,7 @@ The machine-readable step schema is [`docs/schemas/dsl_step.schema.json`](schema
 | 典拠 | 記述の根拠として引く出典。臨床的意味の典拠は規約文書の箇所、step の典拠は所在の索引の単位である |
 | 手順書（runbook） | 工程2の成果物。人が読む順序つきの取得手順で、コードも SQL も含まない |
 | プラン | 工程3の成果物。1項目分の DSL プログラムとその状態（`ai_input_plans` の1行） |
-| 下書き（`draft`）、確定（`confirmed`） | 成果物の状態。確定は人が明示的に行う操作である。手順書とプランは内容を変えると `draft` に戻る（§2.2）。臨床的意味と所在は戻らない |
+| 下書き（`draft`）、確定（`confirmed`） | 成果物の状態。確定は人が明示的に行う操作である。手順書、プラン、所在は内容を変えると `draft` に戻る（§2.2）。臨床的意味は戻らない |
 | 版（`version`） | 手順書とプランの行の内容、状態、確定者、確定日時から作るハッシュ。保存と確定で、人が見た版と今の版を照合する（§2.2） |
 | step、op | プログラムの命令1つと、その種類（§3.2、§5） |
 | 取得系 op | 原資料を読む5つの op（§3.3 の末尾） |
@@ -112,7 +119,7 @@ DSL は次の性質を持つように作られている。各性質を支える�
 - **限定されたプリミティブ**: 実行できるのは12個の op だけで、任意コードの実行、ループ、関数定義、外部プロセスの起動は表現できない。式の評価は単位変換の四則演算だけで、`eval` を使わない（§5.10）。
 - **データとしてのプログラム**: プログラムは JSON の値であり、保存、比較、スナップショット、検証が機械的にできる（§3）。
 - **単一代入と前方参照**: 各 step の結果は一度だけ名前に束縛され、参照は前方にしか向かない。データの流れはプログラムの字面から読み取れる（§3.4）。
-- **読み取り専用と閉じ込め**: SQL は SELECT 限定の文字列検査を通らなければならない。アプリ自身の DB では、加えて DB の側が書き込みを拒む。SQLite では `PRAGMA query_only`、PostgreSQL 等では別の接続の読み取り専用トランザクションである（§5.1）。外部 DB は接続のロールの運用に依存する（§5.3）。差し込まれる値はスロットごとのサニタイズを通り、ファイルは接続のルート配下に閉じ込められる（§6）。
+- **読み取り専用と閉じ込め**: SQL は SELECT 限定の文字列検査を通らなければならないが、この検査は字句の上の最善努力で、安全の境界ではない（§6.3）。境界は DB の側にあり、アプリ自身の DB では DB が書き込みを拒む。SQLite では `PRAGMA query_only`、PostgreSQL 等では別の接続の読み取り専用トランザクションである（§5.1）。外部 DB は接続のロールの運用に依存する（§5.3）。差し込まれる値はスロットごとのサニタイズを通り、ファイルは接続のルート配下に閉じ込められる（§6）。
 - **人が読めること**: 各 step は1つの操作に対応し、`reasoning` に判断理由を持つ。実行されない記述（`select` の `where` / `order`）はその旨が trace に残る。
 - **生成と実行の分離**: LLM が関与するのは設計時のプログラムの生成と、プログラムが明示的に呼ぶ `llm_extract` / `llm_judge` だけである。生成されたプログラムは決定的に是正され（§9.3）、検証され（§9.1）、人の確定（§2）を経て実行される。インタプリタは op の意味をプログラムの外から変えない。
 - **失敗を値にしない**: 取れなかったことは値ではなく失敗コードとして残る（§4.6）。
@@ -121,7 +128,7 @@ DSL は次の性質を持つように作られている。各性質を支える�
 
 収集の手順がプログラムという固定されたデータになっているので、次のことが成り立つ。
 
-- 確定前に、人がプログラムを読んで承認できる。承認は内容に結び付いている。確定済みのプランのプログラムを変えると `draft` に戻って確定者が消え、確定には確定済みの手順書と、人が見た版（`base_version`）が要る（§2.2）。実行記録はプログラムと、それが実行されたときの確定者と確定日時を残す（§10.1）。承認の対象に含まれないものが2つある。実行時のモデルの指定は承認された step の `llm_model` に優先する（step ごとに記録される）。バッチのジョブは開始時に読み込んだプランを最後まで実行する（§2.3）。
+- 確定前に、人がプログラムを読んで承認できる。承認は内容に結び付いている。確定済みのプランのプログラムを変えると `draft` に戻って確定者が消え、確定には確定済みの手順書と、人が見た版（`base_version`）が要る（§2.2）。実行記録はプログラムと、それが実行されたときの確定者と確定日時を残す（§10.1）。承認の対象に含まれないものが2つある。実行時のモデルの指定は承認された step の `llm_model` に優先する（step ごとに記録される）。実行（単発、逐次、バッチ）は開始時に読み込んだプランを、その実行の終わりまで使う（§2.3）。
 - `validate_program` が、実行前に構造と安全性の規則を機械的に検査できる（§9）。
 - 実行のたびに、使ったプログラムの写しと step ごとの trace が残る（§10）。後から「どのプログラムを、どの入力で実行し、何が返ったか」を辿れる。
 - 同じプログラムを同じ原資料に対して再び実行して同じ値が得られるのは、LLM の出力（`guard` や `branch` を介した間接の依存を含む）、Vision の文字起こし、SQL の時刻や乱数の関数、resolver の外部の状態のどれにも依存しない step に限られる。新しいコードでの再検証が古いプログラムを拒否することもある。再現しないものは §10.4 に列挙する。LLM の呼び出しは再導出せず、全体を記録する（§10.3）。
@@ -160,7 +167,12 @@ HTTP の経路はすべて `/ai-input` の下にあり（`kawasemi/ai_input/rout
 
 `POST .../plan/compile` は、手順書が確定済みでプランが無いか `draft` の項目を対象に、`compiler.AIPlanCompiler` で
 プログラムを生成する。
-確定済みのプランには触らない。
+対象の項目は LLM を呼ぶ前に決まり、その時点で確定済みのプランは対象から外れる。
+LLM の応答を待つ間に、同じ項目のプランが別の要求で確定されると、結果は確定の側に倒れない。
+保存は LLM を呼ぶ前に読み込んだ行に対して行われ、行ロックも版の照合も無い。
+読み込んだときに `draft` だった行に `draft` と空の確定者を書いても、値が変わっていないので UPDATE に含まれず、生成したプログラムだけが書き込まれる。
+その結果、プランは `confirmed` と別の要求の確定者を保ったまま、誰も確定していない生成結果のプログラムを持つ（付録 B の18）。
+その間に別の要求が同じ項目のプランを初めて作っていたときは、保存の commit が一意制約の違反で失敗する（保存や再コンパイルと違い 409 には変換しない）。
 生成されたプログラムは決定的な是正（§9.3）を経て `draft` で保存され、コンパイルに使ったモデル名が `ai_input_plans.llm_model` に残る。
 手動の保存（§2.2）はこの列を書き換えない（`routes._upsert_plan` は `None` を渡された列を更新しない）。
 人がプログラムを書き換えても、確定し直しても、`llm_model` は最後にコンパイルしたときのモデル名のままである。
@@ -168,6 +180,7 @@ HTTP の経路はすべて `/ai-input` の下にあり（`kawasemi/ai_input/rout
 この時点の `validate_program` のエラーは保存を止めず、応答の `validation_errors` で返る。
 このため検証を通らない `draft` が保存されうるが、そのままでは確定できない（§2.2）。
 `POST .../plan/{link_id}/recompile` は1項目を作り直し、確定済みのプランも `draft` に戻して確定者と確定日時を消す。
+LLM を呼ぶ前に読み込んだ行に書く点はコンパイルと同じで、読み込んだときに `draft` だったプランが LLM の応答を待つ間に確定されると、同じく確定が残ったまま生成結果で上書きされる（付録 B の18）。
 応答には版（`version`。§2.2）が付く。
 
 ### 2.2 保存と確定（工程3）
@@ -180,6 +193,7 @@ HTTP の経路はすべて `/ai-input` の下にあり（`kawasemi/ai_input/rout
 
 **保存と確定**。
 `POST .../plan/{link_id}?confirm=...` はプログラムを受け皿 `DSLProgram` に通して保存形にし（§3.8）、次の順に検査する。
+その項目の手順書の行が無ければ、どの検査よりも先に 404 を返す（プランは手順書の無い項目には作れない）。
 
 1. **版の照合**。対象の行を読み直し（PostgreSQL では行ロック）、`base_version` が今の版と違えば 409 を返して何も書かない。`base_version` を省いたときは、`confirm=true` なら 428 で拒否し、`confirm` なしなら照合しない。
 2. `validate_program` のエラーがあれば 400 で拒否する（`confirm` の有無に関わらない）。
@@ -227,7 +241,7 @@ HTTP の経路はすべて `/ai-input` の下にあり（`kawasemi/ai_input/rout
 
 上流（臨床的意味、所在、手順書）が更新されると、画面は下流を「古い」（stale）と表示するが、
 確定済みのプランの状態を戻したり実行を止めたりはしない。
-臨床的意味（`ClinicalAnnotation`）とデータ所在（`SystemLocation`）は、内容を変えた保存でも確定と元の確定者を保つ（差し戻しの規則は手順書とプランにだけ適用されている。付録 B の15）。
+データ所在（`SystemLocation`）は、候補を選び直した保存で `draft` に戻り、確定者と確定日時が消える（候補が同じなら確定と元の確定者を保つ）。臨床的意味（`ClinicalAnnotation`）だけは、確定済みの記述を `confirm` なしで書き換えても確定と元の確定者を保つ（付録 B の15）。
 
 ### 2.3 実行（工程4）
 
@@ -238,7 +252,9 @@ HTTP の経路はすべて `/ai-input` の下にあり（`kawasemi/ai_input/rout
 
 - 収集者（`collector`）の実行は本番として `ai_input_executions` に値、evidence、プログラムの写しを保存する。
 - 設計者の実行は試行で、メタ情報（`ai_input_trial_runs`）だけを残し、値も evidence も保存しない。
-- バッチ実行（データセット画面）は、確定済みのプランが1つ以上あり `draft` のプランが無いことを条件に、対象の被験者を順に実行し、被験者ごとに `ai_input_executions` を1行書く。バッチは開始時に確定済みのプランを一度だけ読み込み、ジョブの終わりまでそれを使う。ジョブの途中でプランが編集や下書きへ戻す操作で `draft` になっても、そのジョブの残りの被験者には読み込んだときのプログラムが実行される（付録 B の14）。
+- バッチ実行（データセット画面）は、確定済みのプランが1つ以上あり `draft` のプランが無いことを条件に、対象の被験者を順に実行し、被験者ごとに `ai_input_executions` を1行書く。バッチは開始時に確定済みのプランを一度だけ読み込み、ジョブの終わりまでそれを使う。ジョブの途中でプランが編集や下書きへ戻す操作で `draft` になっても、そのジョブの残りの被験者には読み込んだときのプログラムが実行される。
+
+単発と逐次の実行も、要求の受付時に確定済みのプランを読み込み、その実行の終わりまでそれを使う。逐次の実行は項目を1つずつ流すので、その途中で `draft` に戻されたプランも、その実行では実行される（付録 B の14）。
 
 実行要求の `model`（単発と逐次の実行。バッチはジョブのモデル）は、step の `llm_model` に優先する（§5.6）。
 このモデルの指定は承認の対象ではなく、確定したプランを、承認されたものとは別のモデルで実行できる（付録 B の13）。
@@ -557,7 +573,7 @@ FHIR サーバから取得する。
 接続レジストリ（`connections.yaml`）の外部 DB を読む。
 
 - **意味**: `connection_id`（空なら旧名 `connection`）で DSN を解決し、`sql_extract` と同じ展開、再検査、バインドで実行する。
-- **読み取り専用**: 文字列検査（SELECT 限定）に加えて、接続を読み取り専用ロールで運用することが前提である（`dsl.is_select_only_sql` の注記）。コードが強制する関門は文字列検査だけである。
+- **読み取り専用**: コードは外部 DB の接続を読み取り専用にしない。書き込みを止める境界は、接続を読み取り専用ロールで運用することだけである。SELECT 限定の文字列検査（§6.3）は字句の上の最善努力で、迂回できる（付録 B の17）。
 - **失敗**: DSN を解決できなければ `source_unavailable`。そのほかは `sql_extract` と同じ。
 - **再試行**: SQLAlchemy の例外は10秒待って投げ直し、3回まで試す（§8.6）。
 - **trace**: `sql_extract` の項目に加えて `inputs.connection_id` と `attempts`（何回目で取れたか、または失敗までの回数）。
@@ -714,7 +730,7 @@ params の参照は差し込み先（スロット）で記法が決まる。
 | `match[].value` | なし（`null` は空文字） |
 | prompt | §6.5 |
 
-**SELECT 限定の検査**（`dsl.is_select_only_sql`）は、コメントを除き、末尾のセミコロンを1つ落としたうえで、
+**SELECT 限定の検査**（`dsl.is_select_only_sql`）は、コメント（`--` から行末と `/* ... */`）を正規表現で消し、前後の空白を落とし、末尾に続くセミコロンを（`;;;` のように連続していればすべて）落としたうえで、
 先頭が `select` か `with` であること、セミコロンが残っていないこと（複文でないこと）、次の禁止語を
 単語として含まないこと（大文字小文字を区別しない）、PostgreSQL の Unicode エスケープ（`U&"..."` / `U&'...'`）を含まないことを要求する。
 末尾が `*` の語は、その語で始まる単語をすべて禁じる（例 `dblink*` は `dblink_exec` も禁じる）。
@@ -724,12 +740,17 @@ params の参照は差し込み先（スロット）で記法が決まる。
 <!-- /dsl-list:sql-forbidden -->
 
 後半の語は PostgreSQL で読み取り専用トランザクションの外へ出るか、他の接続に作用する関数（`dblink*`、`pg_terminate_backend`、`pg_cancel_backend`、`pg_advisory*`、`pg_try_advisory*`、`pg_sleep*`）と、文字列で渡した SQL を実行する関数とその一族（`*_to_xml*`、`ts_stat`、`ts_rewrite`）である。
-文字列の連結で禁止語を組み立てて実行させる経路を、関数ごと塞ぐ。
 
-これは多層防御の1枚で、書き込みを止める主な関門は DB の側にある。
-アプリ DB では SQLite の `PRAGMA query_only` と、それ以外の方言の読み取り専用トランザクション（§5.1）、外部 DB では読み取り専用ロールの運用（§5.3）である。
-読み取り専用トランザクションは、別のセッションを開く関数（`dblink` など）による書き込みまでは止めない。
-これを止めているのはこの文字列検査であり、アプリ DB にそうした拡張を入れない運用である（[DEPLOYMENT.md](DEPLOYMENT.md) の「読み取り専用ロール（READONLY_DATABASE_URL）」）。
+**この検査は字句の上の最善努力であり、安全の境界ではない**。
+SQL を構文解析せず、文字列リテラルを区別しない。
+コメントの除去は引用符を考慮しないので、リテラルの中に `--` や `/*` を書くと、その後ろの部分が検査から隠れる。
+たとえば `SELECT '--', dblink_exec(...)` と `SELECT '--'; DELETE FROM t` はどちらも検査を通る（付録 B の17）。
+禁止語も、検査が見る字面にしか効かない。
+
+安全の境界は DB の側にある。
+アプリ DB では SQLite の `PRAGMA query_only` と、それ以外の方言の読み取り専用トランザクションと読み取り専用ロール（§5.1）、外部 DB では読み取り専用ロールの運用（§5.3）である。
+読み取り専用トランザクションは、別のセッションを開く関数（`dblink` など）による書き込みを止めない。
+これを止めるのは、アプリ DB にそうした拡張を入れないか、入れたなら `REVOKE EXECUTE ... FROM PUBLIC` で実行権を外す運用である（[DEPLOYMENT.md](DEPLOYMENT.md) の「読み取り専用ロール（READONLY_DATABASE_URL）」）。
 
 ### 6.4 パスの閉じ込め
 
@@ -1192,7 +1213,7 @@ Vision の文字起こし（§5.4）のモデルは `llm_models` に入らない
 ただし次の2つは確定の外にある。
 
 - 実行時のモデルの指定は、承認された step の `llm_model` に優先する。どのモデルで動いたかは `llm_models` と trace に残るが、承認とは別のモデルで実行されうる（§2.3）。
-- バッチのジョブは開始時に読み込んだプランを最後まで使うので、ジョブの途中で `draft` に戻されたプランも、そのジョブでは実行され続ける（§2.3）。その実行記録の `confirmed_at` は、もう有効でない確定を指す。
+- 実行（単発、逐次、バッチ）は開始時に読み込んだプランをその実行の終わりまで使うので、途中で `draft` に戻されたプランも、その実行では実行される（§2.3）。その実行記録の `confirmed_at` は、もう有効でない確定を指す。影響が長く続くのは、多くの被験者を順に処理するバッチである。
 
 **監査で辿れること**: 実行記録から、使ったプログラム（`program_snapshot`）、その版の時刻（`plan_updated_at`）、
 その実行が拠った確定（`confirmed_by_id` / `confirmed_at`）、各 step の入力と出力、LLM に渡したプロンプトと生の応答、
@@ -1347,32 +1368,34 @@ DSL のプログラムは版を持たない。
 10. **prompt の未知の `$name` は検証で黙認される**（V-17）。書き損じた参照が字面のまま LLM へ渡りうる。
 11. **`return` は必須でない**。`return` の無いプログラムは検証を通り、項目の値は常に空になる（§3.1）。空の `steps` も同様に確定できる。
 12. **構造化出力のスキーマと検証の強さは一致しない**。`pick` / `func` の語彙、params、前方参照はスキーマに無く、値フィールドの型の閉じ方は検証に無い（§3.9）。
-13. **`external_db_extract` の読み取り専用はコードで強制されない**。文字列検査に加えて、接続を読み取り専用ロールで運用することが前提である（§5.3）。アプリ DB は DB の側で読み取り専用にする（§5.1）。
+13. **`external_db_extract` の読み取り専用はコードで強制されない**。書き込みを止める境界は接続を読み取り専用ロールで運用することだけで、SELECT 限定の文字列検査は迂回できる（§5.3、§6.3、付録 B の17）。アプリ DB は DB の側で読み取り専用にする（§5.1）。
 14. **再試行は外部 DB だけ**で、FHIR、ファイル、LLM の一時的な失敗は1回で失敗になる（§8.6）。
 15. **`multi: true` の `fhir_extract` で全 resource の `fhir_path` が `null` のとき**、結果は `[null, ...]` で空とみなされず、`failure_code` も付かない（§4.3、§5.2）。
 16. **プロンプトへの注入の区切り**はプロンプトインジェクションを起こしにくくするだけで、防ぐことは保証しない（§6.5）。
 17. **`READONLY_DATABASE_URL` の無い本番以外の環境では、アプリ DB の SQL はアプリのロールで読む**。書き込みは読み取り専用トランザクションが止めるが、アプリのロールが読める表（`users.password_hash` を含む）はすべて読める。`ENVIRONMENT` の未設定は `development` 扱いなので、本番で `ENVIRONMENT=production` を設定し忘れるとこの経路になる（起動時と `check_schema` が警告する。§5.1）。
-18. **読み取り専用トランザクションは、別のセッションを開く関数による書き込みを止めない**（`dblink` など）。これを止めるのは §6.3 の禁止語と、アプリ DB にそうした拡張を入れない運用である。SQLite には文の実行時間の上限が無い（`statement_timeout` は PostgreSQL だけ。§5.1）。
+18. **読み取り専用トランザクションは、別のセッションを開く関数による書き込みを止めない**（`dblink` など）。これを止めるのは、アプリ DB にそうした拡張を入れないか、`REVOKE EXECUTE ... FROM PUBLIC` で実行権を外す運用である（[DEPLOYMENT.md](DEPLOYMENT.md)）。§6.3 の禁止語は迂回できるので、これを止める関門にはならない（付録 B の17）。SQLite には文の実行時間の上限が無い（`statement_timeout` は PostgreSQL だけ。§5.1）。
 
 ## 付録 B. コードの挙動として疑わしいもの
 
 規範として書き写すと誤りを固定してしまう挙動を挙げる。
 この文書は現行の挙動を記述しているが、意図どおりかは別途判断が要る。
-「修正済み」の項は、修正前の挙動と何が変わったかを記録として残している。番号は本文からの参照のために保つ。
+「解消」の項は、番号を本文からの参照のために残している。
 
 1. **配列の中の `"$id"` は検証で参照として扱われるのに、実行時は解決されない**。`compare` の `right: ["$a", "x"]` は前方参照の検査を受けて通るが、実行時は文字列 `"$a"` と比較される（§3.4）。
 2. **`allowed` の数値**は `validate_program` では許されるが、保存の受け皿 `DSLParam.allowed`（文字列の配列）が拒否し、保存は 422 になる（§6.2）。
-3. **（修正済み）確定済みのプランを `confirm` なしで保存すると、内容が変わっても `confirmed` と元の確定者が残っていた**。いまは内容（正準形）が変わった保存でプランも手順書も `draft` に戻り、確定者と確定日時が消える。同じ内容の保存は何も書かない。確定と下書きへ戻す操作には人が見た版（`base_version`）が要り（無ければ 428、違えば 409）、実行記録は確定者と確定日時を残す（§2.2、§10.1）。
+3. **解消**。確定済みのプランを `confirm` なしで書き換えても確定が残る問題（§2.2 参照）。
 4. **`guard` 以外の値フィールドの自己参照が検証を通る**。`{"op": "compare", "id": "c", "left": "$c", ...}` はエラーにならず、実行時は `left` が `null` になる（V-16）。
 5. **LLM op の trace は患者キーのマスクの対象外**で、`inputs.patient_id` とプロンプト全文に登録番号が生のまま残る。取得系 op では同じ登録番号をマスクしている（§7.3）。実行記録の `ai_input_executions.patient_id` 列がすでに同じ登録番号を生のまま保存している（§10.1）ので、LLM の trace が新たに漏らす情報は無い。ただし「trace の患者キーはマスクする」という §7.3 の規則とは一貫しない。
-6. **（修正済み）PostgreSQL 等ではアプリ DB の SQL が読み書きのセッションで実行されていた**。`READONLY_DATABASE_URL` は有無が見られるだけで使われていなかった。いまは別の接続の読み取り専用トランザクションで実行し、必ずロールバックする。接続は `READONLY_DATABASE_URL` のロールから取り、未設定なら本番では実行せず、本番以外ではアプリのロールから取る。PostgreSQL では `statement_timeout` を掛け、advisory lock を外す。禁止語に `dblink*` などを加え、Unicode エスケープも拒む（§5.1、§6.3、付録 A の17と18）。
+6. **解消**。PostgreSQL 等でアプリ DB の SQL が読み書きのセッションで実行される問題（§5.1 参照）。
 7. **ファイル族のコンパイラの是正が LLM の `needs_input` を外す**。生成物が索引の宣言と照合しないとき、DB と FHIR では LLM が立てた `needs_input` を保って引数を下書きとして示すが、ファイルでは索引のパスで置き換えて `needs_input: false` にする（`compiler._enforce_file`。§9.3 の C-03）。LLM が情報不足と申告した step が、人の補完を経ずに実行できる形になる。
 8. **`validate_program` が一部の型の誤りで例外を投げる**。`sql` が文字列でない真の値、`match` が反復できない値、`op` が辞書や配列のとき、エラーのリストを返さずに例外になる。`match` が配列であることは検査されず、文字列や辞書の `match` は要素ごとの誤ったエラーになる（§9.1 の「型の前提」）。HTTP の保存経路では受け皿が先に 422 で拒否する。
 9. **`return` の判定が「書かれている」の定義と違う**。V-06 は `if ret:` で判定するので、`0`、`false`、`[]` の `return` は書かれていないとみなされて検証を通る（§9.1 の V-06）。
-10. **（修正済み）プランの確定が手順書の確定を確かめていなかった**。いまは手順書が確定済みでなければ `confirm=true` を 400 で拒む。下書きの保存はできる（§2、§2.2）。
+10. **解消**。プランの確定が手順書の確定を確かめない問題（§2.2 参照）。
 11. **`ai_input_plans.llm_model` が手動の編集で残る**。手動の保存はこの列を書き換えないので、人が書き換えたプログラムにもコンパイル時のモデル名が付いたままになる（§2.1）。
 12. **`compare` の `==` / `!=` が型の違う値を `str()` で比べる**。`null` と `"None"`、`[]` と `"[]"`、`true` と `"True"` が等しくなる（§5.8）。
 13. **実行時のモデルの指定が承認の外にある**。単発と逐次の実行の要求の `model` とバッチのジョブのモデルは、確定で承認された step の `llm_model` に優先する。承認されたプランが、承認とは別のモデルで実行されうる。記録は残る（`program_snapshot.llm_models` の `overridden_from`、trace の `model_source`）が、実行は止まらない。`llm_model` を持たない step は、実行時の指定か既定のモデルで動き、どのモデルも承認されていない（§2.3、§5.6、§10.1）。
-14. **バッチのジョブは開始時に読み込んだプランを最後まで実行する**。ジョブの途中で編集や「下書きに戻す」でプランが `draft` になっても、そのジョブの残りの被験者には読み込んだときのプログラムが実行され、実行記録はもう有効でない確定を指す（§2.3、§10.4）。
-15. **臨床的意味とデータ所在は、内容を変えた保存でも確定と元の確定者を保つ**。差し戻しの規則は手順書とプランにだけ適用されている（§2.2）。
+14. **実行は開始時に読み込んだプランを最後まで実行する**。単発、逐次、バッチのどれも、確定済みのプランを開始時に一度だけ読み込む。実行の途中で編集や「下書きに戻す」でプランが `draft` になっても、その実行では読み込んだときのプログラムが実行され、実行記録はもう有効でない確定を指す。バッチではジョブの残りの被験者すべてに及ぶ（§2.3、§10.4）。
+15. **臨床的意味は、内容を変えた保存でも確定と元の確定者を保つ**。確定済みの記述を `confirm` なしで書き換えても `confirmed` のまま残る。手順書、プラン、データ所在は内容が変われば `draft` に戻る（§2.2）。
 16. **手順書を `draft` に戻しても、確定済みのプランは実行され続ける**。設計どおりの挙動である（実行されるのはプランで確定されたプログラム）が、手順書の確定が外れた項目の取得が、人が「下書きに戻す」を押すまで続く（§2.2）。
+17. **SELECT 限定の文字列検査は、リテラルの中のコメント記号で迂回できる**。`dsl._strip_sql_comments` は引用符を考慮せずに `--` から行末と `/* ... */` を消すので、`SELECT '--', dblink_exec(...)` や `SELECT '--'; DELETE FROM t` は、禁止語も複文も検査に見えないまま通る。PostgreSQL で `dblink` が入っていれば、前者は読み取り専用トランザクションの外で書き込める。末尾のセミコロンは連続していればすべて落とす（`SELECT 1;;;` も通る）。この検査は字句の上の最善努力で、安全の境界は DB の側にある（§5.1、§5.3、§6.3）。
+18. **LLM を呼ぶ生成の経路は、LLM の応答を待つ間の確定を上書きする**。コンパイル（`plan/compile`）、再コンパイル（`plan/{link_id}/recompile`）、手順書の生成と再生成（`runbook/generate`、`runbook/{link_id}/regenerate`）は、LLM を呼ぶ前に行を読み込み、応答の後にその行へ書く。行ロックも版の照合も無い。読み込んだときに `draft` だった行が待つ間に確定されると、書き込みは状態と確定者を変えないまま内容だけを置き換え、確定と別の要求の確定者が残る（SQLAlchemy は読み込んだ値と同じ値を UPDATE に含めない）。確定済みのプランや手順書が、誰も確定していない内容を持つことになる（§2.1）。
