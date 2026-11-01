@@ -121,11 +121,17 @@ _VALUE_FIELDS = (
 # SQL 安全性
 # ---------------------------------------------------------------------------
 
-# 禁止語の境界。前は「識別子の文字（英字・`_`・`$`・非 ASCII）でない」、後ろは「数字も含めて
-# 識別子の文字でない」。`\b` だと直前の数字が境界を消し、`SELECT 1union SELECT ...` を
-# 見逃していた（PostgreSQL 14 以前は `1union` を数値 `1` とキーワード `union` に分けて読む）。
-# 前に数字を許すので `t1copy` のような識別子は誤検知になるが、フェイルクローズ側に倒れる。
-_SQL_WORD_START = r"(?<![A-Za-z_$\u0080-\U0010ffff])"
+# 禁止語の境界。前は「英字・`_`・非 ASCII でない」、後ろは「数字・`$` も含めて識別子の文字で
+# ない」。
+# - `\b` だと直前の数字が境界を消し、`SELECT 1union SELECT ...` を見逃していた（PostgreSQL 14
+#   以前は `1union` を数値 `1` とキーワード `union` に分けて読む）。
+# - **前に `$` を入れてはいけない**。閉じたドル引用の直後のキーワード
+#   （`$$a$$=$$b$$union SELECT password_hash FROM users`）が見えなくなり、PostgreSQL 17 で
+#   実際にハッシュが読めた（レビューの再現）。閉じ引用符（`'` `"` `` ` `` `]` `$tag$`）の直後は
+#   どれも境界として扱う。
+# - その代わり、`t1copy` のような数字の後ろに禁止語が続く識別子や、`a$union` のような `$` を
+#   含む識別子、`'C1call'` のようなリテラルの中の値も拒否される（誤検知だがフェイルクローズ側）。
+_SQL_WORD_START = r"(?<![A-Za-z_\u0080-\U0010ffff])"
 _SQL_WORD_END = r"(?![A-Za-z0-9_$\u0080-\U0010ffff])"
 
 _SQL_FORBIDDEN = re.compile(
@@ -166,9 +172,14 @@ _SQL_FORBIDDEN = re.compile(
     # - 設定の再読込・WAL の切替・統計のリセットはサーバ全体に作用する
     r"pg_reload_conf|pg_switch_wal|pg_stat_reset\w*|"
     # - サーバのファイルシステムの一覧・属性（`pg_read_file` 系は上で拒否済み）
-    r"pg_ls_\w+|pg_stat_file|"
-    # - ラージオブジェクトの作成・書き込み・削除・ファイル入出力（`lo_import`/`lo_export` を含む）
-    r"lo_\w+)" + _SQL_WORD_END,
+    r"pg_ls_\w+|pg_stat_file)"
+    + _SQL_WORD_END
+    + "|"
+    # - ラージオブジェクトの作成・書き込み・削除・ファイル入出力（`lo_import`/`lo_export` を含む）。
+    #   `lo_value` のようなカラム名を巻き込まないよう、**関数呼び出しの形**（引用した名前
+    #   `"lo_import"(` も含む）だけを拒否する
+    + _SQL_WORD_START
+    + r'lo_\w+"?\s*\(',
     re.IGNORECASE,
 )
 
@@ -225,6 +236,10 @@ _SQL_UNICODE_ESCAPE = re.compile(_SQL_WORD_START + r"u&\s*[\"']", re.IGNORECASE)
 _SQL_IDENT_CHAR = re.compile(r"[A-Za-z0-9_$\x80-\U0010ffff]")
 _SQL_DOLLAR_TAG = re.compile(r"\$(?:[A-Za-z_\x80-\U0010ffff][A-Za-z0-9_\x80-\U0010ffff]*)?\$")
 _SQL_COMMENT_MARKERS = ("--", "/*", "*/")
+# 引用を置き換える印。空白にすると `SELECT 1; 'x'` の文末側の引用が消えて「文末の `;` が1つ」に
+# 見え、SQLite では2つ目の文になる（`` SELECT 1 ;`x` ``）。空白でも `;` でもない文字で残す
+_SQL_QUOTED_PLACEHOLDER = " Q "
+_SQLITE_TCL_VARIABLE = re.compile(r"[$@:#](?:[A-Za-z0-9_$\x80-\U0010ffff]|::)+\(")
 
 
 class _SqlLexError(ValueError):
@@ -266,7 +281,7 @@ def _is_disallowed_char(sql: str, i: int) -> bool:
 
 
 def _lex_sql(sql: str, *, sqlite: bool) -> str:
-    """引用の中身を空白へ置き換えた SQL を返す（セミコロン・先頭語の検査用）。
+    """引用を印（`_SQL_QUOTED_PLACEHOLDER`）へ置き換えた SQL を返す（セミコロン・先頭語の検査用）。
 
     ``sqlite`` が偽なら PostgreSQL の読み（`$tag$…$tag$` が引用、`[` はコード）、真なら
     SQLite の読み（`[…]` が引用、`$` はコード）。
@@ -285,14 +300,26 @@ def _lex_sql(sql: str, *, sqlite: bool) -> str:
         if _is_disallowed_char(sql, i):
             raise _SqlLexError(f"引用の外の制御文字・空白類 U+{ord(ch):04X}")
         if ch in "'\"`":
-            code.append(" ")
+            code.append(_SQL_QUOTED_PLACEHOLDER)
             i = _end_of_quoted(sql, i)
             continue
+        if sqlite and ch in "$@:#" and (i == 0 or not _SQL_IDENT_CHAR.match(sql[i - 1])):
+            # SQLite の TCL 形式の変数 `$a(…)`（`@`・`:`・`#` も同じ）は `)` までが変数名の
+            # 一部で、中身はコードとして読まれない（`$a([) , $b$ ; SELECT 2 $b$ ]` の `;` は
+            # SQLite では引用の外）。中に空白があると SQLite はトークンにしないので拒否する
+            m = _SQLITE_TCL_VARIABLE.match(sql, i)
+            if m:
+                end = sql.find(")", m.end())
+                if end < 0 or any(c.isspace() for c in sql[m.end() : end]):
+                    raise _SqlLexError("SQLite の変数 $name(…) の読みが決まらない")
+                code.append(_SQL_QUOTED_PLACEHOLDER)
+                i = end + 1
+                continue
         if sqlite and ch == "[":
             end = sql.find("]", i)
             if end < 0:
                 raise _SqlLexError("閉じていない [")
-            code.append(" ")
+            code.append(_SQL_QUOTED_PLACEHOLDER)
             i = end + 1
             continue
         if not sqlite and ch == "$" and (i == 0 or not _SQL_IDENT_CHAR.match(sql[i - 1])):
@@ -301,7 +328,7 @@ def _lex_sql(sql: str, *, sqlite: bool) -> str:
                 end = sql.find(m.group(), m.end())
                 if end < 0:
                     raise _SqlLexError("閉じていないドル引用")
-                code.append(" ")
+                code.append(_SQL_QUOTED_PLACEHOLDER)
                 i = end + len(m.group())
                 continue
         code.append(ch)
@@ -310,7 +337,7 @@ def _lex_sql(sql: str, *, sqlite: bool) -> str:
 
 
 def _code_outside_quotes_ok(code: str) -> bool:
-    """引用を空白にした SQL が、SELECT/WITH で始まり文末以外にセミコロンを持たないか"""
+    """引用を印にした SQL が、SELECT/WITH で始まり文末以外にセミコロンを持たないか"""
     code = code.strip()
     if code.endswith(";"):
         code = code[:-1].rstrip()
@@ -336,6 +363,11 @@ def is_select_only_sql(sql: str) -> bool:
     （下の `_SQL_FORBIDDEN`）ものの、`external_db_extract` はこの検査が唯一のコード上の関門で、
     接続先に入っている拡張（`dblink` と同類のもの）までは列挙できない。リテラルの中の禁止語は
     そうした未知の関数に渡ったときの最後の網になるので、誤検知（以前からの挙動）を取って残す。
+
+    **禁止語の前の境界は数字・`$` を境界として扱う**（`_SQL_WORD_START`）。`1union` や閉じた
+    ドル引用の直後の `$$b$$union` を見逃さないためで、その代わり `t1copy` のような数字の後ろに
+    禁止語が続く識別子、`a$union` のような識別子、`'C1call'` のようなリテラルの値も
+    **拒否される**（誤検知だがフェイルクローズ側）。
 
     注: これは多層防御の一層であり、文字列パースだけに依存しない。**保証の根拠は接続の
     権限側**である——`_op_sql` はアプリDBを**読み取り専用セッション**で読み、

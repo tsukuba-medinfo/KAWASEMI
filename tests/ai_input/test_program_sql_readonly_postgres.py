@@ -476,3 +476,26 @@ async def test_comment_tricks_do_not_hide_dblink_exec(
     assert evidence["q"]["trace"] == []
     assert "SELECT" in evidence["q"]["error"], evidence
     assert await _rows(pg_engine) == [("P1", "original")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "glue",
+    ["$$a$$=$$b$$union", "$t$a$t$=$t$b$t$union all"],
+    ids=["empty_tag", "named_tag"],
+)
+async def test_a_keyword_right_after_a_dollar_quote_is_not_hidden(
+    app_session: AsyncSession, glue: str
+) -> None:
+    """閉じたドル引用の直後の `union` が禁止語の境界に掛からず、`sql_extract` で
+    `pg_authid` が読めていた（レビューの再現）。検証で拒否され、何も読まれないこと。"""
+    sql = (
+        f"SELECT v FROM {TABLE} WHERE patient_id = :patient_id AND {glue} "
+        "SELECT rolname FROM pg_authid"
+    )
+
+    assert not is_select_only_sql(sql)
+    prefill, evidence = await DSLInterpreter().execute([_plan(sql)], "NOPE", app_session)
+    assert "q" not in prefill, prefill
+    assert evidence["q"]["trace"] == []
+    assert "SELECT" in evidence["q"]["error"], evidence

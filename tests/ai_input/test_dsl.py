@@ -21,6 +21,7 @@ from kawasemi.ai_input.dsl import (
     has_needs_input,
     is_select_only_sql,
     safe_arith,
+    sanitize_sql_identifier,
     sql_bind_names,
     validate_program,
 )
@@ -244,6 +245,105 @@ def test_bind_names_are_counted_like_sqlalchemy_text() -> None:
     ],
 )
 def test_forbidden_words_with_numeric_prefix_and_state_changing_functions(sql: str) -> None:
+    assert is_select_only_sql(sql) is False
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # 閉じたドル引用の直後のキーワード。境界の前に `$` を入れていたので見えず、
+        # PostgreSQL 17 でハッシュが読めた（レビューの再現）
+        "SELECT patient_id FROM patients WHERE patient_id = :patient_id "
+        "AND $$a$$=$$b$$union SELECT password_hash FROM users",
+        "SELECT patient_id FROM patients WHERE patient_id = :patient_id "
+        "AND $t$a$t$=$t$b$t$union all SELECT rolname FROM pg_authid",
+        "SELECT password_hash FROM users WHERE $$a$$=$$a$$except SELECT 'z'",
+        "SELECT password_hash FROM users WHERE $$a$$=$$a$$intersect SELECT password_hash FROM users",
+        "SELECT $$x$$into w2",
+        "SELECT $$x$$into temp w3",
+        "SELECT $表$x$表$union SELECT 1",
+        # 他の閉じ引用の直後も同じ
+        "SELECT 'x'union SELECT 1",
+        'SELECT 1 AS "x"union SELECT 2',
+        "SELECT `x`union SELECT 1",
+        "SELECT a[1]union SELECT 1",
+        "SELECT E'x'union SELECT 1",
+        "SELECT (1)union SELECT 1",
+        "SELECT $$x$$lo_import('/etc/passwd')",
+    ],
+)
+def test_keywords_right_after_a_closing_quote_are_rejected(sql: str) -> None:
+    assert is_select_only_sql(sql) is False
+
+
+_CLOSERS = ["'x'", '"x"', "`x`", "a[1]", "$$x$$", "$t$x$t$", "E'x'", "1", "1.5", "$1", ")"]
+_WORDS = ["union", "except", "intersect", "into", "insert", "pg_sleep", "dblink_exec", "setval"]
+
+
+@pytest.mark.parametrize("closer", _CLOSERS)
+@pytest.mark.parametrize("word", _WORDS)
+def test_every_closing_form_is_a_word_boundary(closer: str, word: str) -> None:
+    assert is_select_only_sql(f"SELECT {closer}{word}(1) FROM t") is False
+    assert is_select_only_sql(f"SELECT {closer}{word.upper()}(1) FROM t") is False
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # 文末の `;` の後ろの引用は2つ目の文（SQLite は `SELECT 1 ;`x`` を2文と読む）。
+        # 引用を空白に置き換えていたので「文末の `;` が1つ」に見えていた
+        "SELECT 1 ;`:a(*/`",
+        "SELECT 1; 'x'",
+        'SELECT 1; "x"',
+        "SELECT 1; [x]",
+        "SELECT 1; $$x$$",
+        # SQLite の TCL 形式の変数 `$a(…)` は `)` までが1つのトークン。中の `[` が引用を
+        # 始めないので、後ろの `;` が SQLite では引用の外に出る
+        "SELECT $a([) , $b$ ; SELECT 2 $b$ ]",
+        "SELECT @a([) , $b$ ; SELECT 2 $b$ ]",
+        "SELECT :a([) , $b$ ; SELECT 2 $b$ ]",
+        "SELECT $a(x y)",
+        "SELECT $a(",
+    ],
+)
+def test_sqlite_only_statement_separators_are_rejected(sql: str) -> None:
+    assert is_select_only_sql(sql) is False
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        'SELECT lo_value, lo_limit, "lo_normal" FROM t',
+        "SELECT v FROM t WHERE lo_flag = 1",
+        # 識別子の途中の `$` は SQLite でも変数を始めない
+        "SELECT my$func(a, b) FROM t",
+    ],
+)
+def test_lo_columns_are_not_forbidden(sql: str) -> None:
+    assert is_select_only_sql(sql) is True
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT lo_import('/etc/passwd')",
+        "SELECT lo_create (0)",
+        "SELECT \"lo_import\"('/etc/passwd')",
+        "SELECT pg_catalog.lo_unlink(1)",
+        "SELECT LO_EXPORT(1, '/tmp/x')",
+    ],
+)
+def test_lo_function_calls_are_forbidden(sql: str) -> None:
+    assert is_select_only_sql(sql) is False
+
+
+def test_lo_identifiers_pass_the_identifier_sanitizer() -> None:
+    assert sanitize_sql_identifier("lo_value", ["lo_value"], "c") == "lo_value"
+
+
+@pytest.mark.parametrize("sql", ["SELECT t1copy FROM t", "SELECT 'C1call' AS x", "SELECT a$union"])
+def test_digit_or_dollar_prefixed_keywords_are_rejected_fail_closed(sql: str) -> None:
+    """数字・`$` の直後の禁止語は、識別子やリテラルの一部でも拒否する（誤検知だが安全側）"""
     assert is_select_only_sql(sql) is False
 
 
