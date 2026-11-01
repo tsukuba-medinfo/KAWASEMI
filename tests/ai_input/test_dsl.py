@@ -136,6 +136,9 @@ def test_comment_markers_inside_literals_do_not_hide_the_rest(sql: str) -> None:
         "SELECT [a--b] FROM t",
         # SQLite は [a'] を識別子と読むが、ここで引用と読むと間の ; が隠れる
         "SELECT [a'] ; SELECT 1 ; ['] FROM t",
+        # `]` を含む文字列を [ ] の中に書くと、SQLite の読みでは識別子が `[']` で閉じ、
+        # 残りが閉じない文字列になる（両方の読みで通らないので拒否）
+        "SELECT ARRAY[']'] AS x",
         # 引用の外の制御文字・空白類（単独の \r、\f、\v、NUL、U+2028/2029、NBSP、ゼロ幅、BOM）
         "SELECT 1\r, 2",
         "SELECT 1\f, 2",
@@ -187,6 +190,14 @@ def test_ambiguous_or_unterminated_sql_is_rejected(sql: str) -> None:
         # 引用の中はデータ（コメント記号・制御文字・全角空白も許す）
         "SELECT 'a\rb\u3000c' AS x",
         "SELECT v FROM t WHERE a LIKE 'x!_%' ESCAPE '!'",
+        # PostgreSQL の配列の構築子・添字（SQLite の読みでは [ … ] が識別子になる）
+        "SELECT v FROM t WHERE status = ANY(ARRAY['final','amended'])",
+        "SELECT (ARRAY['a','b'])[1]",
+        "SELECT a[1][2], b[i:j] FROM t",
+        "SELECT (string_to_array(v, ','))[2] FROM t",
+        # 数字を含む識別子・語の一部は禁止語ではない
+        "SELECT updated_at, created_by, t1.v, x.lo FROM t1 JOIN x ON t1.id = x.id",
+        "SELECT v2 FROM t WHERE c IN (1, 2)",
     ],
 )
 def test_legitimate_sql_still_passes(sql: str) -> None:
@@ -198,6 +209,41 @@ def test_bind_names_are_counted_like_sqlalchemy_text() -> None:
     （コメントの中の `:name` を片方だけが拾う食い違いが無い）。"""
     sql = "SELECT v FROM t WHERE pid = :patient_id -- :hidden"
     assert sql_bind_names(sql) == {"patient_id", "hidden"} == set(text(sql).compile().params)
+    assert is_select_only_sql(sql) is False
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # 直前の数字が境界を消していた（PostgreSQL 14 以前は `1union` を `1` と `union` に分ける）
+        "SELECT 1union SELECT password_hash FROM users",
+        "SELECT 1.5union SELECT 1",
+        "SELECT 1e5union SELECT 1",
+        "SELECT x FROM t WHERE a = $1union SELECT 1",
+        "SELECT 1u&'\\0064'",
+        # 読み取り専用でも状態を変える・サーバの外へ手が届く関数
+        "SELECT pg_create_physical_replication_slot('s')",
+        "SELECT pg_create_logical_replication_slot('s', 'test_decoding')",
+        "SELECT pg_drop_replication_slot('s')",
+        "SELECT pg_logical_emit_message(true, 'p', 'm')",
+        "SELECT setval('seq', 1)",
+        "SELECT nextval('seq')",
+        "SELECT pg_reload_conf()",
+        "SELECT pg_switch_wal()",
+        "SELECT pg_stat_reset()",
+        "SELECT pg_stat_reset_shared('bgwriter')",
+        "SELECT pg_ls_dir('.')",
+        "SELECT pg_ls_waldir()",
+        "SELECT pg_stat_file('postgresql.conf')",
+        "SELECT pg_read_file('postgresql.conf')",
+        "SELECT pg_read_binary_file('postgresql.conf')",
+        "SELECT lo_import('/etc/passwd')",
+        "SELECT lo_from_bytea(0, 'x')",
+        "SELECT lo_unlink(1)",
+        "SELECT 1nextval('seq')",
+    ],
+)
+def test_forbidden_words_with_numeric_prefix_and_state_changing_functions(sql: str) -> None:
     assert is_select_only_sql(sql) is False
 
 

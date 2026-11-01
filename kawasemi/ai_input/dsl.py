@@ -121,8 +121,15 @@ _VALUE_FIELDS = (
 # SQL 安全性
 # ---------------------------------------------------------------------------
 
+# 禁止語の境界。前は「識別子の文字（英字・`_`・`$`・非 ASCII）でない」、後ろは「数字も含めて
+# 識別子の文字でない」。`\b` だと直前の数字が境界を消し、`SELECT 1union SELECT ...` を
+# 見逃していた（PostgreSQL 14 以前は `1union` を数値 `1` とキーワード `union` に分けて読む）。
+# 前に数字を許すので `t1copy` のような識別子は誤検知になるが、フェイルクローズ側に倒れる。
+_SQL_WORD_START = r"(?<![A-Za-z_$\u0080-\U0010ffff])"
+_SQL_WORD_END = r"(?![A-Za-z0-9_$\u0080-\U0010ffff])"
+
 _SQL_FORBIDDEN = re.compile(
-    r"\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|"
+    _SQL_WORD_START + r"(insert|update|delete|drop|alter|create|truncate|grant|revoke|"
     r"attach|pragma|replace|merge|copy|call|vacuum|execute|"
     # **集合演算**。索引の必須識別子を含んでいれば採用される仕組みなので、
     # `SELECT ... WHERE PATIENT_ID = :patient_id UNION SELECT password_hash FROM users` が
@@ -131,7 +138,7 @@ _SQL_FORBIDDEN = re.compile(
     r"union|except|intersect|"
     # **SELECT から到達できる書き込み・ファイル読み書き**。ブロックリストは
     # 取りこぼすので**保証は接続の権限側**（読み取り専用セッション）に置くが、多層にする
-    r"into|outfile|dumpfile|pg_read_file|pg_read_binary_file|lo_import|lo_export|"
+    r"into|outfile|dumpfile|pg_read_file|pg_read_binary_file|"
     # **読み取り専用トランザクションの外へ出る口・他の接続に作用する関数**（PostgreSQL）。
     # - `dblink*` は別セッションを開くので、READ ONLY の外で書ける（拡張が入っていれば）
     # - `pg_terminate_backend` / `pg_cancel_backend` は同じロールの他の接続を落とせる
@@ -147,13 +154,27 @@ _SQL_FORBIDDEN = re.compile(
     # 採った（`ts_rewrite` は引数名が無いが、2引数形で SELECT 文の文字列を実行する）。
     # `table_to_xml` 系は SQL 文字列は取らないが、同じ一族でスキーマ丸ごとの読み出しに使える
     r"query_to_xml\w*|cursor_to_xml\w*|table_to_xml\w*|schema_to_xml\w*|database_to_xml\w*|"
-    r"ts_stat|ts_rewrite)\b",
+    r"ts_stat|ts_rewrite|"
+    # **読み取り専用トランザクションでも状態を変える・サーバの外へ手が届く関数**（PostgreSQL）
+    # - レプリケーションスロットの作成・削除は WAL を保持させ続け、ディスクを埋めうる
+    r"pg_create_physical_replication_slot|pg_create_logical_replication_slot|"
+    r"pg_drop_replication_slot|"
+    # - WAL へ任意のメッセージを書く（論理デコードの購読者へ届く）
+    r"pg_logical_emit_message|"
+    # - シーケンスを進める・巻き戻す（読み取り専用でも一時でないシーケンスは拒否されるが、多層に）
+    r"setval|nextval|"
+    # - 設定の再読込・WAL の切替・統計のリセットはサーバ全体に作用する
+    r"pg_reload_conf|pg_switch_wal|pg_stat_reset\w*|"
+    # - サーバのファイルシステムの一覧・属性（`pg_read_file` 系は上で拒否済み）
+    r"pg_ls_\w+|pg_stat_file|"
+    # - ラージオブジェクトの作成・書き込み・削除・ファイル入出力（`lo_import`/`lo_export` を含む）
+    r"lo_\w+)" + _SQL_WORD_END,
     re.IGNORECASE,
 )
 
 # **Unicode エスケープの識別子・文字列**（PostgreSQL の `U&"\0064blink_exec"`）。
 # 禁止語を字面に出さずに書けるので、エスケープそのものを拒否する（抽出に使う理由が無い）。
-_SQL_UNICODE_ESCAPE = re.compile(r"\bu&\s*[\"']", re.IGNORECASE)
+_SQL_UNICODE_ESCAPE = re.compile(_SQL_WORD_START + r"u&\s*[\"']", re.IGNORECASE)
 
 # SQL の引用の字句解析と、**コメントの拒否**。
 #
@@ -171,8 +192,9 @@ _SQL_UNICODE_ESCAPE = re.compile(r"\bu&\s*[\"']", re.IGNORECASE)
 # 方針:
 #
 # - **対象の方言は PostgreSQL と SQLite**（入っているドライバが asyncpg と aiosqlite だけ）。
-#   引用の境界を PostgreSQL の規則で決め、2つの方言で境界が食い違いうる書き方は
-#   **それ自体を拒否する**（フェイルクローズ）。
+#   **同じ SQL を2つの方言の規則で1回ずつ字句解析し、両方で通ったものだけを受け付ける**
+#   （フェイルクローズ）。方言で引用の境界の読みが割れても、どちらの読みでも引用の外にある
+#   部分は検査されるので、片方の読みでだけ隠れるコメント・セミコロンは残らない。
 # - 引用の外の `--`・`/*`・`*/` は拒否する。引用の中のものはデータなので許す。
 # - 引用の外の制御文字・書式文字・`\t` 以外の空白類は拒否する（`\r`・`\f`・`\v`・NUL・
 #   U+2028/U+2029・NBSP・ゼロ幅文字など）。**改行は `\n` と `\r\n` だけ許す**。`\r\n` を許すのは、
@@ -192,16 +214,17 @@ _SQL_UNICODE_ESCAPE = re.compile(r"\bu&\s*[\"']", re.IGNORECASE)
 #   `LIKE … ESCAPE '\'` も同じ理由で拒否する。PostgreSQL（standard_conforming_strings=on）と
 #   SQLite では1文字の `\` で曖昧さは無いが、off の PostgreSQL（外部DBの設定はこちらで
 #   決められない）では引用符のエスケープとして読まれ、終端がずれる。`ESCAPE '!'` などで書ける。
-# - `$tag$…$tag$`（PostgreSQL のドル引用）。SQLite では本体がコードとして読まれるので、
-#   本体に引用符・`[`・`;`・コメント記号を含むものは拒否する。
-# - `[…]`（SQLite の識別子、PostgreSQL の添字）。中身に引用符・`$`・`;`・コメント記号を
-#   含むものは方言で読みが割れるので拒否する。それ以外は普通のコードとして読む。
+# - `$tag$…$tag$`（ドル引用）は PostgreSQL の読みでだけ引用。SQLite の読みでは本体がコードとして
+#   検査される（本体に引用符・`;`・コメント記号があれば SQLite の読みで落ちる）。
+# - `[…]` は SQLite の読みでだけ引用（識別子。エスケープ無しで最初の `]` まで）。PostgreSQL の
+#   読みでは配列の添字・構築子なのでコードとして検査される。`ARRAY['a','b']` は PostgreSQL の
+#   読みでは文字列2つ、SQLite の読みでは識別子1つで、どちらも引用の外に何も隠れないので通る。
+#   `SELECT [a'] ; SELECT 1 ; [']` は PostgreSQL の読みでは `;` が文字列の中に入るが、SQLite の
+#   読みでは引用の外に出るので落ちる。
 # - 閉じていない引用は拒否する。
 _SQL_IDENT_CHAR = re.compile(r"[A-Za-z0-9_$\x80-\U0010ffff]")
 _SQL_DOLLAR_TAG = re.compile(r"\$(?:[A-Za-z_\x80-\U0010ffff][A-Za-z0-9_\x80-\U0010ffff]*)?\$")
 _SQL_COMMENT_MARKERS = ("--", "/*", "*/")
-_SQL_BRACKET_AMBIGUOUS = ("'", '"', "`", "$", ";", *_SQL_COMMENT_MARKERS)
-_SQL_DOLLAR_BODY_AMBIGUOUS = ("'", '"', "`", "[", ";", *_SQL_COMMENT_MARKERS)
 
 
 class _SqlLexError(ValueError):
@@ -242,12 +265,15 @@ def _is_disallowed_char(sql: str, i: int) -> bool:
     return unicodedata.category(ch)[0] in "CZ"
 
 
-def _lex_sql(sql: str) -> str:
+def _lex_sql(sql: str, *, sqlite: bool) -> str:
     """引用の中身を空白へ置き換えた SQL を返す（セミコロン・先頭語の検査用）。
+
+    ``sqlite`` が偽なら PostgreSQL の読み（`$tag$…$tag$` が引用、`[` はコード）、真なら
+    SQLite の読み（`[…]` が引用、`$` はコード）。
 
     Raises:
         _SqlLexError: 引用の外のコメント記号・許さない文字、閉じていない引用、
-            方言で引用の境界の読みが割れる書き方。
+            バックスラッシュでエスケープした引用符。
     """
     code: list[str] = []
     i = 0
@@ -259,44 +285,50 @@ def _lex_sql(sql: str) -> str:
         if _is_disallowed_char(sql, i):
             raise _SqlLexError(f"引用の外の制御文字・空白類 U+{ord(ch):04X}")
         if ch in "'\"`":
-            end = _end_of_quoted(sql, i)
             code.append(" ")
-            i = end
+            i = _end_of_quoted(sql, i)
             continue
-        if ch == "[":
+        if sqlite and ch == "[":
             end = sql.find("]", i)
             if end < 0:
                 raise _SqlLexError("閉じていない [")
-            body = sql[i + 1 : end]
-            if any(s in body for s in _SQL_BRACKET_AMBIGUOUS):
-                raise _SqlLexError("[…] の中に引用・コメント記号")
-            # 中身の文字はこのあと1文字ずつ普通のコードとして読む（制御文字の検査も掛かる）
-        if ch == "$" and (i == 0 or not _SQL_IDENT_CHAR.match(sql[i - 1])):
+            code.append(" ")
+            i = end + 1
+            continue
+        if not sqlite and ch == "$" and (i == 0 or not _SQL_IDENT_CHAR.match(sql[i - 1])):
             m = _SQL_DOLLAR_TAG.match(sql, i)
             if m:
-                tag = m.group()
-                end = sql.find(tag, m.end())
+                end = sql.find(m.group(), m.end())
                 if end < 0:
                     raise _SqlLexError("閉じていないドル引用")
-                body = sql[m.end() : end]
-                if any(s in body for s in _SQL_DOLLAR_BODY_AMBIGUOUS):
-                    raise _SqlLexError("ドル引用の本体に引用符・[・;・コメント記号")
                 code.append(" ")
-                i = end + len(tag)
+                i = end + len(m.group())
                 continue
         code.append(ch)
         i += 1
     return "".join(code)
 
 
+def _code_outside_quotes_ok(code: str) -> bool:
+    """引用を空白にした SQL が、SELECT/WITH で始まり文末以外にセミコロンを持たないか"""
+    code = code.strip()
+    if code.endswith(";"):
+        code = code[:-1].rstrip()
+    if not code or ";" in code:  # 文末の1つは上で除去済み → 残れば複文
+        return False
+    lowered = code.lower()
+    return lowered.startswith("select") or lowered.startswith("with")
+
+
 def is_select_only_sql(sql: str) -> bool:
     """SELECT（または WITH ... SELECT）のみで、書込/DDL/複文を含まないか
 
-    - 引用を字句解析し、引用の外のコメント・制御文字、閉じていない引用、方言で引用の
-      境界の読みが割れる書き方を拒否する（`_lex_sql`）。**コメントは消さずに拒否する**
+    - 引用を PostgreSQL と SQLite の両方の読みで字句解析し、どちらかの読みで引用の外に
+      コメント・制御文字があるもの、閉じていない引用、バックスラッシュでエスケープした
+      引用符を拒否する（`_lex_sql`）。**コメントは消さずに拒否する**
     - 先頭が select または with で始まる
     - 危険なキーワードを含まない
-    - 引用の外のセミコロンは、文末の1つだけ許す（`SELECT 1;;` は複文として拒否）
+    - 引用の外のセミコロンは、両方の読みで文末の1つだけ許す（`SELECT 1;;` は複文として拒否）
 
     **禁止語はリテラルの中身も含めて探す**。リテラルを空白にしてから探せば
     `WHERE status = 'delete'` のような誤検知は消えるが、それが安全なのは「文字列を SQL として
@@ -316,18 +348,10 @@ def is_select_only_sql(sql: str) -> bool:
     if not sql or not sql.strip():
         return False
     try:
-        code = _lex_sql(sql)
+        # PostgreSQL の読みと SQLite の読みの両方で通ること（上の「方針」）
+        if not all(_code_outside_quotes_ok(_lex_sql(sql, sqlite=m)) for m in (False, True)):
+            return False
     except _SqlLexError:
-        return False
-    code = code.strip()
-    if code.endswith(";"):
-        code = code[:-1].rstrip()
-    if not code:
-        return False
-    if ";" in code:  # 文末の1つは上で除去済み → 残れば複文
-        return False
-    lowered = code.lower()
-    if not (lowered.startswith("select") or lowered.startswith("with")):
         return False
     # 何も消していないので、禁止語・`U&` は元の SQL（リテラルの中身を含む）で探す
     if _SQL_FORBIDDEN.search(sql):
