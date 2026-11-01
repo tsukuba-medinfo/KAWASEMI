@@ -261,6 +261,13 @@ class Settings(BaseSettings):
         default="",
         description="プログラムSQL専用の読み取り専用DSN（PostgreSQL等。SQLiteでは不要）",
     )
+    # プログラム SQL（PostgreSQL）の文単位のタイムアウト。読み取り専用トランザクションの
+    # 先頭で `SET LOCAL statement_timeout` 相当を掛ける。0 で無効。
+    readonly_statement_timeout_seconds: int = Field(
+        default=60,
+        ge=0,
+        description="プログラムSQLのstatement_timeout（秒。PostgreSQL。0で無効）",
+    )
 
     # リソース索引（indexer 出力。ステップ1役割2のembedding検索で参照。施設固有）
     resource_index_dir: str = Field(

@@ -248,3 +248,139 @@ async def test_production_with_readonly_dsn_reads(
         [_plan(f"SELECT v FROM {TABLE} WHERE patient_id = :patient_id")], "P1", app_session
     )
     assert prefill["q"] == "original"
+
+
+# --- statement_timeout と advisory lock の後始末 -----------------------------
+#
+# 文字列検査は `pg_sleep` / `pg_advisory_lock` を拒否するが、ここでは関門の側の保証を見るため
+# reader へ直接投げる。
+
+
+@pytest.mark.asyncio
+async def test_statement_timeout_cancels_long_statements(
+    app_session: AsyncSession, pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`READONLY_STATEMENT_TIMEOUT_SECONDS` を超える文は 57014 で止まり、設定は持ち越されないこと。"""
+    monkeypatch.setattr(settings, "readonly_statement_timeout_seconds", 1)
+    with pytest.raises(DBAPIError) as exc:
+        async with readonly_program_sql(app_session) as reader:
+            assert (await reader.execute(text("SHOW statement_timeout"))).scalar() == "1s"
+            await reader.execute(text("SELECT pg_sleep(5)"))
+    assert _sqlstate(exc.value) == "57014", exc.value  # query_canceled
+
+    # プールへ返った接続に timeout が残っていないこと（SET LOCAL 相当なので外れている）
+    async with pg_engine.connect() as conn:
+        assert (await conn.execute(text("SHOW statement_timeout"))).scalar() == "0"
+
+
+@pytest.mark.asyncio
+async def test_advisory_locks_are_released_before_returning_the_connection(
+    app_session: AsyncSession, pg_engine: AsyncEngine
+) -> None:
+    """セッションレベルの advisory lock はロールバックで外れないので、関門が外すこと。"""
+    key = 0x6B617761  # 他のテストと被らない値
+    async with readonly_program_sql(app_session) as reader:
+        assert (await reader.execute(text(f"SELECT pg_try_advisory_lock({key})"))).scalar()
+
+    other = create_async_engine(PG_URL)
+    try:
+        async with other.connect() as conn:
+            got = (await conn.execute(text(f"SELECT pg_try_advisory_lock({key})"))).scalar()
+            assert got is True, "関門を抜けた後も advisory lock が残っている"
+            await conn.execute(text(f"SELECT pg_advisory_unlock({key})"))
+    finally:
+        await other.dispose()
+
+
+# --- DEPLOYMENT.md の SQL をそのまま当てる -----------------------------------
+
+
+@pytest.fixture
+async def documented_role(pg_engine: AsyncEngine) -> AsyncIterator[AsyncEngine]:
+    """DEPLOYMENT.md の「読み取り専用ロール」の SQL を、名前だけ置き換えて当てる。
+
+    認証の表が無ければ（`alembic upgrade` していない DB）モデルから作り、後で消す。
+    """
+    from pathlib import Path
+
+    from sqlalchemy import inspect as sa_inspect
+
+    from kawasemi.ai_input import models as _ai_input_models  # noqa: F401 - 全表を登録する
+    from kawasemi.models import Base
+
+    url = make_url(PG_URL)
+    role = f"kawasemi_ro_doc_{_SUFFIX}"
+    doc = (Path(__file__).resolve().parents[2] / "docs" / "DEPLOYMENT.md").read_text("utf-8")
+    start = doc.index("CREATE ROLE kawasemi_ro")
+    block = doc[start : doc.index("```", start)]
+    statements = [
+        line.replace("kawasemi_ro", role)
+        .replace("PASSWORD '...'", f"PASSWORD '{RO_PASSWORD}'")
+        .replace("ON DATABASE kawasemi ", f"ON DATABASE {url.database} ")
+        for line in block.splitlines()
+        if line.strip() and not line.startswith("--")
+    ]
+
+    async with pg_engine.connect() as conn:
+        before = set(await conn.run_sync(lambda c: sa_inspect(c).get_table_names()))
+    async with pg_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    created = [t for t in reversed(Base.metadata.sorted_tables) if t.name not in before]
+    try:
+        async with pg_engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "INSERT INTO users (username, email, password_hash, "
+                    "full_name, is_active, failed_login_count, created_at, "
+                    f"updated_at) VALUES ('doc_{_SUFFIX}', 'doc_{_SUFFIX}@example.org', "
+                    "'not-a-real-hash', 'x', true, 0, now(), now())"
+                )
+            )
+            for stmt in statements:
+                await conn.execute(text(stmt))
+    except DBAPIError as e:  # pragma: no cover - CREATEROLE の無い環境
+        pytest.skip(f"読み取り専用ロールを作れない: {e}")
+    ro = create_async_engine(url.set(username=role, password=RO_PASSWORD))
+    try:
+        yield ro
+    finally:
+        await ro.dispose()
+        async with pg_engine.begin() as conn:
+            await conn.execute(text(f"DELETE FROM users WHERE username = 'doc_{_SUFFIX}'"))
+            await conn.execute(text(f"REVOKE ALL ON ALL TABLES IN SCHEMA public FROM {role}"))
+            await conn.execute(text(f"REVOKE USAGE ON SCHEMA public FROM {role}"))
+            await conn.execute(text(f"REVOKE CONNECT ON DATABASE {url.database} FROM {role}"))
+            await conn.execute(text(f"DROP ROLE {role}"))
+            for table in created:
+                await conn.execute(text(f'DROP TABLE IF EXISTS "{table.name}" CASCADE'))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT password_hash FROM users",
+        "SELECT jti FROM refresh_tokens",
+        "SELECT * FROM auth_events",
+        "SELECT * FROM user_roles",
+    ],
+)
+async def test_documented_role_cannot_read_auth_tables(
+    documented_role: AsyncEngine, sql: str
+) -> None:
+    """手順書どおりのロールでは、認証の表が 42501（権限なし）で読めないこと。"""
+    with pytest.raises(DBAPIError) as exc:
+        async with documented_role.connect() as conn:
+            await conn.execute(text(sql))
+    assert _sqlstate(exc.value) == "42501", exc.value
+
+
+@pytest.mark.asyncio
+async def test_documented_role_reads_other_tables_read_only(documented_role: AsyncEngine) -> None:
+    """手順書どおりのロールでも、認証以外の表は読め、書き込みは止まること。"""
+    async with documented_role.connect() as conn:
+        assert (await conn.execute(text(f"SELECT v FROM {TABLE}"))).scalar() == "original"
+        assert (await conn.execute(text("SHOW transaction_read_only"))).scalar() == "on"
+    with pytest.raises(DBAPIError):
+        async with documented_role.connect() as conn:
+            await conn.execute(text(f"INSERT INTO {TABLE} VALUES ('P5', 'x')"))

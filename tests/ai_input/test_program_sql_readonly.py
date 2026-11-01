@@ -209,29 +209,38 @@ async def test_without_readonly_dsn_it_uses_a_separate_readonly_connection(
 
 
 class _SpyConn:
-    def __init__(self) -> None:
+    def __init__(self, fail_on: str | None = None) -> None:
         self.options: dict[str, Any] = {}
         self.statements: list[str] = []
+        self.binds: list[Any] = []
         self.rolled_back = False
+        self.invalidated = False
+        self.fail_on = fail_on
 
     async def execution_options(self, **opts: Any) -> _SpyConn:
         self.options.update(opts)
         return self
 
-    async def execute(self, stmt: Any, *_args: Any) -> None:
+    async def execute(self, stmt: Any, *args: Any) -> None:
         self.statements.append(str(stmt))
+        self.binds.append(args[0] if args else None)
+        if self.fail_on and self.fail_on in str(stmt):
+            raise RuntimeError("後始末の失敗")
 
     async def rollback(self) -> None:
         self.rolled_back = True
 
+    async def invalidate(self) -> None:
+        self.invalidated = True
+
 
 class _SpyEngine:
-    def __init__(self, dialect: str) -> None:
+    def __init__(self, dialect: str, fail_on: str | None = None) -> None:
         class _D:
             name = dialect
 
         self.dialect = _D()
-        self.conn = _SpyConn()
+        self.conn = _SpyConn(fail_on)
 
     @asynccontextmanager
     async def connect(self) -> AsyncIterator[_SpyConn]:
@@ -243,9 +252,11 @@ async def test_postgresql_route_opens_a_readonly_transaction_and_rolls_back(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """PostgreSQL では読み取り専用 DSN のエンジンに `postgresql_readonly=True` を付けて
-    接続し（`BEGIN READ ONLY`）、抜けるときに必ずロールバックすること。"""
+    接続し（`BEGIN READ ONLY`）、`statement_timeout` を掛け、抜けるときに必ずロールバック
+    してから advisory lock を外すこと。"""
     spy = _SpyEngine("postgresql")
     monkeypatch.setattr(readonly_db, "get_readonly_engine", lambda: spy)
+    monkeypatch.setattr(settings, "readonly_statement_timeout_seconds", 7)
     _pretend_postgresql(db_session, monkeypatch)
 
     with pytest.raises(RuntimeError):
@@ -254,8 +265,89 @@ async def test_postgresql_route_opens_a_readonly_transaction_and_rolls_back(
             raise RuntimeError("SQL の失敗")
 
     assert spy.conn.options == {"postgresql_readonly": True}
-    assert spy.conn.statements == []
+    assert spy.conn.statements == [
+        "SELECT set_config('statement_timeout', :v, true)",
+        "SELECT pg_advisory_unlock_all()",
+    ]
+    assert spy.conn.binds[0] == {"v": "7000"}
     assert spy.conn.rolled_back
+    assert not spy.conn.invalidated
+
+
+@pytest.mark.asyncio
+async def test_timeout_zero_disables_the_statement_timeout(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`READONLY_STATEMENT_TIMEOUT_SECONDS=0` ではタイムアウトを掛けないこと。"""
+    spy = _SpyEngine("postgresql")
+    monkeypatch.setattr(readonly_db, "get_readonly_engine", lambda: spy)
+    monkeypatch.setattr(settings, "readonly_statement_timeout_seconds", 0)
+    _pretend_postgresql(db_session, monkeypatch)
+
+    async with readonly_program_sql(db_session):
+        pass
+
+    assert spy.conn.statements == ["SELECT pg_advisory_unlock_all()"]
+
+
+@pytest.mark.asyncio
+async def test_a_connection_whose_locks_cannot_be_released_is_invalidated(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """advisory lock を外せなかった接続はプールへ返さず破棄すること。"""
+    spy = _SpyEngine("postgresql", fail_on="pg_advisory_unlock_all")
+    monkeypatch.setattr(readonly_db, "get_readonly_engine", lambda: spy)
+    _pretend_postgresql(db_session, monkeypatch)
+
+    async with readonly_program_sql(db_session):
+        pass
+
+    assert spy.conn.invalidated
+
+
+def test_the_development_warning_names_the_environment_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ENVIRONMENT 未設定の既定が development であることを警告文が言うこと。"""
+    monkeypatch.setattr(settings, "readonly_database_url", "")
+    monkeypatch.setattr(settings, "environment", "development")
+    warning = readonly_db.readonly_route_warning("postgresql")
+    assert warning is not None
+    assert "development" in warning and "ENVIRONMENT=production" in warning
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("environment", ["development", "production"])
+async def test_check_schema_prints_the_warning(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], environment: str
+) -> None:
+    """`kawasemi check_schema` が読み取り専用ロールの欠けを警告として出すこと。"""
+    import kawasemi.core.database as database
+    import kawasemi.core.schema_check as schema_check
+    from kawasemi import cli
+    from kawasemi.core.schema_check import SchemaDrift
+
+    class _FakeEngine:
+        class dialect:  # noqa: N801 - engine.dialect.name の形に合わせる
+            name = "postgresql"
+
+    async def _no_drift(_engine: Any) -> SchemaDrift:
+        return SchemaDrift()
+
+    monkeypatch.setattr(database, "engine", _FakeEngine())
+    monkeypatch.setattr(schema_check, "inspect_schema_async", _no_drift)
+    monkeypatch.setattr(settings, "readonly_database_url", "")
+    monkeypatch.setattr(settings, "environment", environment)
+
+    await cli.check_schema()
+
+    out = capsys.readouterr().out
+    expected = (
+        readonly_db.UNCONFIGURED_PRODUCTION_WARNING
+        if environment == "production"
+        else readonly_db.UNCONFIGURED_WARNING
+    )
+    assert f"警告: {expected}" in out
 
 
 @pytest.mark.asyncio
@@ -427,6 +519,16 @@ async def test_statistical_profile_aggregates_go_through_the_guard(
         "SELECT pg_read_file('/etc/passwd')",
         "SELECT lo_import('/etc/passwd')",
         "SELECT a FROM t INTO OUTFILE '/tmp/x'",
+        # 読み取り専用トランザクションの外へ出る口・他の接続に作用する関数（PostgreSQL）
+        "SELECT * FROM dblink('dbname=x', 'SELECT 1') AS t(a int)",
+        "SELECT dblink_exec('dbname=x', 'DELETE FROM users')",
+        "SELECT dblink_connect('c', 'dbname=x')",
+        "SELECT pg_terminate_backend(123)",
+        "SELECT pg_cancel_backend(123)",
+        "SELECT pg_advisory_lock(1)",
+        "SELECT pg_try_advisory_xact_lock(1)",
+        "SELECT pg_sleep(10)",
+        "SELECT pg_sleep_for('1 hour')",
     ],
 )
 def test_forbidden_sql_shapes_are_rejected(sql: str) -> None:

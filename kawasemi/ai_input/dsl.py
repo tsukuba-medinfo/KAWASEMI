@@ -130,7 +130,16 @@ _SQL_FORBIDDEN = re.compile(
     r"union|except|intersect|"
     # **SELECT から到達できる書き込み・ファイル読み書き**。ブロックリストは
     # 取りこぼすので**保証は接続の権限側**（読み取り専用セッション）に置くが、多層にする
-    r"into|outfile|dumpfile|pg_read_file|pg_read_binary_file|lo_import|lo_export)\b",
+    r"into|outfile|dumpfile|pg_read_file|pg_read_binary_file|lo_import|lo_export|"
+    # **読み取り専用トランザクションの外へ出る口・他の接続に作用する関数**（PostgreSQL）。
+    # - `dblink*` は別セッションを開くので、READ ONLY の外で書ける（拡張が入っていれば）
+    # - `pg_terminate_backend` / `pg_cancel_backend` は同じロールの他の接続を落とせる
+    #   （読み取り専用でも効く。アプリのロールで動く経路ではアプリ自身の接続が対象になる）
+    # - `pg_advisory*` / `pg_try_advisory*` はセッションに残り、他の処理を待たせうる
+    #   （後始末で `pg_advisory_unlock_all()` も呼ぶが、取らせないのが先）
+    # - `pg_sleep*` は抽出に使い道が無く、接続を握り続ける（`statement_timeout` も掛ける）
+    r"dblink\w*|pg_terminate_backend|pg_cancel_backend|pg_advisory\w*|pg_try_advisory\w*|"
+    r"pg_sleep\w*)\b",
     re.IGNORECASE,
 )
 

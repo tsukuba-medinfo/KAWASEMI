@@ -23,7 +23,19 @@
      読み取り専用トランザクションで実行する。どちらも起動時と `check_schema` で警告する
 
   別接続にするのは、同じトランザクションを読み取り専用にすると後続の evidence の保存まで
-  止まるからである。
+  止まるからである。アプリのエンジンを使う経路では、実行のたびにアプリの接続プールから
+  **2本目の接続**を借りる（セッションが持つ1本とは別）。
+
+PostgreSQL では加えて:
+
+- トランザクションの先頭で `statement_timeout` を `SET LOCAL` 相当で掛ける
+  （`READONLY_STATEMENT_TIMEOUT_SECONDS`、既定 60 秒、0 で無効）。長い SELECT や `pg_sleep` で
+  接続を握り続けさせない
+- 抜けるときにロールバックしてから `pg_advisory_unlock_all()` を呼ぶ。advisory lock は
+  セッションに残り、ロールバックでは外れないので、プールへ返す前に必ず外す。外せなかった接続は
+  プールへ返さず破棄する（`invalidate`）
+- `SET` / `set_config` で変えた設定はトランザクションと一緒にロールバックされるので、
+  プールへ持ち越されない
 """
 
 from __future__ import annotations
@@ -48,9 +60,11 @@ _SET_THE_DSN = (
     "（docs/DEPLOYMENT.md の「読み取り専用ロール」）。"
 )
 UNCONFIGURED_WARNING = (
-    "READONLY_DATABASE_URL が未設定です。sql_extract と統計プロファイルの SQL は"
+    "READONLY_DATABASE_URL が未設定です。ENVIRONMENT が production ではないため"
+    "（未設定時の既定は development）、sql_extract と統計プロファイルの SQL は"
     "アプリ本体のロールで、読み取り専用トランザクションの中で実行します"
-    "（書き込みは止まるが、アプリのロールが読める表はすべて読める）。" + _SET_THE_DSN
+    "（書き込みは止まるが、users.password_hash を含め、アプリのロールが読める表はすべて読める）。"
+    "本番では ENVIRONMENT=production を設定してください。" + _SET_THE_DSN
 )
 UNCONFIGURED_PRODUCTION_WARNING = (
     "READONLY_DATABASE_URL が未設定のため、ENVIRONMENT=production では sql_extract と"
@@ -111,6 +125,17 @@ def _app_engine(db: AsyncSession) -> AsyncEngine:
     return engine
 
 
+async def _release_session_state(conn: AsyncConnection, dialect: str) -> None:
+    """ロールバックでは戻らないセッション状態を外す（プールへ返す前）。"""
+    if dialect == "sqlite":
+        await conn.execute(text("PRAGMA query_only = OFF"))
+    elif dialect == "postgresql":
+        await conn.execute(text("SELECT pg_advisory_unlock_all()"))
+    else:
+        return
+    await conn.rollback()
+
+
 @asynccontextmanager
 async def _readonly_transaction(engine: AsyncEngine) -> AsyncIterator[AsyncConnection]:
     """別接続で読み取り専用トランザクションを張り、抜けるときに必ずロールバックする。"""
@@ -121,14 +146,25 @@ async def _readonly_transaction(engine: AsyncEngine) -> AsyncIterator[AsyncConne
             if dialect == "sqlite":
                 # 読み取り専用 DSN に SQLite を置いた場合（主にテスト）。接続スコープなので戻す
                 await conn.execute(text("PRAGMA query_only = ON"))
-            elif dialect != "postgresql":
+            elif dialect == "postgresql":
+                timeout_ms = settings.readonly_statement_timeout_seconds * 1000
+                if timeout_ms > 0:
+                    # is_local=true ＝ SET LOCAL。このトランザクションの中だけで効く
+                    await conn.execute(
+                        text("SELECT set_config('statement_timeout', :v, true)"),
+                        {"v": str(timeout_ms)},
+                    )
+            else:
                 await conn.execute(text("SET TRANSACTION READ ONLY"))
             yield conn
         finally:
-            await conn.rollback()
-            if dialect == "sqlite":
-                await conn.execute(text("PRAGMA query_only = OFF"))
+            try:
                 await conn.rollback()
+                await _release_session_state(conn, dialect)
+            except Exception:
+                # 状態を外せない接続はプールへ返さない（advisory lock を握ったまま使い回さない）
+                logger.exception("読み取り専用接続の後始末に失敗したため接続を破棄します")
+                await conn.invalidate()
 
 
 @asynccontextmanager
