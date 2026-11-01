@@ -8,6 +8,8 @@
 - 手順書が確認済みでなければ取得プランを確認できない（compile / recompile と同じ前提）。
 - draft へ戻ったプランは実行されない（実行経路は confirmed のみを読む）。
 - 実行記録（program_snapshot）は program と承認の帰属（confirmed_by_id / confirmed_at）を固定する。
+- 手順書にも同じ規則を当てる（内容が変われば draft、同一なら確認済みを保つ）。ただし
+  手順書の編集で取得プランは連動させない（実行されるのはプランの program である）。
 """
 
 import copy
@@ -21,7 +23,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from kawasemi.ai_input.executor import program_snapshot
 from kawasemi.ai_input.models import InputPlan, InputRunbook
-from kawasemi.ai_input.routes import _program_canonical, _program_changed
+from kawasemi.ai_input.routes import (
+    _program_canonical,
+    _program_changed,
+    _runbook_canonical,
+    _runbook_changed,
+)
 from kawasemi.core.auth import create_access_token
 from kawasemi.core.config import settings
 from kawasemi.models.questionnaire import Questionnaire
@@ -354,3 +361,173 @@ async def test_demoted_plan_is_not_executed(
     resp = await autofill()
     assert resp.status_code == 400
     assert "確認済みプラン" in resp.json()["message"]
+
+
+# ---------------------------------------------------------------------------
+# 手順書: 同じ規則
+# ---------------------------------------------------------------------------
+
+_RB_STEPS: list[dict[str, Any]] = [
+    {
+        "order": 1,
+        "title": "検査値を取得",
+        "description": "直近の値",
+        "action_type": "fetch",
+        "data_hint": None,
+    }
+]
+
+
+def test_runbook_canonical_ignores_key_order_defaults_and_order_field() -> None:
+    """キー順・既定値の欠落・order の値（保存時に振り直す）は「同一」とみなす。"""
+    stored = [
+        {
+            "order": 7,
+            "data_hint": None,
+            "action_type": "fetch",
+            **{"description": "直近の値", "title": "検査値を取得"},
+        }
+    ]
+    sent = [{"title": "検査値を取得", "description": "直近の値", "action_type": "fetch"}]
+    assert not _runbook_changed(stored, sent)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda s: s[0].__setitem__("title", "別の題"),
+        lambda s: s[0].__setitem__("description", "別の説明"),
+        lambda s: s[0].__setitem__("action_type", None),
+        lambda s: s[0].__setitem__("data_hint", "ヒント"),
+        lambda s: s.append({"order": 2, "title": "追加", "description": ""}),
+        lambda s: s.clear(),
+    ],
+    ids=["title", "description", "action_type", "data_hint", "append", "clear"],
+)
+def test_runbook_changed_detects_edits(mutate: Any) -> None:
+    edited = copy.deepcopy(_RB_STEPS)
+    mutate(edited)
+    assert _runbook_changed(_RB_STEPS, edited)
+
+
+def test_runbook_changed_detects_reorder() -> None:
+    two = [{"title": "A"}, {"title": "B"}]
+    assert _runbook_changed(two, list(reversed(two)))
+
+
+def test_runbook_canonical_falls_back_to_raw() -> None:
+    assert _runbook_canonical("legacy") == _runbook_canonical("legacy")
+    assert _runbook_changed("legacy", _RB_STEPS)
+
+
+async def _confirmed_runbook(
+    client: AsyncClient, user: User, db: AsyncSession, csrf: str
+) -> tuple[Questionnaire, InputRunbook]:
+    q = await _setup(db, runbook_status="draft")
+    _act_as(client, user, RoleType.DESIGNER)
+    resp = await client.post(
+        f"/ai-input/questionnaires/{q.id}/runbook/item1?confirm=true",
+        json={"steps": _RB_STEPS},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "confirmed"
+    rb = (
+        await db.execute(
+            select(InputRunbook).where(
+                InputRunbook.questionnaire_id == q.id, InputRunbook.link_id == "item1"
+            )
+        )
+    ).scalar_one()
+    await db.refresh(rb)
+    assert rb.confirmed_by_id == user.id
+    return q, rb
+
+
+async def _save_runbook(client: AsyncClient, qid: int, steps: Any, csrf: str) -> Any:
+    return await client.post(
+        f"/ai-input/questionnaires/{qid}/runbook/item1",
+        json={"steps": steps},
+        headers={"X-CSRF-Token": csrf},
+    )
+
+
+@pytest.mark.asyncio
+async def test_editing_confirmed_runbook_demotes_to_draft(
+    designer_client: AsyncClient,
+    designer_user: User,
+    db_session: AsyncSession,
+    csrf_token: str,
+) -> None:
+    """確認済み手順書の内容を変えて保存すると draft へ戻り、確認者・確認日時が消える。"""
+    q, rb = await _confirmed_runbook(designer_client, designer_user, db_session, csrf_token)
+
+    edited = copy.deepcopy(_RB_STEPS)
+    edited[0]["description"] = "初回の値"
+    resp = await _save_runbook(designer_client, q.id, edited, csrf_token)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "draft"
+    assert body["demoted"] is True
+    assert "確認し直して" in body["warning"]
+
+    await db_session.refresh(rb)
+    assert rb.status == "draft"
+    assert rb.confirmed_by_id is None
+    assert rb.confirmed_at is None
+
+
+@pytest.mark.asyncio
+async def test_identical_runbook_save_keeps_confirmed(
+    designer_client: AsyncClient,
+    designer_user: User,
+    multi_role_user: User,
+    db_session: AsyncSession,
+    csrf_token: str,
+) -> None:
+    """同一内容の保存（キー順違い・既定値の省略）は確認済みと元の確認者を保つ。"""
+    q, rb = await _confirmed_runbook(designer_client, designer_user, db_session, csrf_token)
+    confirmer, confirmed_at = rb.confirmed_by_id, rb.confirmed_at
+
+    _act_as(designer_client, multi_role_user, RoleType.DESIGNER)
+    # order は保存時に振り直すので値が違っても同一。data_hint は既定値なので省略。
+    same = [
+        {"order": 5, "action_type": "fetch", "description": "直近の値", "title": "検査値を取得"}
+    ]
+    resp = await _save_runbook(designer_client, q.id, same, csrf_token)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "confirmed"
+    assert "demoted" not in resp.json()
+
+    await db_session.refresh(rb)
+    assert rb.status == "confirmed"
+    assert rb.confirmed_by_id == confirmer
+    assert rb.confirmed_at == confirmed_at
+
+
+@pytest.mark.asyncio
+async def test_runbook_edit_leaves_confirmed_plan_unchanged(
+    designer_client: AsyncClient,
+    designer_user: User,
+    db_session: AsyncSession,
+    csrf_token: str,
+) -> None:
+    """手順書を編集して draft へ戻しても、確認済みの取得プランは確認済みのまま残る。
+
+    実行されるのはプランの program で、それはプランの確認で承認済みである。
+    """
+    q, _ = await _confirmed_runbook(designer_client, designer_user, db_session, csrf_token)
+    resp = await _save(designer_client, q.id, _PROGRAM, csrf_token, confirm=True)
+    assert resp.status_code == 200, resp.text
+    plan = await _get_plan(db_session, q.id)
+    confirmer, confirmed_at = plan.confirmed_by_id, plan.confirmed_at
+
+    edited = copy.deepcopy(_RB_STEPS)
+    edited[0]["title"] = "別の題"
+    resp = await _save_runbook(designer_client, q.id, edited, csrf_token)
+    assert resp.json()["status"] == "draft"
+
+    plan = await _get_plan(db_session, q.id)
+    assert plan.status == "confirmed"
+    assert plan.confirmed_by_id == confirmer
+    assert plan.confirmed_at == confirmed_at

@@ -2898,6 +2898,35 @@ async def regenerate_runbook(
     )
 
 
+_RUNBOOK_STEP_FIELDS: tuple[tuple[str, Any], ...] = (
+    ("title", None),
+    ("description", ""),
+    ("action_type", None),
+    ("data_hint", None),
+)
+
+
+def _runbook_canonical(steps: Any) -> str:
+    """手順書 steps の同一性を比べるための正準形（キー順に依らない JSON 文字列）。
+
+    保存と同じく order を 1 始まりで振り直し、`RunbookStep` の各欄を既定値で埋めて
+    比べる（欠けた欄と既定値は同一とみなす）。`action_type` は**正規化しない**。
+    語彙外のタグは保存時に None へ落ちるので、落ちた保存は内容が変わった側に倒れる。
+    リストでない旧データは生のまま比べる。
+    """
+    if isinstance(steps, list) and all(isinstance(s, dict) for s in steps):
+        steps = [
+            {"order": idx, **{k: s.get(k, default) for k, default in _RUNBOOK_STEP_FIELDS}}
+            for idx, s in enumerate(steps, start=1)
+        ]
+    return json.dumps(steps, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+
+def _runbook_changed(before: Any, after: Any) -> bool:
+    """確認済み手順書の steps が実質的に変わったか（正準 JSON の比較）。"""
+    return _runbook_canonical(before) != _runbook_canonical(after)
+
+
 @router.post("/questionnaires/{questionnaire_id}/runbook/{link_id}")
 async def save_runbook(
     request: Request,
@@ -2912,7 +2941,14 @@ async def save_runbook(
     """ステップ2: 1項目分の手順書ステップを保存する（upsert）
 
     `confirm=true` のときは保存と同時に status を confirmed にする（確認して次へ）。
-    編集のみの場合は既存ステータスを維持する。
+
+    `confirm=false` の保存で確認済み手順書の内容が変わったら **draft へ戻し、確認者・
+    確認日時を消す**（`regenerate` と同じ扱い。取得プランの `save_plan` と同じ規則）。
+    正準形が同一の保存だけは確認済みを保つ。
+
+    **取得プランは連動させない。** 実行されるのはプランの program であり、それは
+    プランの確認で承認されている。手順書が後から変わったことは、プランの `stale`
+    （手順書より古い）表示で設計者に知らせる。
     """
     await csrf_protect.validate_csrf(request)
     questionnaire = await _get_questionnaire_or_404(questionnaire_id, db)
@@ -2942,6 +2978,7 @@ async def save_runbook(
     # 応答 JSON を直接見る呼び出し元（移行スクリプト・API 直叩き）である。
     dropped_action_types = _dropped_action_types(await request.json(), steps)
 
+    demoted = False
     if confirm:
         status = RunbookStatus.CONFIRMED
         # 確認操作者・日時を記録（ALCOA+ 帰属性）
@@ -2949,11 +2986,18 @@ async def save_runbook(
         confirmed_at: datetime | None = datetime.now(UTC)
     else:
         status = existing.status if existing else RunbookStatus.DRAFT
-        # 確認済みを維持する編集は元の確認者を保持、draft はクリア
-        if status == RunbookStatus.CONFIRMED and existing:
+        if (
+            status == RunbookStatus.CONFIRMED
+            and existing
+            and not _runbook_changed(existing.steps, steps)
+        ):
+            # 内容が同一の保存だけは確認済みと元の確認者を保つ
             confirmed_by_id = existing.confirmed_by_id
             confirmed_at = existing.confirmed_at
         else:
+            # 確認済みの内容が変わったら draft へ戻す。人が確認したのは変更前の手順書である。
+            demoted = status == RunbookStatus.CONFIRMED
+            status = RunbookStatus.DRAFT
             confirmed_by_id = None
             confirmed_at = None
 
@@ -2975,16 +3019,22 @@ async def save_runbook(
         f"手順書保存: questionnaire_id={questionnaire_id}, link_id={link_id}, "
         f"status={status}, steps={len(steps)}"
         + (f", 語彙外タグ{len(dropped_action_types)}件" if dropped_action_types else "")
+        + ("（内容変更により確認済みから draft へ戻した）" if demoted else "")
     )
-    return JSONResponse(
-        {
-            "success": True,
-            "link_id": link_id,
-            "status": status,
-            "steps": [_serialize_step(s) for s in steps],
-            "dropped_action_types": dropped_action_types,
-        }
-    )
+    response: dict[str, Any] = {
+        "success": True,
+        "link_id": link_id,
+        "status": status,
+        "steps": [_serialize_step(s) for s in steps],
+        "dropped_action_types": dropped_action_types,
+    }
+    if demoted:
+        response["demoted"] = True
+        response["warning"] = (
+            "確認済みの手順書を変更したため未確認（draft）に戻しました。"
+            "内容を確かめて確認し直してください（作成済みの取得プランはそのままです）"
+        )
+    return JSONResponse(response)
 
 
 # =============================================================================

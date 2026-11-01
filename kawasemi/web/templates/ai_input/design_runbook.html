@@ -6,7 +6,7 @@
 <div class="card">
   {% include "ai_input/_stepper.html" %}
   <h2>ステップ2: 取得手順書の作成 — {{ questionnaire.title or questionnaire.fhir_id }}</h2>
-  <p class="hint">各項目について「どのデータをどこからどう取得するか」を順序付きステップの手順書にします。AIで一括下書き生成し、1項目ずつ確認・編集してください。確認済みの手順書は、ステップ3で取得プランへ変換されます。</p>
+  <p class="hint">各項目について「どのデータをどこからどう取得するか」を順序付きステップの手順書にします。AIで一括下書き生成し、1項目ずつ確認・編集してください。確認済みの手順書は、ステップ3で取得プランへ変換されます。確認済みの手順書を編集して保存すると未確認に戻ります。</p>
 
   <div class="toolbar">
     {% if enable_ai_drafting %}
@@ -221,8 +221,12 @@ async function saveCurrent(confirm) {
     const data = await post(`{{ base_path() }}/ai-input/questionnaires/${QID}/runbook/${encodeURIComponent(it.link_id)}?confirm=${confirm}`, { steps: it.steps });
     if (data.success) {
       it.status = data.status; it.has_runbook = true; it.stale = false;
-      setStatus(confirm ? '✓ 確認しました' : '✓ 保存しました', true);
+      // 確認済みの内容を変えて保存すると、サーバが未確認（draft）へ戻す
+      if (data.demoted) setStatus(`⚠ 保存しました。${data.warning}`, false);
+      else setStatus(confirm ? '✓ 確認しました' : '✓ 保存しました', true);
       renderProgress();
+      // 状態の表示（確認済み／未確認）を戻った状態に合わせる
+      if (data.demoted) renderItem();
       return true;
     }
     setStatus(`エラー: ${data.message || '保存に失敗しました'}`, false);
