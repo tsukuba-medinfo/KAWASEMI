@@ -18,20 +18,26 @@
 
 別のセッションは `tests.conftest.TestSessionLocal`（同じインメモリ DB）を使う。要求の
 セッション（`db_session`）で書くと、同じ identity map のオブジェクトが更新されて不具合が
-隠れる。本物の同時実行と行ロックは PostgreSQL のテスト
-（`test_plan_concurrency_postgres.py`）で見る。
+隠れる。インメモリ DB は1接続を共有するのでロックは効かない。SQLite の書き込みロックは
+下のファイル DB のテスト、行ロックは PostgreSQL のテスト（`test_plan_concurrency_postgres.py`）
+で見る。
+
+逆順（確認が版の検査を通った後、書く前に生成が commit する）も見る。確認の UPDATE が
+status・確認者だけになると「確認済み（本人）＋AI の内容」になるので、内容の列も必ず書く。
 """
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
 from httpx import AsyncClient
 from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from kawasemi.ai_input import routes as routes_mod
 from kawasemi.ai_input.models import ClinicalAnnotation, InputPlan, InputRunbook
@@ -43,6 +49,7 @@ from kawasemi.ai_input.schemas import (
 )
 from kawasemi.core.auth import create_access_token
 from kawasemi.core.config import settings
+from kawasemi.models.base import Base
 from kawasemi.models.questionnaire import Questionnaire
 from kawasemi.models.role import RoleType
 from kawasemi.models.user import User
@@ -600,3 +607,260 @@ async def test_pages_surface_generation_conflicts(
     gen = _js_function(rb_page, "generateAll")
     branch = gen[gen.index("} else if (skippedConflict) {") :].split("} else {")[0]
     assert "false)" in branch, "生成中に更新された項目があっても緑のままになっている"
+
+
+# ---------------------------------------------------------------------------
+# 逆順: 確認が版の検査を通った後、書く前に生成が commit した
+# （確認の UPDATE が status・確認者だけになると「確認済み（本人）＋AI の内容」になる）
+# ---------------------------------------------------------------------------
+
+_GENERATED_PROGRAM: dict[str, Any] = {
+    "steps": [{"op": "sql_extract", "id": "s1", "sql": _GENERATED_SQL}],
+    "return": "$s1",
+}
+_GENERATED_STEPS: list[dict[str, Any]] = [
+    {
+        "order": 1,
+        "title": _GENERATED_TITLE,
+        "description": "",
+        "action_type": None,
+        "data_hint": None,
+    }
+]
+
+
+def _generation_commits_right_after_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    model: type[InputPlan] | type[InputRunbook],
+    content: dict[str, Any],
+) -> None:
+    """`_lock_row`（保存側の読み直し）の直後に、**別のセッション**で生成の書き込みを commit する。
+
+    インメモリ DB は1接続を共有するので SQLite の書き込みロックはここでは効かない
+    （ロックそのものはファイル DB のテストで見る）。ここで見るのは、ロックが効かない経路が
+    残っても確認の UPDATE が内容の列を含み、人が見た内容で確定することである。
+    """
+    real = routes_mod._lock_row
+
+    async def lock_then_generation(db: AsyncSession, row: Any) -> None:
+        await real(db, row)
+        async with TestSessionLocal() as other:
+            await other.execute(
+                update(model)
+                .where(model.id == row.id)
+                .values(status="draft", confirmed_by_id=None, confirmed_at=None, **content)
+                .execution_options(synchronize_session=False)
+            )
+            await other.commit()
+
+    monkeypatch.setattr(routes_mod, "_lock_row", lock_then_generation)
+
+
+@pytest.mark.asyncio
+async def test_plan_confirm_after_generation_commit_keeps_the_content_the_human_saw(
+    designer_client: AsyncClient,
+    designer_user: User,
+    db_session: AsyncSession,
+    csrf_token: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    qid = await _setup(db_session)
+    # 確認の送る program と保存済みの program を正準形で一致させる（ORM が「program は
+    # 変わっていない」と見て UPDATE から外す条件を作る）
+    saved = routes_mod._program_dump(DSLProgram.model_validate(_HUMAN_PROGRAM))
+    async with TestSessionLocal() as other:
+        await other.execute(
+            update(InputPlan).where(InputPlan.questionnaire_id == qid).values(program=saved)
+        )
+        await other.commit()
+    base = routes_mod.plan_version(await _row(InputPlan, qid))
+    _act_as(designer_client, designer_user, RoleType.DESIGNER)
+    user_id = designer_user.id
+    _generation_commits_right_after_lock(monkeypatch, InputPlan, {"program": _GENERATED_PROGRAM})
+
+    resp = await designer_client.post(
+        f"/ai-input/questionnaires/{qid}/plan/item1?confirm=true",
+        json={"program": _HUMAN_PROGRAM, "base_version": base},
+        headers={"X-CSRF-Token": csrf_token},
+    )
+
+    assert resp.status_code == 200, resp.text
+    plan = await _row(InputPlan, qid)
+    _assert_plan_never_confirmed_with_generated(plan)
+    assert plan.status == "confirmed"
+    assert plan.confirmed_by_id == user_id
+    assert plan.program == saved
+
+
+@pytest.mark.asyncio
+async def test_runbook_confirm_after_generation_commit_keeps_the_content_the_human_saw(
+    designer_client: AsyncClient,
+    designer_user: User,
+    db_session: AsyncSession,
+    csrf_token: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    qid = await _setup(db_session, runbook_status="draft", plan_for=())
+    # 保存時の採番（1始まり）に合わせ、確認の送る steps と保存済みを一致させる
+    steps = [dict(s, order=1) for s in _HUMAN_STEPS]
+    async with TestSessionLocal() as other:
+        await other.execute(
+            update(InputRunbook).where(InputRunbook.questionnaire_id == qid).values(steps=steps)
+        )
+        await other.commit()
+    base = routes_mod.runbook_version(await _row(InputRunbook, qid))
+    _act_as(designer_client, designer_user, RoleType.DESIGNER)
+    user_id = designer_user.id
+    _generation_commits_right_after_lock(monkeypatch, InputRunbook, {"steps": _GENERATED_STEPS})
+
+    resp = await designer_client.post(
+        f"/ai-input/questionnaires/{qid}/runbook/item1?confirm=true",
+        json={"steps": steps, "base_version": base},
+        headers={"X-CSRF-Token": csrf_token},
+    )
+
+    assert resp.status_code == 200, resp.text
+    rb = await _row(InputRunbook, qid)
+    _assert_runbook_never_confirmed_with_generated(rb)
+    assert rb.status == "confirmed"
+    assert rb.confirmed_by_id == user_id
+    assert rb.steps == steps
+
+
+# ---------------------------------------------------------------------------
+# SQLite の書き込みロック（ファイル DB・別接続）: 読み直しから commit までの間、
+# 他の接続は書き込めない
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def sqlite_file(
+    tmp_path: Path,
+) -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
+    """本番と同じ WAL のファイル DB。接続ごとに別の SQLite 接続になる（StaticPool ではない）。
+
+    待ち時間（timeout）を短くして、ロックで待たされた書き込みを「database is locked」で
+    すぐ失敗させる。
+    """
+    from sqlalchemy import event
+
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'race.db'}", connect_args={"timeout": 0.2}
+    )
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _wal(dbapi_conn: Any, _rec: Any) -> None:
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.close()
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    try:
+        yield async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    finally:
+        await engine.dispose()
+
+
+async def _file_seed(factory: async_sessionmaker[AsyncSession]) -> tuple[int, int]:
+    async with factory() as s:
+        q = Questionnaire(
+            fhir_id="q-lock",
+            title="ロック",
+            status="active",
+            content={"resourceType": "Questionnaire", "id": "q-lock", "item": []},
+        )
+        s.add(q)
+        await s.flush()
+        plan = InputPlan(
+            questionnaire_id=q.id, link_id="item1", program=_HUMAN_PROGRAM, status="draft"
+        )
+        s.add(plan)
+        await s.commit()
+        return q.id, plan.id
+
+
+async def _other_connection_confirms(
+    factory: async_sessionmaker[AsyncSession], plan_id: int
+) -> None:
+    async with factory() as other:
+        await other.execute(
+            update(InputPlan).where(InputPlan.id == plan_id).values(status="confirmed")
+        )
+        await other.commit()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("helper", ["_lock_row", "_lock_rows_for_write"])
+async def test_sqlite_lock_blocks_other_writers_until_commit(
+    sqlite_file: async_sessionmaker[AsyncSession], helper: str
+) -> None:
+    """`_lock_row` / `_lock_rows_for_write` の後、commit までは他の接続が書けない。
+
+    SQLite は `FOR UPDATE` を無視し、ドライバは SELECT の前に BEGIN を出さない。
+    `_sqlite_write_lock` を外すと、読み直しの直後に他の接続の確認が commit でき
+    （版を比べた後に行が変わる）、このテストは落ちる。
+    """
+    qid, plan_id = await _file_seed(sqlite_file)
+    async with sqlite_file() as mine:
+        if helper == "_lock_row":
+            plan = await mine.get(InputPlan, plan_id)
+            await routes_mod._lock_row(mine, plan)
+        else:
+            await routes_mod._lock_rows_for_write(mine, InputPlan, qid, ["item1"])
+
+        with pytest.raises(OperationalError, match="database is locked"):
+            await _other_connection_confirms(sqlite_file, plan_id)
+
+        await mine.commit()
+
+    # ロックを放したら書ける
+    await _other_connection_confirms(sqlite_file, plan_id)
+    async with sqlite_file() as s:
+        assert (await s.get(InputPlan, plan_id)).status == "confirmed"
+
+
+# ---------------------------------------------------------------------------
+# 409 にするのは一意制約違反だけ（NOT NULL などは不具合なので上げる）
+# ---------------------------------------------------------------------------
+
+
+def test_only_unique_violations_count_as_conflicts() -> None:
+    import sqlite3
+
+    from sqlalchemy.exc import IntegrityError
+
+    con = sqlite3.connect(":memory:")
+    con.execute("CREATE TABLE t (k TEXT UNIQUE, v TEXT NOT NULL)")
+    con.execute("INSERT INTO t VALUES ('a', 'x')")
+    errors = {}
+    for name, sql in {
+        "unique": "INSERT INTO t VALUES ('a', 'y')",
+        "not_null": "INSERT INTO t VALUES ('b', NULL)",
+    }.items():
+        with pytest.raises(sqlite3.IntegrityError) as caught:
+            con.execute(sql)
+        errors[name] = IntegrityError(sql, {}, caught.value)
+
+    assert routes_mod._is_unique_violation(errors["unique"]) is True
+    assert routes_mod._is_unique_violation(errors["not_null"]) is False
+
+
+@pytest.mark.asyncio
+async def test_non_unique_integrity_error_is_not_turned_into_409(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sqlite3
+
+    from sqlalchemy.exc import IntegrityError
+
+    not_null = IntegrityError(
+        "INSERT", {}, sqlite3.IntegrityError("NOT NULL constraint failed: t.v")
+    )
+
+    async def failing_commit() -> None:
+        raise not_null
+
+    monkeypatch.setattr(db_session, "commit", failing_commit)
+    with pytest.raises(IntegrityError):
+        await routes_mod._commit_or_conflict(db_session)

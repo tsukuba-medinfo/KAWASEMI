@@ -22,7 +22,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingRes
 from fastapi.templating import Jinja2Templates
 from fastapi_csrf_protect import CsrfProtect
 from pydantic import ValidationError
-from sqlalchemy import case, func, select
+from sqlalchemy import case, func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -567,16 +567,35 @@ async def _plan_map(questionnaire_id: int, db: AsyncSession) -> dict[str, InputP
     return {p.link_id: p for p in result.scalars().all()}
 
 
+async def _sqlite_write_lock(db: AsyncSession, model: type[InputRunbook] | type[InputPlan]) -> None:
+    """SQLite では、読み直しの前に DB の書き込みロックを取る（`FOR UPDATE` の代わり）。
+
+    SQLite は `FOR UPDATE` を無視する。しかもドライバ（sqlite3 / aiosqlite）は SELECT の前に
+    BEGIN を出さないので、**読み直しと書き込みは同じトランザクションにならない**。読んで
+    版を比べた後、書く前に別の接続が commit できる（「書き込みは DB 全体で直列化される」
+    は、読んでから書くまでの間には効かない）。
+    ここで行に触れない UPDATE（`WHERE 1 = 0`）を先に流すと、ドライバが BEGIN を出し、
+    SQLite が書き込みロック（RESERVED）を取る。以後 commit / rollback までの間、他の接続の
+    書き込みは busy_timeout まで待つ（PostgreSQL の行ロックより粗いが、比べてから書くまでを
+    押さえる点は同じ）。行に触れないので `updated_at` も変わらない。PostgreSQL では何もしない。
+    """
+    conn = await db.connection()
+    if conn.dialect.name != "sqlite":
+        return
+    await db.execute(text(f"UPDATE {model.__tablename__} SET id = id WHERE 1 = 0"))
+
+
 async def _lock_row(db: AsyncSession, row: InputRunbook | InputPlan | None) -> None:
     """保存の読み比べ〜書き込みの間、対象行を行ロックで押さえ、最新の値で読み直す。
 
     楽観的排他の版比較（`_version_conflict`）と「内容が変わったか」の判定を、他の要求が
     同じ行を書き換えている途中の値で行わないためである。PostgreSQL では `FOR UPDATE`、
-    SQLite では句が無視されるが書き込みは DB 全体で直列化される。
+    SQLite では `_sqlite_write_lock` で DB の書き込みロックを先に取る。
     """
     if row is None:
         return
     model = type(row)
+    await _sqlite_write_lock(db, model)
     await db.execute(
         select(model)
         .where(model.id == row.id)
@@ -675,8 +694,10 @@ async def _commit_or_conflict(db: AsyncSession) -> JSONResponse | None:
     """
     try:
         await db.commit()
-    except IntegrityError:
+    except IntegrityError as e:
         await db.rollback()
+        if not _is_unique_violation(e):
+            raise
         return JSONResponse(
             {
                 "success": False,
@@ -704,13 +725,14 @@ async def _lock_rows_for_write(
     draft と空の確認者を代入しても、ORM は「読んだ値と同じ」と見て UPDATE から外すので、
     `UPDATE ... SET program=?` だけが走り、**他人が確認した行に誰も確認していない生成
     結果が入る**（確認済みのまま）。ここで最新の値を読み直し（`populate_existing`）、
-    呼び出し前に控えた版と比べてから書く。PostgreSQL では `FOR UPDATE` で比べてから
-    commit までを押さえる。SQLite では句が無視されるが、書き込み側は `_upsert_*` が
-    status・確認者・確認日時を必ず UPDATE に含めるので、確認済みのまま生成結果が入る
-    ことはない。
+    呼び出し前に控えた版と比べてから書く。比べてから commit までは、PostgreSQL では
+    `FOR UPDATE` の行ロック、SQLite では `_sqlite_write_lock` の DB 書き込みロックで押さえる。
+    加えて `_upsert_*` は status・確認者・確認日時と内容の列を必ず UPDATE に含める
+    （`_force_write_columns`）。
     """
     if not link_ids:
         return {}
+    await _sqlite_write_lock(db, model)
     result = await db.execute(
         select(model)
         .where(model.questionnaire_id == questionnaire_id, model.link_id.in_(link_ids))
@@ -743,16 +765,46 @@ def _generation_conflict_response(current: str | None) -> JSONResponse:
 _GENERATION_WRITE_ATTEMPTS = 3
 
 
-def _force_status_columns(row: InputRunbook | InputPlan) -> None:
-    """status・確認者・確認日時を、値が変わっていなくても UPDATE に含める。
+def _force_write_columns(row: InputRunbook | InputPlan) -> None:
+    """内容の列（program / steps）と status・確認者・確認日時を、値が変わっていなくても
+    UPDATE に含める。
 
-    ORM は読んだ値と同じ値の代入を UPDATE から外す。読み直しから書き込みまでの間に
-    別の要求が確認を commit した場合（SQLite は `FOR UPDATE` が効かない）、
-    `SET program=?` だけが走ると「確認済み＋誰も確認していない内容」になる。列を必ず
-    書けば、後着のこちらが draft と空の確認者で上書きし、確認済みのまま残らない。
+    ORM は読んだ値と同じ値の代入を UPDATE から外す。すると、読んでから書くまでの間に
+    別の要求が commit した値のうち、こちらが「変えていない」と見た列はそのまま残る。
+
+    - 生成が draft を書くとき、status を外すと `SET program=?` だけが走り、間に入った
+      確認が残って「確認済み＋誰も確認していない内容」になる。
+    - 確認が confirmed を書くとき、内容を外すと `SET status=?, confirmed_by_id=?, ...`
+      だけが走り、間に入った生成の内容が残って「確認済み（確認者は本人）＋AI の内容」になる。
+
+    どちらの列も必ず書けば、行は**書いた側が見た内容と status の組**になる。ロック
+    （`_lock_row` / `_lock_rows_for_write`）が間に入る書き込みを止めるのが本筋で、これは
+    ロックが効かない経路が残っても組を崩さないための二重化である。
     """
-    for key in ("status", "confirmed_by_id", "confirmed_at"):
+    content = "program" if isinstance(row, InputPlan) else "steps"
+    for key in (content, "status", "confirmed_by_id", "confirmed_at"):
         flag_modified(row, key)
+
+
+def _is_unique_violation(exc: IntegrityError) -> bool:
+    """一意制約違反か（PostgreSQL の SQLSTATE 23505 / SQLite の UNIQUE 制約）。
+
+    同時の新規作成を 409 にするのは一意制約に当たったときだけである。NOT NULL や外部キー
+    の違反は競合ではなく不具合なので、409 に変えずにそのまま上げる。
+    """
+    orig = exc.orig
+    for source in (orig, getattr(orig, "__cause__", None)):
+        if source is None:
+            continue
+        code = getattr(source, "pgcode", None) or getattr(source, "sqlstate", None)
+        if code == "23505":
+            return True
+        if getattr(source, "sqlite_errorname", None) in (
+            "SQLITE_CONSTRAINT_UNIQUE",
+            "SQLITE_CONSTRAINT_PRIMARYKEY",
+        ):
+            return True
+    return "UNIQUE constraint failed" in str(orig)
 
 
 def _is_designed(ann: ClinicalAnnotation | None, loc: SystemLocation | None) -> bool:
@@ -2769,7 +2821,7 @@ async def _upsert_runbook(
         rb.confirmed_by_id = confirmed_by_id
         rb.confirmed_at = confirmed_at
         rb.dropped_action_types = dropped
-        _force_status_columns(rb)
+        _force_write_columns(rb)
         if llm_model is not None:
             rb.llm_model = llm_model
         return rb
@@ -2957,10 +3009,12 @@ async def generate_runbooks(
         try:
             await db.commit()
             break
-        except IntegrityError:
+        except IntegrityError as e:
             # 「無い」と読んだ項目を別の要求が先に作った。読み直すとその行が見えるので、
             # 次の周ではその項目が版の不一致として skip に回る。
             await db.rollback()
+            if not _is_unique_violation(e):
+                raise
     else:
         return _generation_conflict_response(None)
     saved = len(saved_link_ids)
@@ -3423,7 +3477,7 @@ async def _upsert_plan(
         plan.status = status
         plan.confirmed_by_id = confirmed_by_id
         plan.confirmed_at = confirmed_at
-        _force_status_columns(plan)
+        _force_write_columns(plan)
         if llm_model is not None:
             plan.llm_model = llm_model
         return plan
@@ -3609,10 +3663,12 @@ async def compile_plans(
         try:
             await db.commit()
             break
-        except IntegrityError:
+        except IntegrityError as e:
             # 「無い」と読んだ項目を別の要求が先に作った。読み直すとその行が見えるので、
             # 次の周ではその項目が版の不一致として skip に回る。
             await db.rollback()
+            if not _is_unique_violation(e):
+                raise
     else:
         return _generation_conflict_response(None)
     saved = len(compiled_link_ids)
