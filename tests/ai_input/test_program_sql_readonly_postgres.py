@@ -384,3 +384,62 @@ async def test_documented_role_reads_other_tables_read_only(documented_role: Asy
     with pytest.raises(DBAPIError):
         async with documented_role.connect() as conn:
             await conn.execute(text(f"INSERT INTO {TABLE} VALUES ('P5', 'x')"))
+
+
+# --- dblink: 読み取り専用トランザクションの外へ出る口 ----------------------------
+
+
+@pytest.fixture
+async def dblink(pg_engine: AsyncEngine) -> AsyncIterator[str]:
+    """dblink 拡張を入れ、自分自身へつなぐ接続文字列を返す。入れられなければ skip。"""
+    async with pg_engine.connect() as conn:
+        existed = bool(
+            (
+                await conn.execute(text("SELECT 1 FROM pg_extension WHERE extname = 'dblink'"))
+            ).scalar()
+        )
+    if not existed:
+        try:
+            async with pg_engine.begin() as conn:
+                await conn.execute(text("CREATE EXTENSION dblink"))
+        except DBAPIError as e:  # pragma: no cover - contrib が無い・権限が無い環境
+            pytest.skip(f"dblink を入れられない: {e}")
+    url = make_url(PG_URL)
+    try:
+        yield (
+            f"host={url.host or 'localhost'} port={url.port or 5432} dbname={url.database} "
+            f"user={url.username} password={url.password}"
+        )
+    finally:
+        if not existed:
+            async with pg_engine.begin() as conn:
+                await conn.execute(text("DROP EXTENSION IF EXISTS dblink"))
+
+
+@pytest.mark.asyncio
+async def test_dblink_escapes_the_readonly_transaction_but_sql_extract_rejects_it(
+    app_session: AsyncSession, pg_engine: AsyncEngine, dblink: str
+) -> None:
+    """dblink は別セッションを開くので、読み取り専用トランザクションの中からでも書ける
+    （関門だけでは止まらない）。だから文字列検査で拒否する。Unicode エスケープで
+    `dblink_exec` を字面から消した形（レビューの再現）も `sql_extract` で拒否されること。
+    """
+    insert = f"INSERT INTO {TABLE} VALUES (''P7'', ''via-dblink'')"
+    escaped = (
+        f"SELECT U&\"\\0064blink_exec\"('{dblink}', '{insert}') WHERE :patient_id = :patient_id"
+    )
+
+    # 対照: 文字列検査を通さずに関門へ直接投げると、dblink 経由で書けてしまう
+    async with readonly_program_sql(app_session) as reader:
+        await reader.execute(text(f"SELECT dblink_exec('{dblink}', '{insert}')"))
+    assert ("P7", "via-dblink") in await _rows(pg_engine)
+    async with pg_engine.begin() as conn:
+        await conn.execute(text(f"DELETE FROM {TABLE} WHERE patient_id = 'P7'"))
+
+    assert not is_select_only_sql(escaped)
+    prefill, evidence = await DSLInterpreter().execute([_plan(escaped)], "P1", app_session)
+    assert "q" not in prefill
+    # プログラム検証（`validate_program`）の段で落ち、step は1つも実行されない
+    assert evidence["q"]["trace"] == []
+    assert "SELECT" in evidence["q"]["error"], evidence
+    assert await _rows(pg_engine) == [("P1", "original")]

@@ -305,6 +305,33 @@ async def test_a_connection_whose_locks_cannot_be_released_is_invalidated(
     assert spy.conn.invalidated
 
 
+@pytest.mark.asyncio
+async def test_a_cancelled_cleanup_invalidates_and_still_propagates(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """後始末の途中の取り消し（`CancelledError`）でも接続を破棄し、取り消しは伝えること。
+
+    `CancelledError` は `Exception` ではないので、`except Exception` では拾えず、
+    unlock が走らないまま接続がプールへ戻っていた。
+    """
+    import asyncio
+
+    spy = _SpyEngine("postgresql")
+
+    async def _cancelled(*_a: Any) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(spy.conn, "rollback", _cancelled)
+    monkeypatch.setattr(readonly_db, "get_readonly_engine", lambda: spy)
+    _pretend_postgresql(db_session, monkeypatch)
+
+    with pytest.raises(asyncio.CancelledError):
+        async with readonly_program_sql(db_session):
+            pass
+
+    assert spy.conn.invalidated
+
+
 def test_the_development_warning_names_the_environment_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -529,6 +556,22 @@ async def test_statistical_profile_aggregates_go_through_the_guard(
         "SELECT pg_try_advisory_xact_lock(1)",
         "SELECT pg_sleep(10)",
         "SELECT pg_sleep_for('1 hour')",
+        # Unicode エスケープで禁止語を字面から消す（レビューで dblink 経由の書き込みを実測）
+        "SELECT U&\"\\0064blink_exec\"('dbname=kawasemi', 'DELETE FROM t') "
+        "WHERE :patient_id = :patient_id",
+        "SELECT u& \"\\0064blink\"('dbname=x', 'SELECT 1') AS t(a int)",
+        "SELECT v FROM t WHERE v = U&'\\0061'",
+        # 文字列で渡した SQL を実行する関数（連結で禁止語を組み立てられる）
+        "SELECT query_to_xml('select pg_'||'sleep(1)', true, false, '')",
+        "SELECT query_to_xml_and_xmlschema('select 1', true, false, '')",
+        "SELECT query_to_xmlschema('select 1', true, false, '')",
+        "SELECT cursor_to_xml('c', 1, true, false, '')",
+        "SELECT cursor_to_xmlschema('c', true, false, '')",
+        "SELECT table_to_xml('users', true, false, '')",
+        "SELECT schema_to_xml('public', true, false, '')",
+        "SELECT database_to_xml(true, false, '')",
+        "SELECT * FROM ts_stat('select to_tsvector(v) from t')",
+        "SELECT ts_rewrite('a'::tsquery, 'select ''a''::tsquery, ''b''::tsquery')",
     ],
 )
 def test_forbidden_sql_shapes_are_rejected(sql: str) -> None:
@@ -540,3 +583,6 @@ def test_ordinary_selects_still_pass() -> None:
     """正当な SELECT / WITH を拒否していないこと（誤検出で作業が止まらないこと）。"""
     assert is_select_only_sql("SELECT v FROM t WHERE patient_id = :patient_id") is True
     assert is_select_only_sql("WITH x AS (SELECT 1 AS a) SELECT a FROM x") is True
+    # Unicode エスケープの検査が普通の比較や AND を巻き込まないこと
+    assert is_select_only_sql("SELECT menu FROM t WHERE u = 'x' AND v = :patient_id") is True
+    assert is_select_only_sql("SELECT v FROM t WHERE name = 'AT&T'") is True

@@ -161,10 +161,14 @@ async def _readonly_transaction(engine: AsyncEngine) -> AsyncIterator[AsyncConne
             try:
                 await conn.rollback()
                 await _release_session_state(conn, dialect)
-            except Exception:
-                # 状態を外せない接続はプールへ返さない（advisory lock を握ったまま使い回さない）
+            except BaseException as e:
+                # 状態を外せない接続はプールへ返さない（advisory lock を握ったまま使い回さない）。
+                # **`CancelledError` も拾う**（`Exception` ではない）。後始末の途中で取り消されると
+                # unlock が走らないまま接続がプールへ戻るため。破棄したうえで取り消しは伝える
                 logger.exception("読み取り専用接続の後始末に失敗したため接続を破棄します")
                 await conn.invalidate()
+                if not isinstance(e, Exception):
+                    raise
 
 
 @asynccontextmanager
