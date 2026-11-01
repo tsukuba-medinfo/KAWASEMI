@@ -110,6 +110,38 @@ docker-compose up -d postgres
 docker-compose exec kawasemi alembic upgrade head
 ```
 
+### 読み取り専用ロール（READONLY_DATABASE_URL）
+
+DSL の `sql_extract` と統計プロファイルの自アプリDB集計は、LLM や索引が組んだ SELECT を
+アプリ本体の DB へ発行します。SELECT 限定の文字列検査は多層防御の1枚にすぎないので、
+PostgreSQL では**読み取り専用ロール**を用意し、その DSN を `READONLY_DATABASE_URL` に設定してください。
+
+```sql
+-- アプリのオーナーロール（例: kawasemi）で接続して実行する。
+-- ロールを作るには CREATEROLE 権限（またはスーパーユーザー）が要る。
+CREATE ROLE kawasemi_ro LOGIN PASSWORD '...';
+ALTER ROLE kawasemi_ro SET default_transaction_read_only = on;
+GRANT CONNECT ON DATABASE kawasemi TO kawasemi_ro;
+GRANT USAGE ON SCHEMA public TO kawasemi_ro;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO kawasemi_ro;
+-- 後のマイグレーションで増える表にも SELECT を付ける（オーナーロールが作る表が対象）
+ALTER DEFAULT PRIVILEGES FOR ROLE kawasemi IN SCHEMA public GRANT SELECT ON TABLES TO kawasemi_ro;
+```
+
+```bash
+# .env
+READONLY_DATABASE_URL=postgresql+asyncpg://kawasemi_ro:...@postgres:5432/kawasemi
+```
+
+- 書き込み・DDL・関数の作成の権限は与えません。`sql_extract` が読む必要の無い表
+  （`users` など）は、運用で許せるなら `REVOKE SELECT ON users FROM kawasemi_ro;` で外せます。
+- 設定すると、プログラム SQL はこの DSN の別エンジン（初回利用時に生成し、終了時に破棄）で、
+  **読み取り専用トランザクション**（`BEGIN READ ONLY`）の中で実行され、毎回ロールバックされます。
+- **未設定でも動きます**が、アプリ本体のロールから別接続を取り、読み取り専用トランザクションで
+  実行するだけになります。書き込みはトランザクションが止めますが、ロールの読み取り範囲や
+  サーバ関数の権限は広いままです。この状態は起動時のログと `kawasemi check_schema` が警告します。
+- SQLite では `PRAGMA query_only` で閉じるので、この設定は不要です（設定しても使いません）。
+
 ## 本番環境へのデプロイ
 
 ### セキュリティ設定

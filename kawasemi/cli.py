@@ -169,10 +169,15 @@ async def check_schema() -> None:
     運用側から明示的に走らせる口が要る。食い違いがあれば終了コード 1 を返す。
     """
     from kawasemi.core.database import engine
+    from kawasemi.core.readonly_db import readonly_route_warning
     from kawasemi.core.schema_check import inspect_schema_async
 
     drift = await inspect_schema_async(engine)
     print(f"接続先: {settings.database_url}")
+    # 読み取り専用ロールの欠けは警告に留める（終了コードは変えない。スキーマの食い違いではない）
+    readonly_warning = readonly_route_warning(engine.dialect.name)
+    if readonly_warning:
+        print(f"警告: {readonly_warning}")
     print(f"モデルの表: {len(Base.metadata.tables)}")
     if drift.recorded_revision or drift.head_revision:
         print(f"alembic_version: {drift.recorded_revision} / head: {drift.head_revision}")

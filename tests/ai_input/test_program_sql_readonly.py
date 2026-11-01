@@ -5,24 +5,29 @@
 取りこぼす（Postgres の `SELECT ... INTO` / `pg_read_file`、MySQL の `INTO OUTFILE`）。
 **ブロックリストは取りこぼすので、保証を文字列検査に置かない**——DB 側の権限で閉じる。
 
-ここでは (1) 実行が読み取り専用の関門を通ること、(2) 関門が用意できない環境では
-**実行しない**こと（フェイルクローズ）、(3) 文字列検査側の多層防御（集合演算・INTO 等）を
-固定する。
+ここでは (1) 実行が読み取り専用の関門を通ること、(2) SQLite 以外では
+`READONLY_DATABASE_URL` のエンジン（無ければアプリのエンジン）から別接続を取り、
+読み取り専用トランザクションの中で読むこと、(3) 文字列検査側の多層防御（集合演算・INTO 等）を
+固定する。PostgreSQL 上の実挙動は `test_program_sql_readonly_postgres.py` が見る。
 """
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any
+
 import pytest
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from kawasemi.ai_input.dsl import is_select_only_sql
-from kawasemi.ai_input.executor import (
-    DSLInterpreter,
-    ReadOnlySessionUnavailableError,
-    readonly_program_sql,
-)
-from kawasemi.ai_input.models import FailureCode, InputPlan
+from kawasemi.ai_input.executor import DSLInterpreter
+from kawasemi.ai_input.models import InputPlan
+from kawasemi.core import readonly_db
+from kawasemi.core.config import settings
+from kawasemi.core.readonly_db import readonly_program_sql
 
 
 def _plan(link_id: str, program: dict) -> InputPlan:
@@ -80,54 +85,236 @@ async def test_sql_extract_still_reads_through_the_guard(db_session: AsyncSessio
     assert evidence["q"]["trace"][0].get("failure_code") is None
 
 
-@pytest.mark.asyncio
-async def test_it_fails_closed_when_no_readonly_route_exists(
-    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """関門が用意できない方言では**実行しない**こと（フェイルクローズ）。
+# --- SQLite 以外の経路 -------------------------------------------------------
+#
+# PostgreSQL を立てずに経路を見るため、アプリのセッションの方言だけを "postgresql" に
+# 見せかける。読み取り専用 DSN 側には SQLite のファイル DB を置く（関門は `query_only`）。
 
-    SQLite 以外で `READONLY_DATABASE_URL` が未設定のときに、黙って読み書きセッションで
-    実行するのがいちばん危ない。`source_unavailable` として記録し、値は入れない。
-    """
 
+def _pretend_postgresql(session: AsyncSession, monkeypatch: pytest.MonkeyPatch) -> None:
     class _FakeDialect:
         name = "postgresql"
 
     class _FakeBind:
         dialect = _FakeDialect()
 
-    monkeypatch.setattr(db_session, "get_bind", lambda: _FakeBind())
+    monkeypatch.setattr(session, "get_bind", lambda: _FakeBind())
 
-    with pytest.raises(ReadOnlySessionUnavailableError):
-        async with readonly_program_sql(db_session):
-            pass  # pragma: no cover - 入る前に落ちる
+
+@pytest.fixture
+async def readonly_dsn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[str]:
+    """値 'from-readonly-dsn' を持つ別の DB を作り、READONLY_DATABASE_URL に設定する。"""
+    url = f"sqlite+aiosqlite:///{tmp_path / 'readonly.db'}"
+    seed = create_async_engine(url)
+    async with seed.begin() as conn:
+        await conn.execute(text("CREATE TABLE t_ro (patient_id TEXT, v TEXT)"))
+        await conn.execute(text("INSERT INTO t_ro VALUES ('P1', 'from-readonly-dsn')"))
+    await seed.dispose()
+    monkeypatch.setattr(settings, "readonly_database_url", url)
+    yield url
+    await readonly_db.dispose_readonly_engine()
+
+
+_RO_PROGRAM = {
+    "steps": [
+        {"op": "sql_extract", "id": "s", "sql": "SELECT v FROM t_ro WHERE patient_id = :patient_id"}
+    ],
+    "return": "$s",
+}
 
 
 @pytest.mark.asyncio
-async def test_the_step_records_source_unavailable_when_it_cannot_read_only(
+async def test_sql_extract_reads_through_the_readonly_dsn_engine(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, readonly_dsn: str
+) -> None:
+    """READONLY_DATABASE_URL があれば、`sql_extract` は**その DSN のエンジン**で読むこと。
+
+    `t_ro` は読み取り専用 DSN 側にだけあり、アプリのセッション側には無い。値が取れれば
+    読み書きセッションではなく読み取り専用エンジンを通った証拠になる。
+    """
+    _pretend_postgresql(db_session, monkeypatch)
+
+    prefill, evidence = await DSLInterpreter().execute([_plan("q", _RO_PROGRAM)], "P1", db_session)
+
+    assert prefill["q"] == "from-readonly-dsn", evidence
+    engine = readonly_db.get_readonly_engine()
+    assert engine is not None
+    assert str(engine.url) == readonly_dsn
+    # 遅延生成したエンジンはキャッシュされる（実行のたびに作らない）
+    assert readonly_db.get_readonly_engine() is engine
+
+
+@pytest.mark.asyncio
+async def test_writes_are_refused_on_the_readonly_dsn_route(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, readonly_dsn: str
+) -> None:
+    """読み取り専用 DSN の経路でも、書き込みは DB 側で拒否されること。"""
+    _pretend_postgresql(db_session, monkeypatch)
+
+    async with readonly_program_sql(db_session) as reader:
+        assert reader is not db_session
+        with pytest.raises(Exception) as exc:  # noqa: PT011 - 方言ごとに例外型が違う
+            await reader.execute(text("INSERT INTO t_ro VALUES ('P2', 'x')"))
+    assert "readonly" in str(exc.value).lower(), exc.value
+
+    engine = readonly_db.get_readonly_engine()
+    assert engine is not None
+    async with engine.connect() as conn:
+        count = (await conn.execute(text("SELECT COUNT(*) FROM t_ro"))).scalar_one()
+    assert count == 1
+
+
+@pytest.mark.asyncio
+async def test_dispose_drops_the_cached_engine(readonly_dsn: str) -> None:
+    """シャットダウン時の破棄でキャッシュが空になり、次の利用で作り直されること。"""
+    first = readonly_db.get_readonly_engine()
+    await readonly_db.dispose_readonly_engine()
+    second = readonly_db.get_readonly_engine()
+    assert first is not None and second is not None
+    assert first is not second
+
+
+@pytest.mark.asyncio
+async def test_without_readonly_dsn_it_uses_a_separate_readonly_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """READONLY_DATABASE_URL が無い非 SQLite では、アプリのエンジンから**別接続**を取り、
+    読み取り専用トランザクションの中で読むこと（従来の「実行しない」から変えた）。
+
+    同じセッションのトランザクションを読み取り専用にしないので、後続の書き込みは止まらない。
+    """
+    monkeypatch.setattr(settings, "readonly_database_url", "")
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'app.db'}")
+    async with engine.begin() as conn:
+        await conn.execute(text("CREATE TABLE t_ro (patient_id TEXT, v TEXT)"))
+        await conn.execute(text("INSERT INTO t_ro VALUES ('P1', 'from-app-engine')"))
+    try:
+        async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+            _pretend_postgresql(session, monkeypatch)
+            async with readonly_program_sql(session) as reader:
+                assert reader is not session
+                value = (await reader.execute(text("SELECT v FROM t_ro"))).scalar_one()
+                with pytest.raises(Exception, match="readonly"):
+                    await reader.execute(text("INSERT INTO t_ro VALUES ('P2', 'x')"))
+            assert value == "from-app-engine"
+            # 関門の外の、セッション自身の書き込みは通る
+            await session.execute(text("INSERT INTO t_ro VALUES ('P3', 'ok')"))
+            await session.commit()
+            count = (await session.execute(text("SELECT COUNT(*) FROM t_ro"))).scalar_one()
+            assert count == 2
+    finally:
+        await engine.dispose()
+
+
+class _SpyConn:
+    def __init__(self) -> None:
+        self.options: dict[str, Any] = {}
+        self.statements: list[str] = []
+        self.rolled_back = False
+
+    async def execution_options(self, **opts: Any) -> _SpyConn:
+        self.options.update(opts)
+        return self
+
+    async def execute(self, stmt: Any, *_args: Any) -> None:
+        self.statements.append(str(stmt))
+
+    async def rollback(self) -> None:
+        self.rolled_back = True
+
+
+class _SpyEngine:
+    def __init__(self, dialect: str) -> None:
+        class _D:
+            name = dialect
+
+        self.dialect = _D()
+        self.conn = _SpyConn()
+
+    @asynccontextmanager
+    async def connect(self) -> AsyncIterator[_SpyConn]:
+        yield self.conn
+
+
+@pytest.mark.asyncio
+async def test_postgresql_route_opens_a_readonly_transaction_and_rolls_back(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """フェイルクローズが step の記録として残ること（黙って成功にしない）。"""
-    import kawasemi.ai_input.executor as executor_mod
+    """PostgreSQL では読み取り専用 DSN のエンジンに `postgresql_readonly=True` を付けて
+    接続し（`BEGIN READ ONLY`）、抜けるときに必ずロールバックすること。"""
+    spy = _SpyEngine("postgresql")
+    monkeypatch.setattr(readonly_db, "get_readonly_engine", lambda: spy)
+    _pretend_postgresql(db_session, monkeypatch)
 
-    def _boom(_db: AsyncSession):  # noqa: ANN202
-        raise ReadOnlySessionUnavailableError("読み取り専用で実行できません（テスト）")
+    with pytest.raises(RuntimeError):
+        async with readonly_program_sql(db_session) as reader:
+            assert reader is spy.conn
+            raise RuntimeError("SQL の失敗")
 
-    monkeypatch.setattr(executor_mod, "readonly_program_sql", _boom)
+    assert spy.conn.options == {"postgresql_readonly": True}
+    assert spy.conn.statements == []
+    assert spy.conn.rolled_back
 
-    program = {
-        "steps": [
-            {"op": "sql_extract", "id": "s", "sql": "SELECT 1 WHERE :patient_id = :patient_id"}
-        ],
-        "return": "$s",
+
+@pytest.mark.asyncio
+async def test_other_dialects_set_the_transaction_read_only(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PostgreSQL 以外の非 SQLite では `SET TRANSACTION READ ONLY` を先に発行すること。"""
+    spy = _SpyEngine("mysql")
+    monkeypatch.setattr(readonly_db, "get_readonly_engine", lambda: spy)
+    _pretend_postgresql(db_session, monkeypatch)
+
+    async with readonly_program_sql(db_session):
+        pass
+
+    assert spy.conn.statements == ["SET TRANSACTION READ ONLY"]
+    assert spy.conn.rolled_back
+
+
+def test_the_warning_fires_only_for_non_sqlite_without_readonly_dsn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """起動時・check_schema の警告は「非 SQLite かつ DSN 未設定」のときだけ出ること。"""
+    monkeypatch.setattr(settings, "readonly_database_url", "")
+    assert readonly_db.readonly_route_warning("sqlite") is None
+    assert readonly_db.readonly_route_warning("postgresql") is not None
+    monkeypatch.setattr(settings, "readonly_database_url", "postgresql+asyncpg://ro@h/db")
+    assert readonly_db.readonly_route_warning("postgresql") is None
+
+
+@pytest.mark.asyncio
+async def test_statistical_profile_aggregates_go_through_the_guard(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """統計プロファイルの自アプリDB集計も同じ関門を通ること。"""
+    import kawasemi.ai_input.statistical_profile as sp
+    from kawasemi.ai_input.models import OpType, SourceCategory
+
+    await db_session.execute(text("CREATE TABLE t_sp (v TEXT)"))
+    await db_session.execute(text("INSERT INTO t_sp VALUES ('a')"))
+
+    entered: list[AsyncSession] = []
+    real = sp.readonly_program_sql
+
+    @asynccontextmanager
+    async def _spy(db: AsyncSession) -> AsyncIterator[Any]:
+        entered.append(db)
+        async with real(db) as reader:
+            yield reader
+
+    monkeypatch.setattr(sp, "readonly_program_sql", _spy)
+    monkeypatch.setattr(sp, "resolve_db_op", lambda *_a: OpType.SQL_EXTRACT)
+
+    candidate = {
+        "source_category": SourceCategory.LOCAL_DB,
+        "payload": {"db_qualified": "t_sp", "physical_name": "v"},
     }
-    interp = DSLInterpreter()
-    prefill, evidence = await interp.execute([_plan("q", program)], "P1", db_session)
+    profile = await sp.generate_statistical_profile(candidate, db_session, min_cell_size=1)
 
-    assert "q" not in prefill
-    trace = evidence["q"]["trace"][0]
-    assert trace["failure_code"] == FailureCode.SOURCE_UNAVAILABLE
-    assert "読み取り専用" in trace["error"]
+    assert entered == [db_session]
+    assert profile["applicable"] is True
+    assert profile["total_count"] == 1
 
 
 @pytest.mark.parametrize(

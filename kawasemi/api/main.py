@@ -384,6 +384,15 @@ async def startup_event() -> None:
     # どの列が無いかを 1 行で出す。
     await _warn_if_the_schema_disagrees()
 
+    # **プログラム SQL の読み取り専用ロールが無いことを起動時に出す**。止めはしない
+    # （読み取り専用トランザクションが書き込みを止める）が、ロールの権限で閉じていない。
+    from kawasemi.core.database import engine as _app_engine
+    from kawasemi.core.readonly_db import readonly_route_warning
+
+    readonly_warning = readonly_route_warning(_app_engine.dialect.name)
+    if readonly_warning:
+        logger.warning(readonly_warning)
+
     # 本番環境でのセキュリティチェック
     if settings.environment == "production":
         # DEBUG=falseの確認
@@ -449,6 +458,9 @@ async def startup_event() -> None:
 async def shutdown_event() -> None:
     """アプリケーション終了時の処理"""
     logger.info(f"{settings.app_name} を終了しています...")
+    from kawasemi.core.readonly_db import dispose_readonly_engine
+
+    await dispose_readonly_engine()
 
 
 @app.get("/health")
