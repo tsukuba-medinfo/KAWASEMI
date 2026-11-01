@@ -16,8 +16,11 @@
 
   1. `READONLY_DATABASE_URL` があれば、その DSN のエンジン（読み取り専用ロール。遅延生成・
      URL 単位でキャッシュし、シャットダウン時に破棄）
-  2. 無ければアプリ本体のエンジン（読み書きロール）。読み取り専用トランザクションが
-     書き込みを止めるが、ロールの権限そのものは広いので、起動時と `check_schema` で警告する
+  2. 無ければ、`ENVIRONMENT=production` では**実行しない**（`ReadOnlySessionUnavailableError`。
+     フェイルクローズ）。読み取り専用トランザクションは書き込みを止めるが、
+     `users.password_hash` のような読み取りまでは止めず、それを閉じるのは専用ロールだけだから。
+     production 以外ではアプリ本体のエンジン（読み書きロール）から別接続を取り、
+     読み取り専用トランザクションで実行する。どちらも起動時と `check_schema` で警告する
 
   別接続にするのは、同じトランザクションを読み取り専用にすると後続の evidence の保存まで
   止まるからである。
@@ -40,12 +43,27 @@ logger = get_logger(__name__)
 # READONLY_DATABASE_URL のエンジン。URL 単位で1つだけ持つ（設定の差し替えに追従する）。
 _readonly_engines: dict[str, AsyncEngine] = {}
 
-UNCONFIGURED_WARNING = (
-    "READONLY_DATABASE_URL が未設定です。sql_extract と統計プロファイルの SQL は"
-    "アプリ本体のロールで、読み取り専用トランザクションの中で実行します。"
-    "ロールの権限で閉じるため、読み取り専用ロールの DSN を設定してください"
+_SET_THE_DSN = (
+    "読み取り専用ロールの DSN を READONLY_DATABASE_URL に設定してください"
     "（docs/DEPLOYMENT.md の「読み取り専用ロール」）。"
 )
+UNCONFIGURED_WARNING = (
+    "READONLY_DATABASE_URL が未設定です。sql_extract と統計プロファイルの SQL は"
+    "アプリ本体のロールで、読み取り専用トランザクションの中で実行します"
+    "（書き込みは止まるが、アプリのロールが読める表はすべて読める）。" + _SET_THE_DSN
+)
+UNCONFIGURED_PRODUCTION_WARNING = (
+    "READONLY_DATABASE_URL が未設定のため、ENVIRONMENT=production では sql_extract と"
+    "統計プロファイルの自アプリDB集計を実行しません（source_unavailable）。" + _SET_THE_DSN
+)
+
+
+class ReadOnlySessionUnavailableError(RuntimeError):
+    """プログラム SQL を読み取り専用ロールで実行する手段が用意できない（production）。"""
+
+
+def _refuses_without_dsn() -> bool:
+    return settings.environment == "production"
 
 
 def get_readonly_engine() -> AsyncEngine | None:
@@ -72,7 +90,7 @@ def readonly_route_warning(app_dialect: str) -> str | None:
     """読み取り専用ロールが無いまま非 SQLite で動いているときの警告文。問題なければ None。"""
     if app_dialect == "sqlite" or settings.readonly_database_url:
         return None
-    return UNCONFIGURED_WARNING
+    return UNCONFIGURED_PRODUCTION_WARNING if _refuses_without_dsn() else UNCONFIGURED_WARNING
 
 
 def readonly_execution_options(dialect: str) -> dict[str, Any]:
@@ -118,6 +136,9 @@ async def readonly_program_sql(db: AsyncSession) -> AsyncIterator[AsyncSession |
     """DSL 由来の SQL を読み取り専用で発行する相手（`execute` を持つ）を貸し出す。
 
     呼び出し側は yield された相手に `execute` する。`db` そのものとは限らない。
+
+    Raises:
+        ReadOnlySessionUnavailableError: 非 SQLite・READONLY_DATABASE_URL 未設定・production
     """
     if db.get_bind().dialect.name == "sqlite":
         await db.execute(text("PRAGMA query_only = ON"))
@@ -127,6 +148,10 @@ async def readonly_program_sql(db: AsyncSession) -> AsyncIterator[AsyncSession |
             await db.execute(text("PRAGMA query_only = OFF"))
         return
 
-    engine = get_readonly_engine() or _app_engine(db)
+    engine = get_readonly_engine()
+    if engine is None:
+        if _refuses_without_dsn():
+            raise ReadOnlySessionUnavailableError(UNCONFIGURED_PRODUCTION_WARNING)
+        engine = _app_engine(db)
     async with _readonly_transaction(engine) as conn:
         yield conn

@@ -6,8 +6,9 @@
 **ブロックリストは取りこぼすので、保証を文字列検査に置かない**——DB 側の権限で閉じる。
 
 ここでは (1) 実行が読み取り専用の関門を通ること、(2) SQLite 以外では
-`READONLY_DATABASE_URL` のエンジン（無ければアプリのエンジン）から別接続を取り、
-読み取り専用トランザクションの中で読むこと、(3) 文字列検査側の多層防御（集合演算・INTO 等）を
+`READONLY_DATABASE_URL` のエンジン（無ければ production 以外に限りアプリのエンジン）から
+別接続を取り、読み取り専用トランザクションの中で読むこと、production で DSN が無ければ
+**実行しない**こと（フェイルクローズ）、(3) 文字列検査側の多層防御（集合演算・INTO 等）を
 固定する。PostgreSQL 上の実挙動は `test_program_sql_readonly_postgres.py` が見る。
 """
 
@@ -24,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from kawasemi.ai_input.dsl import is_select_only_sql
 from kawasemi.ai_input.executor import DSLInterpreter
-from kawasemi.ai_input.models import InputPlan
+from kawasemi.ai_input.models import FailureCode, InputPlan
 from kawasemi.core import readonly_db
 from kawasemi.core.config import settings
 from kawasemi.core.readonly_db import readonly_program_sql
@@ -178,12 +179,13 @@ async def test_dispose_drops_the_cached_engine(readonly_dsn: str) -> None:
 async def test_without_readonly_dsn_it_uses_a_separate_readonly_connection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """READONLY_DATABASE_URL が無い非 SQLite では、アプリのエンジンから**別接続**を取り、
-    読み取り専用トランザクションの中で読むこと（従来の「実行しない」から変えた）。
+    """production 以外で READONLY_DATABASE_URL が無い非 SQLite では、アプリのエンジンから
+    **別接続**を取り、読み取り専用トランザクションの中で読むこと。
 
     同じセッションのトランザクションを読み取り専用にしないので、後続の書き込みは止まらない。
     """
     monkeypatch.setattr(settings, "readonly_database_url", "")
+    monkeypatch.setattr(settings, "environment", "development")
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'app.db'}")
     async with engine.begin() as conn:
         await conn.execute(text("CREATE TABLE t_ro (patient_id TEXT, v TEXT)"))
@@ -275,12 +277,107 @@ async def test_other_dialects_set_the_transaction_read_only(
 def test_the_warning_fires_only_for_non_sqlite_without_readonly_dsn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """起動時・check_schema の警告は「非 SQLite かつ DSN 未設定」のときだけ出ること。"""
+    """起動時・check_schema の警告は「非 SQLite かつ DSN 未設定」のときだけ出ること。
+    production では「実行しない」旨の文面になること。"""
     monkeypatch.setattr(settings, "readonly_database_url", "")
-    assert readonly_db.readonly_route_warning("sqlite") is None
-    assert readonly_db.readonly_route_warning("postgresql") is not None
+    for env in ("development", "staging", "production"):
+        monkeypatch.setattr(settings, "environment", env)
+        assert readonly_db.readonly_route_warning("sqlite") is None
+    monkeypatch.setattr(settings, "environment", "development")
+    assert readonly_db.readonly_route_warning("postgresql") == readonly_db.UNCONFIGURED_WARNING
+    monkeypatch.setattr(settings, "environment", "production")
+    assert (
+        readonly_db.readonly_route_warning("postgresql")
+        == readonly_db.UNCONFIGURED_PRODUCTION_WARNING
+    )
     monkeypatch.setattr(settings, "readonly_database_url", "postgresql+asyncpg://ro@h/db")
     assert readonly_db.readonly_route_warning("postgresql") is None
+
+
+# --- production で読み取り専用ロールが無いとき: 実行しない（フェイルクローズ） ---------
+
+
+@pytest.fixture
+def production_without_dsn(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "readonly_database_url", "")
+    monkeypatch.setattr(settings, "environment", "production")
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("production_without_dsn")
+async def test_production_refuses_without_readonly_dsn(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """production の非 SQLite で DSN が無ければ、関門は接続を取らずに拒否すること。"""
+    spy = _SpyEngine("postgresql")
+    monkeypatch.setattr(readonly_db, "_app_engine", lambda _db: spy)
+    _pretend_postgresql(db_session, monkeypatch)
+
+    with pytest.raises(readonly_db.ReadOnlySessionUnavailableError):
+        async with readonly_program_sql(db_session):
+            pass  # pragma: no cover - 入る前に落ちる
+    assert spy.conn.statements == [] and not spy.conn.options
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("production_without_dsn")
+async def test_production_sql_extract_records_source_unavailable(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """拒否は `sql_extract` の step に source_unavailable として残ること（黙って成功にしない）。"""
+    _pretend_postgresql(db_session, monkeypatch)
+
+    prefill, evidence = await DSLInterpreter().execute([_plan("q", _RO_PROGRAM)], "P1", db_session)
+
+    assert "q" not in prefill
+    trace = evidence["q"]["trace"][0]
+    assert trace["failure_code"] == FailureCode.SOURCE_UNAVAILABLE
+    assert "READONLY_DATABASE_URL" in trace["error"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("production_without_dsn")
+async def test_production_statistical_profile_is_not_applicable(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """統計プロファイルの自アプリDB集計も production では実行しないこと。"""
+    import kawasemi.ai_input.statistical_profile as sp
+    from kawasemi.ai_input.models import OpType, SourceCategory
+
+    _pretend_postgresql(db_session, monkeypatch)
+    monkeypatch.setattr(sp, "resolve_db_op", lambda *_a: OpType.SQL_EXTRACT)
+    candidate = {
+        "source_category": SourceCategory.LOCAL_DB,
+        "payload": {"db_qualified": "t_sp", "physical_name": "v"},
+    }
+    profile = await sp.generate_statistical_profile(candidate, db_session, min_cell_size=1)
+
+    assert profile["applicable"] is False
+    assert "READONLY_DATABASE_URL" in profile["reason"]
+
+
+@pytest.mark.asyncio
+async def test_production_with_readonly_dsn_reads(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, readonly_dsn: str
+) -> None:
+    """production でも DSN があれば読み取り専用ロールの経路で読めること。"""
+    monkeypatch.setattr(settings, "environment", "production")
+    _pretend_postgresql(db_session, monkeypatch)
+
+    prefill, evidence = await DSLInterpreter().execute([_plan("q", _RO_PROGRAM)], "P1", db_session)
+    assert prefill["q"] == "from-readonly-dsn", evidence
+
+
+@pytest.mark.asyncio
+async def test_sqlite_is_unaffected_by_production(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SQLite は production でも DSN 不要のまま（`PRAGMA query_only`）であること。"""
+    monkeypatch.setattr(settings, "readonly_database_url", "")
+    monkeypatch.setattr(settings, "environment", "production")
+    async with readonly_program_sql(db_session) as reader:
+        assert reader is db_session
+        assert (await reader.execute(text("SELECT 1"))).scalar() == 1
 
 
 @pytest.mark.asyncio

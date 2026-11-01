@@ -68,7 +68,7 @@ from kawasemi.ai_input.resource_index.derive import (
     resolve_db_op,
 )
 from kawasemi.core.logging_config import get_logger
-from kawasemi.core.readonly_db import readonly_program_sql
+from kawasemi.core.readonly_db import ReadOnlySessionUnavailableError, readonly_program_sql
 
 logger = get_logger(__name__)
 
@@ -372,6 +372,10 @@ async def generate_statistical_profile(
                 )
             finally:
                 await engine.dispose()
+    except ReadOnlySessionUnavailableError as e:
+        # フェイルクローズ（production で読み取り専用ロールが無い）。黙って読み書きで実行しない
+        logger.error(f"統計プロファイルの集計を実行しませんでした: {e}")
+        return _not_applicable(str(e), source_category)
     except SQLAlchemyError as e:
         logger.warning(f"統計プロファイル生成に失敗: table={table} column={column} error={e}")
         return _not_applicable(

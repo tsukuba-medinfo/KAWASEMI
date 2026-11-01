@@ -10,6 +10,7 @@
   書き込みをする VOLATILE 関数、トランザクションの読み書きモードへの切り戻し）
 - 文字列検査を**通る**形（関数呼び出しの SELECT）を `sql_extract` で流しても書けないこと
 - READONLY_DATABASE_URL を設定すると、その DSN のロールで読むこと
+- production で READONLY_DATABASE_URL が無ければ実行しないこと
 """
 
 from __future__ import annotations
@@ -82,6 +83,7 @@ async def app_session(
     pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
 ) -> AsyncIterator[AsyncSession]:
     monkeypatch.setattr(settings, "readonly_database_url", "")
+    monkeypatch.setattr(settings, "environment", "development")
     async with async_sessionmaker(pg_engine, expire_on_commit=False)() as session:
         yield session
 
@@ -106,7 +108,8 @@ SMUGGLED_IDS = ["cte_insert", "cte_update", "volatile_function"]
 async def test_smuggled_writes_fail_in_the_readonly_transaction(
     app_session: AsyncSession, pg_engine: AsyncEngine, sql: str
 ) -> None:
-    """READONLY_DATABASE_URL 無し（アプリのロール）でも、書き込みは 25006 で止まること。"""
+    """READONLY_DATABASE_URL 無し（production 以外。アプリのロール）でも、
+    書き込みは 25006 で止まること。"""
     with pytest.raises(DBAPIError) as exc:
         async with readonly_program_sql(app_session) as reader:
             assert reader is not app_session
@@ -215,3 +218,33 @@ async def test_smuggled_writes_fail_on_the_readonly_dsn_route(
         async with readonly_program_sql(app_session) as reader:
             await reader.execute(text(sql))
     assert await _rows(pg_engine) == [("P1", "original")]
+
+
+@pytest.mark.asyncio
+async def test_production_without_readonly_dsn_does_not_run(
+    app_session: AsyncSession, pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """production で DSN が無ければ、`sql_extract` は実行されず source_unavailable になること。"""
+    from kawasemi.ai_input.models import FailureCode
+
+    monkeypatch.setattr(settings, "environment", "production")
+    prefill, evidence = await DSLInterpreter().execute(
+        [_plan(f"SELECT v FROM {TABLE} WHERE patient_id = :patient_id")], "P1", app_session
+    )
+
+    assert "q" not in prefill
+    assert evidence["q"]["trace"][0]["failure_code"] == FailureCode.SOURCE_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_production_with_readonly_dsn_reads(
+    app_session: AsyncSession, readonly_role: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """production でも DSN があれば読み取り専用ロールで読めること。"""
+    monkeypatch.setattr(settings, "environment", "production")
+    async with readonly_program_sql(app_session) as reader:
+        assert (await reader.execute(text("SELECT current_user"))).scalar() == readonly_role
+    prefill, _ = await DSLInterpreter().execute(
+        [_plan(f"SELECT v FROM {TABLE} WHERE patient_id = :patient_id")], "P1", app_session
+    )
+    assert prefill["q"] == "original"

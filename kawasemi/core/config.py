@@ -252,9 +252,11 @@ class Settings(BaseSettings):
     # SQLite では `PRAGMA query_only` で接続スコープに閉じられるのでこの設定は不要。
     # **PostgreSQL 等では読み取り専用ロールの DSN をここに置く**。設定するとプログラム SQL
     # （`sql_extract` と統計プロファイルの自アプリDB集計）はこの DSN の別エンジンで、
-    # 読み取り専用トランザクションの中で実行される。未設定でもアプリ本体のエンジンから
-    # 別接続を取り、読み取り専用トランザクションで実行するが、ロールの権限は広いままなので
-    # 起動時と `kawasemi check_schema` で警告する（`kawasemi/core/readonly_db.py`）。
+    # 読み取り専用トランザクションの中で実行される。未設定のとき、ENVIRONMENT=production では
+    # 実行しない（フェイルクローズ。読み取り専用トランザクションは `users.password_hash` の
+    # ような読み取りを止めない）。production 以外ではアプリ本体のエンジンから別接続を取り、
+    # 読み取り専用トランザクションで実行する。どちらも起動時と `kawasemi check_schema` で
+    # 警告する（`kawasemi/core/readonly_db.py`）。
     readonly_database_url: str = Field(
         default="",
         description="プログラムSQL専用の読み取り専用DSN（PostgreSQL等。SQLiteでは不要）",

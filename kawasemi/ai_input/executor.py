@@ -54,7 +54,7 @@ from kawasemi.ai_input.resource_index.connections import get_registry
 from kawasemi.core.config import settings
 from kawasemi.core.exceptions import FHIRServerException
 from kawasemi.core.logging_config import get_logger
-from kawasemi.core.readonly_db import readonly_program_sql
+from kawasemi.core.readonly_db import ReadOnlySessionUnavailableError, readonly_program_sql
 from kawasemi.utils.fhir_client import FHIRClient
 
 logger = get_logger(__name__)
@@ -1427,9 +1427,19 @@ class DSLInterpreter:
         # **読み取り専用の関門を通す**。文字列検査（`is_select_only_sql`）は
         # 多層防御の1枚で、保証の根拠はこちら側にある。SQLite 以外では `db` ではなく
         # 読み取り専用トランザクションの別接続が貸し出される（`kawasemi.core.readonly_db`）。
-        async with readonly_program_sql(db) as reader:
-            result = await reader.execute(text(rendered), binds)
-            rows = result.fetchall()
+        try:
+            async with readonly_program_sql(db) as reader:
+                result = await reader.execute(text(rendered), binds)
+                rows = result.fetchall()
+        except ReadOnlySessionUnavailableError as e:
+            # フェイルクローズ。**読めないことを失敗として記録する**（黙って読み書きで実行しない）
+            logger.error(f"プログラム SQL を実行しませんでした: {_exc_msg(e)}")
+            return None, {
+                **base,
+                "output": None,
+                "error": _exc_msg(e),
+                "failure_code": FailureCode.SOURCE_UNAVAILABLE,
+            }
         if step.get("multi"):
             output: Any = [r[0] for r in rows]
         else:

@@ -137,9 +137,13 @@ READONLY_DATABASE_URL=postgresql+asyncpg://kawasemi_ro:...@postgres:5432/kawasem
   （`users` など）は、運用で許せるなら `REVOKE SELECT ON users FROM kawasemi_ro;` で外せます。
 - 設定すると、プログラム SQL はこの DSN の別エンジン（初回利用時に生成し、終了時に破棄）で、
   **読み取り専用トランザクション**（`BEGIN READ ONLY`）の中で実行され、毎回ロールバックされます。
-- **未設定でも動きます**が、アプリ本体のロールから別接続を取り、読み取り専用トランザクションで
-  実行するだけになります。書き込みはトランザクションが止めますが、ロールの読み取り範囲や
-  サーバ関数の権限は広いままです。この状態は起動時のログと `kawasemi check_schema` が警告します。
+- **未設定のとき、`ENVIRONMENT=production` では `sql_extract` と統計プロファイルの
+  自アプリDB集計を実行しません**（`sql_extract` は `source_unavailable` として記録）。
+  読み取り専用トランザクションは書き込みを止めますが、`users.password_hash` のような
+  読み取りは止めません。それを閉じられるのは専用ロールだけだからです。
+- production 以外（development / staging）で未設定のときは、アプリ本体のロールから別接続を取り、
+  読み取り専用トランザクションで実行します。
+- どちらの場合も、未設定であることを起動時のログと `kawasemi check_schema` が警告します。
 - SQLite では `PRAGMA query_only` で閉じるので、この設定は不要です（設定しても使いません）。
 
 ## 本番環境へのデプロイ
