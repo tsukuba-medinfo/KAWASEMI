@@ -133,7 +133,8 @@ def test_mermaid_neutralizes_angle_brackets_in_reasoning() -> None:
 
 
 def test_program_snapshot_captures_program_and_version() -> None:
-    """program_snapshot が program（reasoning込み）と版情報(plan_id/plan_updated_at)を固定する。"""
+    """program_snapshot が program（reasoning込み）・版情報(plan_id/plan_updated_at)・
+    承認の帰属(confirmed_by_id/confirmed_at)を固定する。"""
     plan = _plan(
         "item1",
         {
@@ -142,7 +143,13 @@ def test_program_snapshot_captures_program_and_version() -> None:
         },
     )
     snap = program_snapshot([plan])
-    assert set(snap["item1"]) == {"program", "plan_id", "plan_updated_at"}
+    assert set(snap["item1"]) == {
+        "program",
+        "plan_id",
+        "plan_updated_at",
+        "confirmed_by_id",
+        "confirmed_at",
+    }
     assert snap["item1"]["program"]["steps"][0]["reasoning"] == "根拠X"
 
 

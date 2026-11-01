@@ -19,6 +19,7 @@ import io
 import json
 import re
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
@@ -334,25 +335,100 @@ def _step_trace_base(step: dict[str, Any]) -> dict[str, Any]:
     return {"op": step.get("op"), "id": step.get("id"), "reasoning": step.get("reasoning")}
 
 
-def program_snapshot(plans: list[Any]) -> dict[str, Any]:
+def utc_isoformat(value: datetime | None) -> str | None:
+    """日時を UTC の aware な ISO 8601 文字列にする（DB に依らず同じ表記）。
+
+    SQLite は `DateTime(timezone=True)` でも naive で返し、PostgreSQL は aware で返す。
+    そのまま `isoformat()` すると同じ時刻が DB によって `+00:00` の有無で違う文字列になり、
+    実行記録と承認の突き合わせが表記で外れる。naive は UTC とみなす（保存側は UTC で書く）。
+    """
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(UTC).isoformat()
+
+
+def effective_llm_model(step: dict[str, Any], override: str | None) -> tuple[str, str]:
+    """LLM op が実際に使うモデルと、その出所を返す。
+
+    選択は「実行時指定 → step.llm_model → 既定（settings.ollama_model）」の3段である。
+    出所は "request_override" / "step" / "default"。`_op_llm` と `program_snapshot` が
+    同じ規則を使うためにここに置く（二重実装すると記録と実行が食い違う）。
+    """
+    if override:
+        return override.strip(), "request_override"
+    if step.get("llm_model"):
+        return str(step["llm_model"]).strip(), "step"
+    return settings.ollama_model.strip(), "default"
+
+
+def overridden_from(step: dict[str, Any], effective: str, source: str) -> str | None:
+    """実行時指定が承認された step.llm_model と違うモデルに替えたとき、承認されたモデルを返す。
+
+    比較は前後の空白を除いて行う（`effective_llm_model` が strip した値を返すため、
+    承認側に空白が残っていると同じモデルでも「替えた」と誤記録する）。
+    """
+    approved = step.get("llm_model")
+    if source != "request_override" or not isinstance(approved, str) or not approved.strip():
+        return None
+    return approved if approved.strip() != effective.strip() else None
+
+
+def _llm_models_of(program: dict[str, Any], override: str | None) -> dict[str, dict[str, Any]]:
+    """program 内の LLM op ごとに、承認されたモデルと実行時に使うモデルを並べる。"""
+    out: dict[str, dict[str, Any]] = {}
+    for step in program.get("steps", []) or []:
+        if not isinstance(step, dict) or step.get("op") not in (
+            OpType.LLM_EXTRACT,
+            OpType.LLM_JUDGE,
+        ):
+            continue
+        effective, source = effective_llm_model(step, override)
+        approved = step.get("llm_model")
+        entry: dict[str, Any] = {"effective": effective, "source": source, "approved": approved}
+        replaced = overridden_from(step, effective, source)
+        if replaced is not None:
+            entry["overridden_from"] = replaced
+        out[str(step.get("id"))] = entry
+    return out
+
+
+def program_snapshot(plans: list[Any], llm_model_override: str | None = None) -> dict[str, Any]:
     """実行に使った各プランの program（reasoning 込み）と版情報を固定する。
 
-    confirmed プランは版管理なしで in-place 編集され得るため（routes の save_plan）、
+    プランは版管理が無く、実行後に編集・再確認で上書きされ得るため（routes の save_plan）、
     実行時点の program・plan_id・updated_at を InputExecution.program_snapshot に固定
     保存し、後日の監査で「どの版の・どの設計根拠のプログラムで実行したか」を確定的に
     復元できるようにする（CSV / データインテグリティ: Original・Consistent）。
 
     本番の全実行経路（単発 autofill / stream / バッチ）から共通で使う。試行(trial)は
     結果を永続しないため呼び出し側で None を渡す。
+
+    確認（承認）の帰属 confirmed_by_id / confirmed_at も併せて固定する。確認済みプランは
+    program を変えると draft へ戻るため（save_plan）、(plan_id, confirmed_at) は
+    「どの承認の下で実行したか」を一意に指し、snapshot の program がその承認の対象と
+    同一であることを後から突き合わせられる。プランが後日編集・再確認されても、実行記録の
+    側に承認者が残る。日時は DB に依らず UTC の aware な ISO 表記で書く。
+
+    LLM op があれば `llm_models` に step ごとの実効モデルを残す（`effective_llm_model`）。
+    実行時のモデル指定は承認された step の `llm_model` に優先するので、承認と違うモデルで
+    動いたときは `overridden_from` に承認されたモデルを書く。
     """
     snapshot: dict[str, Any] = {}
     for p in plans:
-        updated_at = getattr(p, "updated_at", None)
-        snapshot[p.link_id] = {
-            "program": p.program or {},
+        program = p.program or {}
+        entry: dict[str, Any] = {
+            "program": program,
             "plan_id": getattr(p, "id", None),
-            "plan_updated_at": updated_at.isoformat() if updated_at else None,
+            "plan_updated_at": utc_isoformat(getattr(p, "updated_at", None)),
+            "confirmed_by_id": getattr(p, "confirmed_by_id", None),
+            "confirmed_at": utc_isoformat(getattr(p, "confirmed_at", None)),
         }
+        llm_models = _llm_models_of(program, llm_model_override)
+        if llm_models:
+            entry["llm_models"] = llm_models
+        snapshot[p.link_id] = entry
     return snapshot
 
 
@@ -2066,7 +2142,7 @@ class DSLInterpreter:
         # 語彙を閉じると取り出せる値が無くなる。
         if judge:
             prompt = f"{prompt}\n\n{_JUDGE_INSTRUCTION}"
-        selected_model = (model or step.get("llm_model") or settings.ollama_model).strip()
+        selected_model, model_source = effective_llm_model(step, model)
 
         response = await self._ollama_client.chat(
             model=selected_model,
@@ -2129,7 +2205,13 @@ class DSLInterpreter:
             "options": dict(_LLM_OPTIONS),
             "prompt": prompt,
             "raw_output": raw_text,
+            # どの段でモデルが決まったか。実行時指定は承認された step.llm_model に優先する
+            # ので、承認と違うモデルで動いたことを trace だけで読めるようにする。
+            "model_source": model_source,
         }
+        replaced = overridden_from(step, selected_model, model_source)
+        if replaced is not None:
+            llm["overridden_from"] = replaced
         # **モデルの中身のダイジェストも残す**（設計ロールでも記録している）。
         # タグだけでは、`ollama pull` で上流が更新されても同名タグを作り直しても記録が
         # 変わらない。取れなかったときは理由つきの null で、**「記録していない」とは区別

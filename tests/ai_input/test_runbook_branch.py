@@ -629,6 +629,7 @@ async def test_save_response_reports_no_drop_for_the_normal_path(
     resp = await designer_client.post(
         f"/ai-input/questionnaires/{q.id}/runbook/item1?confirm=true",
         json={
+            "base_version": None,
             "steps": [
                 {"order": 1, "title": "判定", "action_type": "condition"},
                 {"order": 2, "title": "分岐", "action_type": "branch"},
@@ -639,7 +640,7 @@ async def test_save_response_reports_no_drop_for_the_normal_path(
                 # 空白のみは検証側が strip して「タグ無し」と扱うので、報告側も揃える。
                 {"order": 5, "title": "空文字タグ", "action_type": ""},
                 {"order": 6, "title": "空白のみのタグ", "action_type": "   "},
-            ]
+            ],
         },
         headers={"X-CSRF-Token": csrf_token},
     )

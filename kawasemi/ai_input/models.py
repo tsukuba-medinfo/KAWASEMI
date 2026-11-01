@@ -1180,10 +1180,13 @@ class InputExecution(Base, TimestampMixin):
     )
 
     # 実行時に使用した DSL プログラムのスナップショット（各 step の reasoning 込み）。
-    # confirmed プランは版管理なしで in-place 編集され得るため、実行記録がどの版の
+    # プランは版管理が無く、実行後に編集・再確認で上書きされ得るため、実行記録がどの版の
     # プログラム・どの設計根拠で動いたかを固定保存し、後日の監査で実行ロジックを
     # 確定的に復元できるようにする（CSV / データインテグリティ: Original・Consistent）。
-    # 形式: {link_id: {"program": {...}, "plan_id": int|null, "plan_updated_at": iso8601|null}}
+    # 形式: {link_id: {"program": {...}, "plan_id": int|null, "plan_updated_at": iso8601|null,
+    #                  "confirmed_by_id": int|null, "confirmed_at": iso8601|null}}
+    # confirmed_by_id / confirmed_at は後から加えたキーで、旧記録には無い（JSON 列なので
+    # 移行は不要）。
     program_snapshot: Mapped[dict[str, Any] | None] = mapped_column(
         JSON,
         nullable=True,

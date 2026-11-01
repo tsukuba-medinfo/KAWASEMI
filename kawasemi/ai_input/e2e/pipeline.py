@@ -264,6 +264,7 @@ async def run_pipeline(cfg: PipelineConfig) -> PipelineResult:
     from kawasemi.ai_input.resource_index import connections as conn_mod
     from kawasemi.ai_input.resource_index import key_types as kt_mod
     from kawasemi.ai_input.resource_index.store import get_store, reset_store_cache
+    from kawasemi.ai_input.routes import plan_version, runbook_version
     from kawasemi.api.main import app
     from kawasemi.core.database import get_db
     from kawasemi.core.entry import reset_entry_cache
@@ -527,9 +528,10 @@ async def run_pipeline(cfg: PipelineConfig) -> PipelineResult:
                 if rb is None or not rb.steps:
                     it.set("c", False, "手順書が生成されなかった")
                     continue
+                # 確認には画面と同じく「見た版」を添える（routes.runbook_version）
                 r = await client.post(
                     f"{q}/runbook/{lid}?confirm=true",
-                    json={"steps": rb.steps},
+                    json={"steps": rb.steps, "base_version": runbook_version(rb)},
                     headers={"X-CSRF-Token": csrf},
                 )
                 if r.status_code != 200:
@@ -563,7 +565,7 @@ async def run_pipeline(cfg: PipelineConfig) -> PipelineResult:
                 assert plan is not None
                 r = await client.post(
                     f"{q}/plan/{lid}?confirm=true",
-                    json={"program": plan.program},
+                    json={"program": plan.program, "base_version": plan_version(plan)},
                     headers={"X-CSRF-Token": csrf},
                 )
                 it.set(

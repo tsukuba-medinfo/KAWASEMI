@@ -1422,7 +1422,7 @@ async def test_confirming_an_empty_program_succeeds_but_warns(
 
     resp = await designer_client.post(
         f"/ai-input/questionnaires/{q.id}/plan/item0?confirm=true",
-        json={"program": program},
+        json={"base_version": None, "program": program},
         headers={"X-CSRF-Token": csrf_token},
     )
 

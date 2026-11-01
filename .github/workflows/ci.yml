@@ -173,3 +173,12 @@ jobs:
         run: |
           uv sync --extra dev
           uv run pytest tests/ai_input/test_program_sql_readonly_postgres.py -v --tb=short
+
+      # 取得プラン・手順書の保存の同時実行（行ロック・楽観的排他・同時の新規作成）。
+      # SQLite は FOR UPDATE を無視し書き込みを DB 全体で直列化するので、行ロックが効いて
+      # いるかはここでしか確かめられない。**このテストは全テーブルを drop して作り直す**
+      # ので、移行の検査と上の読み取り専用テストより後に、別の pytest 起動で回す。
+      - name: 取得プラン保存の同時実行（PostgreSQL）
+        env:
+          KAWASEMI_TEST_POSTGRES_URL: postgresql+asyncpg://kawasemi:kawasemi@localhost:5432/kawasemi
+        run: uv run pytest tests/ai_input/test_plan_concurrency_postgres.py -v --tb=short -rs

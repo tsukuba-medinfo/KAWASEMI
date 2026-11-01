@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 from collections.abc import AsyncIterator
@@ -20,6 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from fastapi_csrf_protect import CsrfProtect
+from pydantic import ValidationError
 from sqlalchemy import case, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,7 +32,7 @@ from kawasemi.ai_input.clinical_drafter import AIClinicalDrafter
 from kawasemi.ai_input.compiler import AIPlanCompiler
 from kawasemi.ai_input.design_provenance import DesignLlmRecorder, save_design_llm_calls_safely
 from kawasemi.ai_input.dsl import has_needs_input, is_empty_program, validate_program
-from kawasemi.ai_input.executor import DSLInterpreter, program_snapshot
+from kawasemi.ai_input.executor import DSLInterpreter, program_snapshot, utc_isoformat
 from kawasemi.ai_input.labels import STAGES
 from kawasemi.ai_input.llm_provider import design_llm_model
 from kawasemi.ai_input.metrics import AcquisitionSummary, acquisition_summary
@@ -72,8 +74,10 @@ from kawasemi.ai_input.schemas import (
     AutofillRequest,
     ClinicalAnnotationDraftRequest,
     DraftState,
+    DSLProgram,
     LocationAssessmentIn,
     PlanCompileRequest,
+    PlanDemoteRequest,
     PlanSaveRequest,
     RunbookGenerateRequest,
     RunbookSaveRequest,
@@ -560,6 +564,130 @@ async def _plan_map(questionnaire_id: int, db: AsyncSession) -> dict[str, InputP
         .order_by(InputPlan.id)
     )
     return {p.link_id: p for p in result.scalars().all()}
+
+
+async def _lock_row(db: AsyncSession, row: InputRunbook | InputPlan | None) -> None:
+    """保存の読み比べ〜書き込みの間、対象行を行ロックで押さえ、最新の値で読み直す。
+
+    楽観的排他の版比較（`_version_conflict`）と「内容が変わったか」の判定を、他の要求が
+    同じ行を書き換えている途中の値で行わないためである。PostgreSQL では `FOR UPDATE`、
+    SQLite では句が無視されるが書き込みは DB 全体で直列化される。
+    """
+    if row is None:
+        return
+    model = type(row)
+    await db.execute(
+        select(model)
+        .where(model.id == row.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+
+
+def _version_token(payload: dict[str, Any]) -> str:
+    text = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def plan_version(plan: InputPlan | None) -> str | None:
+    """取得プランの版トークン（楽観的排他用）。行が無ければ None。
+
+    `updated_at` ではなく内容から作る。`updated_at` は DB の `now()` で、SQLite では秒
+    単位なので同じ秒の2回の保存を区別できない。版に入れるのは、上書きされると困るもの
+    すべて（program・status・確認者・確認日時）である。
+    """
+    if plan is None:
+        return None
+    return _version_token(
+        {
+            "program": _program_canonical(plan.program),
+            "status": plan.status,
+            "confirmed_by_id": plan.confirmed_by_id,
+            "confirmed_at": utc_isoformat(plan.confirmed_at),
+        }
+    )
+
+
+def runbook_version(rb: InputRunbook | None) -> str | None:
+    """手順書の版トークン（`plan_version` と同じ考え方）。"""
+    if rb is None:
+        return None
+    return _version_token(
+        {
+            "steps": _runbook_canonical(rb.steps),
+            "status": rb.status,
+            "confirmed_by_id": rb.confirmed_by_id,
+            "confirmed_at": utc_isoformat(rb.confirmed_at),
+        }
+    )
+
+
+def _version_conflict(
+    payload: PlanSaveRequest | PlanDemoteRequest | RunbookSaveRequest,
+    current: str | None,
+    *,
+    required: bool,
+) -> JSONResponse | None:
+    """送られた版がサーバの現在の版と違えば 409 を返す。
+
+    **確認（confirm=true）と下書きへ戻す操作では版を必須にする**（無ければ 428）。
+    どちらも「人が見た内容」に対する判断なので、何を見て判断したかを版で示させる。
+    明示の null は「行がまだ無い」の意味で受け付ける。confirm=false の下書き保存だけは
+    省略を許し、省略時は検査しない（API・移行スクリプトの互換）。
+    """
+    if "base_version" not in payload.model_fields_set:
+        if not required:
+            return None
+        return JSONResponse(
+            {
+                "success": False,
+                "message": (
+                    "確認・下書きへ戻す操作には base_version（画面で読み込んだ時点の版。"
+                    "行がまだ無ければ null）が必要です"
+                ),
+                "version": current,
+            },
+            status_code=428,
+        )
+    if payload.base_version == current:
+        return None
+    return JSONResponse(
+        {
+            "success": False,
+            "conflict": True,
+            "message": (
+                "この項目は画面を開いた後に別の操作で更新されています。"
+                "上書きしないよう保存を止めました。再読み込みして内容を確かめてください"
+            ),
+            "version": current,
+        },
+        status_code=409,
+    )
+
+
+async def _commit_or_conflict(db: AsyncSession) -> JSONResponse | None:
+    """commit し、同じ項目の行を同時に新規作成して一意制約に当たったら 409 にする。
+
+    行がまだ無いときは `_lock_row` で押さえる行が無いので、2つの要求がともに「無い」と
+    読んで INSERT し得る。後着は一意制約（questionnaire_id, link_id）で落ちる。500 では
+    なく、版の競合と同じ 409 で返す。
+    """
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        return JSONResponse(
+            {
+                "success": False,
+                "conflict": True,
+                "message": (
+                    "この項目は同時に別の操作で作成されました。"
+                    "上書きしないよう保存を止めました。再読み込みして内容を確かめてください"
+                ),
+            },
+            status_code=409,
+        )
+    return None
 
 
 def _is_designed(ann: ClinicalAnnotation | None, loc: SystemLocation | None) -> bool:
@@ -2510,6 +2638,7 @@ def _build_runbook_items(
                 "has_runbook": rb is not None,
                 "stale": stale,
                 "llm_model": (rb.llm_model if rb else None),
+                "version": runbook_version(rb),
             }
         )
     return items
@@ -2563,7 +2692,7 @@ async def _upsert_runbook(
     confirmed_by_id: int | None = None,
     confirmed_at: datetime | None = None,
     dropped_action_types: list[dict[str, Any]] | None = None,
-) -> None:
+) -> InputRunbook:
     # **落ちたタグが無ければ null を書く**。保存のたびに上書きするので、
     # 前の保存で落ちた記録が「今の手順書に語彙外タグがある」と読まれることはない。
     dropped = dropped_action_types or None
@@ -2577,20 +2706,20 @@ async def _upsert_runbook(
         rb.dropped_action_types = dropped
         if llm_model is not None:
             rb.llm_model = llm_model
-    else:
-        db.add(
-            InputRunbook(
-                questionnaire_id=questionnaire_id,
-                link_id=link_id,
-                item_text=item_text,
-                steps=steps,
-                status=status,
-                llm_model=llm_model,
-                confirmed_by_id=confirmed_by_id,
-                confirmed_at=confirmed_at,
-                dropped_action_types=dropped,
-            )
-        )
+        return rb
+    rb = InputRunbook(
+        questionnaire_id=questionnaire_id,
+        link_id=link_id,
+        item_text=item_text,
+        steps=steps,
+        status=status,
+        llm_model=llm_model,
+        confirmed_by_id=confirmed_by_id,
+        confirmed_at=confirmed_at,
+        dropped_action_types=dropped,
+    )
+    db.add(rb)
+    return rb
 
 
 def _combined_inputs(
@@ -2871,7 +3000,7 @@ async def regenerate_runbook(
         )
     steps = [s.model_dump() for s in g.steps]
 
-    await _upsert_runbook(
+    saved = await _upsert_runbook(
         questionnaire_id,
         link_id,
         fields_text.get(link_id),
@@ -2881,7 +3010,9 @@ async def regenerate_runbook(
         runbooks,
         db,
     )
-    await db.commit()
+    conflict = await _commit_or_conflict(db)
+    if conflict is not None:
+        return conflict
     logger.info(
         f"手順書再生成: questionnaire_id={questionnaire_id}, link_id={link_id}, model={used_model}"
     )
@@ -2892,8 +3023,42 @@ async def regenerate_runbook(
             "steps": [_serialize_step(s) for s in steps],
             "status": RunbookStatus.DRAFT,
             "model": used_model,
+            "version": runbook_version(saved),
         }
     )
+
+
+_RUNBOOK_STEP_FIELDS: tuple[tuple[str, Any], ...] = (
+    ("title", ""),
+    ("description", ""),
+    ("action_type", None),
+    ("data_hint", None),
+)
+
+
+def _runbook_canonical(steps: Any) -> str:
+    """手順書 steps の同一性を比べるための正準形（キー順に依らない JSON 文字列）。
+
+    保存と同じく order を 1 始まりで振り直し、`RunbookStep` の各欄を既定値で埋めて
+    比べる（欠けた欄・null と既定値は同一とみなす。画面は title / description の null を
+    空文字で表示するため）。`action_type` は**正規化しない**。
+    語彙外のタグは保存時に None へ落ちるので、落ちた保存は内容が変わった側に倒れる。
+    リストでない旧データは生のまま比べる。
+    """
+    if isinstance(steps, list) and all(isinstance(s, dict) for s in steps):
+        steps = [
+            {
+                "order": idx,
+                **{k: default if s.get(k) is None else s[k] for k, default in _RUNBOOK_STEP_FIELDS},
+            }
+            for idx, s in enumerate(steps, start=1)
+        ]
+    return json.dumps(steps, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+
+def _runbook_changed(before: Any, after: Any) -> bool:
+    """確認済み手順書の steps が実質的に変わったか（正準 JSON の比較）。"""
+    return _runbook_canonical(before) != _runbook_canonical(after)
 
 
 @router.post("/questionnaires/{questionnaire_id}/runbook/{link_id}")
@@ -2910,7 +3075,14 @@ async def save_runbook(
     """ステップ2: 1項目分の手順書ステップを保存する（upsert）
 
     `confirm=true` のときは保存と同時に status を confirmed にする（確認して次へ）。
-    編集のみの場合は既存ステータスを維持する。
+
+    `confirm=false` の保存で確認済み手順書の内容が変わったら **draft へ戻し、確認者・
+    確認日時を消す**（`regenerate` と同じ扱い。取得プランの `save_plan` と同じ規則）。
+    正準形が同一の保存だけは確認済みを保つ。
+
+    **取得プランは連動させない。** 実行されるのはプランの program であり、それは
+    プランの確認で承認されている。手順書が後から変わったことは、プランの `stale`
+    （手順書より古い）表示で設計者に知らせる。
     """
     await csrf_protect.validate_csrf(request)
     questionnaire = await _get_questionnaire_or_404(questionnaire_id, db)
@@ -2922,6 +3094,10 @@ async def save_runbook(
 
     runbooks = await _runbook_map(questionnaire_id, db)
     existing = runbooks.get(link_id)
+    await _lock_row(db, existing)
+    conflict = _version_conflict(payload, runbook_version(existing), required=confirm)
+    if conflict is not None:
+        return conflict
 
     # order を 1 始まりで採番し直して保存する
     steps = []
@@ -2940,22 +3116,35 @@ async def save_runbook(
     # 応答 JSON を直接見る呼び出し元（移行スクリプト・API 直叩き）である。
     dropped_action_types = _dropped_action_types(await request.json(), steps)
 
+    if not confirm and existing is not None and not _runbook_changed(existing.steps, steps):
+        # 内容が同一の保存は何も書かない（status・確認者・更新日時を動かさない）
+        return JSONResponse(
+            {
+                "success": True,
+                "link_id": link_id,
+                "status": existing.status,
+                "steps": [_serialize_step(s) for s in existing.steps],
+                "dropped_action_types": dropped_action_types,
+                "unchanged": True,
+                "version": runbook_version(existing),
+            }
+        )
+
+    demoted = False
     if confirm:
         status = RunbookStatus.CONFIRMED
         # 確認操作者・日時を記録（ALCOA+ 帰属性）
         confirmed_by_id: int | None = current_user.id
         confirmed_at: datetime | None = datetime.now(UTC)
     else:
-        status = existing.status if existing else RunbookStatus.DRAFT
-        # 確認済みを維持する編集は元の確認者を保持、draft はクリア
-        if status == RunbookStatus.CONFIRMED and existing:
-            confirmed_by_id = existing.confirmed_by_id
-            confirmed_at = existing.confirmed_at
-        else:
-            confirmed_by_id = None
-            confirmed_at = None
+        # ここに来るのは内容が変わった保存だけ（同一の保存は上で返している）。
+        # 確認済みなら draft へ戻す。人が確認したのは変更前の手順書である。
+        demoted = bool(existing and existing.status == RunbookStatus.CONFIRMED)
+        status = RunbookStatus.DRAFT
+        confirmed_by_id = None
+        confirmed_at = None
 
-    await _upsert_runbook(
+    saved = await _upsert_runbook(
         questionnaire_id,
         link_id,
         fields_text.get(link_id),
@@ -2968,21 +3157,30 @@ async def save_runbook(
         confirmed_at=confirmed_at,
         dropped_action_types=dropped_action_types,
     )
-    await db.commit()
+    conflict = await _commit_or_conflict(db)
+    if conflict is not None:
+        return conflict
     logger.info(
         f"手順書保存: questionnaire_id={questionnaire_id}, link_id={link_id}, "
         f"status={status}, steps={len(steps)}"
         + (f", 語彙外タグ{len(dropped_action_types)}件" if dropped_action_types else "")
+        + ("（内容変更により確認済みから draft へ戻した）" if demoted else "")
     )
-    return JSONResponse(
-        {
-            "success": True,
-            "link_id": link_id,
-            "status": status,
-            "steps": [_serialize_step(s) for s in steps],
-            "dropped_action_types": dropped_action_types,
-        }
-    )
+    response: dict[str, Any] = {
+        "success": True,
+        "link_id": link_id,
+        "status": status,
+        "steps": [_serialize_step(s) for s in steps],
+        "dropped_action_types": dropped_action_types,
+        "version": runbook_version(saved),
+    }
+    if demoted:
+        response["demoted"] = True
+        response["warning"] = (
+            "確認済みの手順書を変更したため未確認（draft）に戻しました。"
+            "内容を確かめて確認し直してください（作成済みの取得プランはそのままです）"
+        )
+    return JSONResponse(response)
 
 
 # =============================================================================
@@ -2997,16 +3195,43 @@ def _program_dump(program: Any) -> dict[str, Any]:
     return data
 
 
+def _program_canonical(program: Any) -> str:
+    """program の同一性を比べるための正準形（キー順に依らない JSON 文字列）。
+
+    保存済みの program は経路（コンパイル・手保存・旧版）によって null の有無などの
+    表記が揺れ得るため、**保存時と同じ `DSLProgram` → `_program_dump` を通してから**
+    比べる。通らない旧データは生の dict のまま比べる（＝表記が違えば「変わった」側に
+    倒れ、確認済みが不当に残ることは無い）。
+    """
+    if isinstance(program, dict):
+        try:
+            program = _program_dump(DSLProgram.model_validate(program))
+        except ValidationError:
+            pass
+    return json.dumps(program, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+
+def _program_changed(before: Any, after: Any) -> bool:
+    """確認済みプランの program が実質的に変わったか（正準 JSON の比較）。"""
+    return _program_canonical(before) != _program_canonical(after)
+
+
 def _build_plan_items(
     runbooks: dict[str, InputRunbook],
     plans: dict[str, InputPlan],
 ) -> list[dict[str, Any]]:
-    """ステップ3ウィザードへ渡す項目リスト（確認済み手順書のみ）を構築する"""
+    """ステップ3ウィザードへ渡す項目リスト（確認済み手順書の項目）を構築する
+
+    **手順書が未確認でも、取得プランが既にある項目は載せる**（読み取り専用）。手順書を
+    編集して draft へ戻しても確認済みのプランは連動せず実行され続けるので、画面から
+    消えると、実行されているのに見えず、下書きへ戻す手段も無くなる。
+    """
     items: list[dict[str, Any]] = []
     for link_id, rb in runbooks.items():
-        if rb.status != RunbookStatus.CONFIRMED:
-            continue
         plan = plans.get(link_id)
+        runbook_confirmed = rb.status == RunbookStatus.CONFIRMED
+        if not runbook_confirmed and plan is None:
+            continue
         stale = _plan_stale(plan, rb)
         program = plan.program if plan else {"steps": [], "return": None}
         items.append(
@@ -3022,6 +3247,9 @@ def _build_plan_items(
                 "empty_program": is_empty_program(program) if plan else False,
                 "stale": stale,
                 "llm_model": plan.llm_model if plan else None,
+                # False なら読み取り専用（確認・編集・再作成は手順書の確認待ち。下書きへ戻すのみ可）
+                "runbook_confirmed": runbook_confirmed,
+                "version": plan_version(plan),
             }
         )
     return items
@@ -3080,7 +3308,7 @@ async def _upsert_plan(
     db: AsyncSession,
     confirmed_by_id: int | None = None,
     confirmed_at: datetime | None = None,
-) -> None:
+) -> InputPlan:
     plan = existing.get(link_id)
     if plan:
         plan.item_text = item_text
@@ -3090,19 +3318,19 @@ async def _upsert_plan(
         plan.confirmed_at = confirmed_at
         if llm_model is not None:
             plan.llm_model = llm_model
-    else:
-        db.add(
-            InputPlan(
-                questionnaire_id=questionnaire_id,
-                link_id=link_id,
-                item_text=item_text,
-                program=program,
-                status=status,
-                llm_model=llm_model,
-                confirmed_by_id=confirmed_by_id,
-                confirmed_at=confirmed_at,
-            )
-        )
+        return plan
+    plan = InputPlan(
+        questionnaire_id=questionnaire_id,
+        link_id=link_id,
+        item_text=item_text,
+        program=program,
+        status=status,
+        llm_model=llm_model,
+        confirmed_by_id=confirmed_by_id,
+        confirmed_at=confirmed_at,
+    )
+    db.add(plan)
+    return plan
 
 
 @router.get("/questionnaires/{questionnaire_id}/plan", response_class=HTMLResponse)
@@ -3419,7 +3647,7 @@ async def recompile_plan(
     # が従来どおり行う。
     errors = validate_program(program)
 
-    await _upsert_plan(
+    saved = await _upsert_plan(
         questionnaire_id,
         link_id,
         rb.item_text,
@@ -3429,7 +3657,9 @@ async def recompile_plan(
         plans,
         db,
     )
-    await db.commit()
+    conflict = await _commit_or_conflict(db)
+    if conflict is not None:
+        return conflict
     logger.info(
         f"取得プラン再作成: questionnaire_id={questionnaire_id}, link_id={link_id}, "
         f"検証エラー{len(errors)}件, model={used_model}"
@@ -3443,6 +3673,7 @@ async def recompile_plan(
             "needs_input": has_needs_input(program),
             "errors": errors,
             "model": used_model,
+            "version": plan_version(saved),
         }
     )
 
@@ -3499,6 +3730,11 @@ async def save_plan(
 
     `confirm=true` のときは検証を通し、program が妥当かつ needs_input が残っていなければ
     status を confirmed にする。検証エラーや needs_input 残存時は 400 で拒否する。
+    **確認には手順書が確認済みであることを要する**（`compile` / `recompile` と同じ前提）。
+
+    `confirm=false` の保存で確認済みプランの program が変わったら **draft へ戻し、確認者・
+    確認日時を消す**（`recompile` と同じ扱い）。確認済みのまま残すと、誰も承認していない
+    program が元の確認者の名前で実行される。正準形が同一の保存だけは確認済みを保つ。
     """
     await csrf_protect.validate_csrf(request)
     await _get_questionnaire_or_404(questionnaire_id, db)
@@ -3507,6 +3743,13 @@ async def save_plan(
     rb = runbooks.get(link_id)
     if rb is None:
         raise ResourceNotFoundException("InputRunbook", link_id)
+
+    plans = await _plan_map(questionnaire_id, db)
+    existing = plans.get(link_id)
+    await _lock_row(db, existing)
+    conflict = _version_conflict(payload, plan_version(existing), required=confirm)
+    if conflict is not None:
+        return conflict
 
     program = _program_dump(payload.program)
     errors = validate_program(program)
@@ -3530,7 +3773,31 @@ async def save_plan(
             status_code=400,
         )
 
+    if not confirm and existing is not None and not _program_changed(existing.program, program):
+        # 内容が同一の保存は何も書かない（status・確認者・更新日時を動かさない）
+        return JSONResponse(
+            {
+                "success": True,
+                "link_id": link_id,
+                "status": existing.status,
+                "unchanged": True,
+                "version": plan_version(existing),
+            }
+        )
+
+    demoted = False
     if confirm:
+        # 手順書が未確認のまま取得プランだけを確定させない。compile / recompile は
+        # 確認済み手順書しか扱わず、ウィザードも確認済み手順書の項目しか出さない。
+        # この経路だけが前提を飛ばせた。
+        if rb.status != RunbookStatus.CONFIRMED:
+            return JSONResponse(
+                {
+                    "success": False,
+                    "message": "手順書が確認済みでないため取得プランを確認できません",
+                },
+                status_code=400,
+            )
         if has_needs_input(program):
             return JSONResponse(
                 {
@@ -3544,19 +3811,15 @@ async def save_plan(
         confirmed_by_id: int | None = current_user.id
         confirmed_at: datetime | None = datetime.now(UTC)
     else:
-        plans = await _plan_map(questionnaire_id, db)
-        existing = plans.get(link_id)
-        status = existing.status if existing else PlanStatus.DRAFT
-        # 確認済みを維持する編集は元の確認者を保持、draft はクリア
-        if status == PlanStatus.CONFIRMED and existing:
-            confirmed_by_id = existing.confirmed_by_id
-            confirmed_at = existing.confirmed_at
-        else:
-            confirmed_by_id = None
-            confirmed_at = None
+        # ここに来るのは内容が変わった保存だけ（同一の保存は上で返している）。
+        # 確認済みなら draft へ戻す（recompile と同じ）。人が承認したのは変更前の program
+        # であり、変更後の program ではない。
+        demoted = bool(existing and existing.status == PlanStatus.CONFIRMED)
+        status = PlanStatus.DRAFT
+        confirmed_by_id = None
+        confirmed_at = None
 
-    plans = await _plan_map(questionnaire_id, db)
-    await _upsert_plan(
+    saved = await _upsert_plan(
         questionnaire_id,
         link_id,
         rb.item_text,
@@ -3568,11 +3831,25 @@ async def save_plan(
         confirmed_by_id=confirmed_by_id,
         confirmed_at=confirmed_at,
     )
-    await db.commit()
+    conflict = await _commit_or_conflict(db)
+    if conflict is not None:
+        return conflict
     logger.info(
         f"取得プラン保存: questionnaire_id={questionnaire_id}, link_id={link_id}, status={status}"
+        + ("（内容変更により確認済みから draft へ戻した）" if demoted else "")
     )
-    response: dict[str, Any] = {"success": True, "link_id": link_id, "status": status}
+    response: dict[str, Any] = {
+        "success": True,
+        "link_id": link_id,
+        "status": status,
+        "version": plan_version(saved),
+    }
+    if demoted:
+        response["demoted"] = True
+        response["warning"] = (
+            "確認済みの取得プランを変更したため未確認（draft）に戻しました。"
+            "実行するには内容を確かめて確認し直してください"
+        )
     if confirm and is_empty_program(program):
         # **step が空のプランは確定できる**（手入力への縮退という正当な形）が、**人が気付かずに
         # 確定すると、取得の設計ができたかのように母集団へ入る**。止めずに告げる。
@@ -3582,6 +3859,54 @@ async def save_plan(
             "になります。取得手順を作れなかった項目ではないか確かめてください"
         )
     return JSONResponse(response)
+
+
+@router.post("/questionnaires/{questionnaire_id}/plan/{link_id}/demote")
+async def demote_plan(
+    request: Request,
+    questionnaire_id: int,
+    link_id: str,
+    payload: PlanDemoteRequest,
+    current_user: RequireDesigner,
+    csrf_protect: CsrfProtect = Depends(),
+    db: AsyncSession = Depends(get_db),
+) -> JSONResponse:
+    """ステップ3: 確認済みの取得プランを draft へ戻す（program は変えない）。
+
+    手順書が draft へ戻った項目のプランは画面で読み取り専用になるが、確認済みのままでは
+    実行され続ける。その項目を止める手段として、program に触らず確認だけを取り消す。
+    確認者・確認日時はクリアする（`recompile` と同じ）。既に draft なら何もしない。
+    """
+    await csrf_protect.validate_csrf(request)
+    await _get_questionnaire_or_404(questionnaire_id, db)
+
+    plans = await _plan_map(questionnaire_id, db)
+    plan = plans.get(link_id)
+    if plan is None:
+        raise ResourceNotFoundException("InputPlan", link_id)
+    await _lock_row(db, plan)
+    conflict = _version_conflict(payload, plan_version(plan), required=True)
+    if conflict is not None:
+        return conflict
+
+    demoted = plan.status == PlanStatus.CONFIRMED
+    if demoted:
+        plan.status = PlanStatus.DRAFT
+        plan.confirmed_by_id = None
+        plan.confirmed_at = None
+        await db.commit()
+        logger.info(
+            f"取得プランを下書きへ戻した: questionnaire_id={questionnaire_id}, link_id={link_id}"
+        )
+    return JSONResponse(
+        {
+            "success": True,
+            "link_id": link_id,
+            "status": PlanStatus.DRAFT,
+            "demoted": demoted,
+            "version": plan_version(plan),
+        }
+    )
 
 
 # =============================================================================
@@ -3817,7 +4142,7 @@ async def execute_autofill(
         status=status,
         error_summary=error_summary,
         # 試行(trial)は結果を永続しないため snapshot も不要（全プラン複製の無駄を避ける）。
-        program_snapshot=None if is_trial else program_snapshot(plans),
+        program_snapshot=None if is_trial else program_snapshot(plans, model),
     )
 
     used_model = model or design_llm_model()
@@ -3976,7 +4301,7 @@ async def execute_autofill_stream(
             status=status,
             error_summary=error_summary,
             # 試行(trial)は結果を永続しないため snapshot も不要（全プラン複製の無駄を避ける）。
-            program_snapshot=None if is_trial else program_snapshot(plans),
+            program_snapshot=None if is_trial else program_snapshot(plans, model),
         )
         # PHI 保護: 患者識別子はログに出さず、非PHIの execution_id で相関する。
         logger.info(
@@ -4076,7 +4401,7 @@ async def execution_validation_report(
             continue
         plan = plans.get(link_id)
         # 監査図・トレースは「実行時に固定した program（設計根拠込み）」を優先する。
-        # 実行後に confirmed プランが in-place 編集されても実行記録の再現性を保つため
+        # 実行後にプランが編集・再確認されても実行記録の再現性を保つため
         # （CSV / データインテグリティ: Original・Consistent）。スナップショット未保持の
         # 旧記録のみ現行 plan.program にフォールバックし、その旨を program_pinned=False で示す。
         snap = snapshot.get(link_id) if isinstance(snapshot, dict) else None

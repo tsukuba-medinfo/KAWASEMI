@@ -228,7 +228,7 @@
                 {% elif t.error %}<div class="err-text">⚠ {{ t.error }}</div>
                 {% else %}<div>結果: <code>{{ t.output if t.output is not none else '—' }}</code></div>{% endif %}
                 {% if ai_enabled and t.llm %}
-                <div class="llm-box"><b>LLM</b> provider={{ t.llm.provider or 'ollama' }} model={{ t.llm.model }} options={{ t.llm.options | tojson }}
+                <div class="llm-box"><b>LLM</b> provider={{ t.llm.provider or 'ollama' }} model={{ t.llm.model }}{% if t.llm.overridden_from %} <b class="err-text">（承認された {{ t.llm.overridden_from }} から実行時指定で変更）</b>{% endif %} options={{ t.llm.options | tojson }}
 prompt: {{ t.llm.prompt }}
 output: {{ t.llm.raw_output }}</div>
                 {% endif %}
