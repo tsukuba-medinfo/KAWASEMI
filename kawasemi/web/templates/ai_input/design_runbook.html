@@ -281,7 +281,10 @@ async function regenerate() {
   if (regenBtn) regenBtn.disabled = true;
   try {
     const data = await post(`{{ base_path() }}/ai-input/questionnaires/${QID}/runbook/${encodeURIComponent(it.link_id)}/regenerate`, { model });
-    if (data.success) {
+    // 生成中に別の操作で確認・編集された（409）。生成結果は保存されていないので、
+    // 画面の内容も置き換えない。最新の内容は再読込で見る。
+    if (data.conflict) { setStatus(`⚠ ${data.message}`, false); }
+    else if (data.success) {
       it.steps = data.steps; it.status = data.status; it.has_runbook = true; it.stale = false;
       it.version = data.version; it.saved = canonSteps(it.steps);
       setStatus('✓ 再生成しました', true);
@@ -307,10 +310,16 @@ async function generateAll() {
       // 件数で、表の行数ではない。確認済みの手順書は上書きしないので、表にはその行が残る。
       const skippedConfirmed = (data.skipped_confirmed || []).length;
       const skippedNotDesigned = (data.skipped_not_designed || []).length;
+      // 生成中に別の操作で確認・編集された項目。生成結果は保存していないので警告にする
+      const skippedConflict = (data.skipped_conflict || []).length;
       const skippedNote = (skippedConfirmed ? ` ${skippedConfirmed} 件は確認済みのため作り直していません。` : '')
-        + (skippedNotDesigned ? ` ${skippedNotDesigned} 件は未設計のため対象外です。` : '');
+        + (skippedNotDesigned ? ` ${skippedNotDesigned} 件は未設計のため対象外です。` : '')
+        + (skippedConflict ? ` ${skippedConflict} 件は生成中に別の操作で更新されたため保存していません（${data.skipped_conflict.join(', ')}）。` : '');
       if (pending) {
         setStatus(`⚠ ${data.generated} 件を生成しました / ${pending} 件は手順書が返りませんでした（未試行。もう一度実行してください）${skippedNote}`, false);
+        setTimeout(() => location.reload(), 4000);
+      } else if (skippedConflict) {
+        setStatus(`⚠ ${data.generated} 件を生成しました。${skippedNote}`, false);
         setTimeout(() => location.reload(), 4000);
       } else {
         setStatus(`✓ ${data.generated} 件を生成しました。${skippedNote} 再読込します...`, true);
