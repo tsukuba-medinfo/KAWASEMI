@@ -140,6 +140,24 @@ def test_spec_failure_codes_match_code() -> None:
     assert f"次の{len(FailureCode.ALL)}語である" in text
 
 
+_PROSE_COUNTS: list[tuple[str, int]] = [
+    (r"(\d+)個の op", len(OpType.ALL)),  # §1.2
+    (r"§5 の(\d+)語のいずれか", len(OpType.ALL)),  # §3.2
+    (r"`op` が(\d+)語に無ければ", len(OpType.ALL)),  # V-07
+    (r"`compare\.cmp` が §5\.8 の(\d+)語", len(COMPARE_OPS)),  # V-11
+    (r"`aggregate\.func` が §5\.12 の(\d+)語", len(AGGREGATE_FUNCS)),  # V-11
+]
+
+
+def test_spec_prose_counts_match_code() -> None:
+    """本文に書いた語彙の数（「12個の op」「12語」など）がコードの語彙の数と一致すること。"""
+    text = _spec()
+    for pattern, expected in _PROSE_COUNTS:
+        found = re.findall(pattern, text)
+        assert found, f"仕様に {pattern} の記述が無い（文言を変えたらこのテストを直す）"
+        assert all(int(n) == expected for n in found), (pattern, found, expected)
+
+
 def test_spec_value_vocabularies_match_code() -> None:
     """`compare.cmp` / 単項 / `select.pick` / `aggregate.func` の語彙が、順序も含めて一致すること。"""
     assert tuple(_marked_list("compare-ops")) == COMPARE_OPS
