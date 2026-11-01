@@ -250,12 +250,23 @@ class Settings(BaseSettings):
     # `INTO OUTFILE`）を取りこぼすので、**保証は接続の権限側**に置く。
     #
     # SQLite では `PRAGMA query_only` で接続スコープに閉じられるのでこの設定は不要。
-    # **PostgreSQL 等では読み取り専用ロールの DSN をここに置く**（未設定なら実行しない
-    # ＝フェイルクローズ）。同一トランザクションを読み取り専用にする案は、後続の
-    # evidence の保存まで止めるので採らない。
+    # **PostgreSQL 等では読み取り専用ロールの DSN をここに置く**。設定するとプログラム SQL
+    # （`sql_extract` と統計プロファイルの自アプリDB集計）はこの DSN の別エンジンで、
+    # 読み取り専用トランザクションの中で実行される。未設定のとき、ENVIRONMENT=production では
+    # 実行しない（フェイルクローズ。読み取り専用トランザクションは `users.password_hash` の
+    # ような読み取りを止めない）。production 以外ではアプリ本体のエンジンから別接続を取り、
+    # 読み取り専用トランザクションで実行する。どちらも起動時と `kawasemi check_schema` で
+    # 警告する（`kawasemi/core/readonly_db.py`）。
     readonly_database_url: str = Field(
         default="",
         description="プログラムSQL専用の読み取り専用DSN（PostgreSQL等。SQLiteでは不要）",
+    )
+    # プログラム SQL（PostgreSQL）の文単位のタイムアウト。読み取り専用トランザクションの
+    # 先頭で `SET LOCAL statement_timeout` 相当を掛ける。0 で無効。
+    readonly_statement_timeout_seconds: int = Field(
+        default=60,
+        ge=0,
+        description="プログラムSQLのstatement_timeout（秒。PostgreSQL。0で無効）",
     )
 
     # リソース索引（indexer 出力。ステップ1役割2のembedding検索で参照。施設固有）

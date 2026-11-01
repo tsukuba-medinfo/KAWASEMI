@@ -164,3 +164,12 @@ jobs:
 
       - name: 実スキーマとモデル宣言の照合
         run: uv run kawasemi check_schema
+
+      # プログラム SQL（sql_extract）の読み取り専用実行を PostgreSQL 実機で見る。
+      # 他のジョブは SQLite なので、このテストはここでしか skip されない。
+      - name: プログラム SQL の読み取り専用（PostgreSQL）
+        env:
+          KAWASEMI_TEST_POSTGRES_URL: postgresql+asyncpg://kawasemi:kawasemi@localhost:5432/kawasemi
+        run: |
+          uv sync --extra dev
+          uv run pytest tests/ai_input/test_program_sql_readonly_postgres.py -v --tb=short

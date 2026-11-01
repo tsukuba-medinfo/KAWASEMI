@@ -110,6 +110,62 @@ docker-compose up -d postgres
 docker-compose exec kawasemi alembic upgrade head
 ```
 
+### 読み取り専用ロール（READONLY_DATABASE_URL）
+
+DSL の `sql_extract` と統計プロファイルの自アプリDB集計は、LLM や索引が組んだ SELECT を
+アプリ本体の DB へ発行します。SELECT 限定の文字列検査は多層防御の1枚にすぎないので、
+PostgreSQL では**読み取り専用ロール**を用意し、その DSN を `READONLY_DATABASE_URL` に設定してください。
+
+```sql
+-- アプリのオーナーロール（例: kawasemi）で接続して実行する。
+-- ロールを作るには CREATEROLE 権限（またはスーパーユーザー）が要る。
+CREATE ROLE kawasemi_ro LOGIN PASSWORD '...';
+ALTER ROLE kawasemi_ro SET default_transaction_read_only = on;
+GRANT CONNECT ON DATABASE kawasemi TO kawasemi_ro;
+GRANT USAGE ON SCHEMA public TO kawasemi_ro;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO kawasemi_ro;
+-- 必須: 認証・権限の表は読ませない（パスワードハッシュ・リフレッシュトークンの jti・認証の記録）
+REVOKE ALL ON users, user_roles, roles, refresh_tokens, auth_events FROM kawasemi_ro;
+```
+
+```bash
+# .env
+READONLY_DATABASE_URL=postgresql+asyncpg://kawasemi_ro:...@postgres:5432/kawasemi
+```
+
+- **`REVOKE` の行は省略しないでください。** 省くと `sql_extract` から
+  `SELECT password_hash FROM users` が読めます。対象はモデルのうち認証・権限を持つ表
+  （`kawasemi/models/user.py`・`role.py`・`refresh_token.py`・`auth_event.py`）で、
+  `tests/test_deployment_readonly_role.py` がこの一覧とモデルの食い違いを検査します。
+- **後から増えた表は自動では読めません**（上の SQL は `ALTER DEFAULT PRIVILEGES` を使いません）。
+  マイグレーションで表が増え、`sql_extract` から読む必要があるときは、その表に
+  `GRANT SELECT ON <表> TO kawasemi_ro;` を個別に当ててください。
+  `ALTER DEFAULT PRIVILEGES ... GRANT SELECT ON TABLES` を使うと手間は減りますが、
+  **認証・秘密情報を持つ表が増えたときも自動で読めるようになる**ので、そのたびに `REVOKE` が要ります。
+- 書き込み・DDL・関数の作成の権限は与えません。
+- **アプリDBに `dblink` / `postgres_fdw` を入れないでください。** `dblink` は別のセッションを
+  開くので、読み取り専用トランザクションの外で書けます。入れる必要があるときは、
+  関数の実行権限を `PUBLIC` から外してください（関数の `EXECUTE` は既定で `PUBLIC` に
+  付いているので、`kawasemi_ro` から外すだけでは効きません）。
+  例: `REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA <dblink を入れたスキーマ> FROM PUBLIC;`。
+  外部表（`postgres_fdw`）は表として `GRANT` しない限り読めません。
+  なお DSL の文字列検査も `dblink*` などを拒否しますが、これは多層防御の1枚です。
+- 設定すると、プログラム SQL はこの DSN の別エンジン（初回利用時に生成し、終了時に破棄）で、
+  **読み取り専用トランザクション**（`BEGIN READ ONLY`）の中で実行され、毎回ロールバックされます。
+  トランザクションの先頭で `statement_timeout` を掛けます（`READONLY_STATEMENT_TIMEOUT_SECONDS`、
+  既定 60 秒、0 で無効）。接続をプールへ返す前に `pg_advisory_unlock_all()` を呼びます。
+- **未設定のとき、`ENVIRONMENT=production` では `sql_extract` と統計プロファイルの
+  自アプリDB集計を実行しません**（`sql_extract` は `source_unavailable` として記録）。
+  読み取り専用トランザクションは書き込みを止めますが、`users.password_hash` のような
+  読み取りは止めません。それを閉じられるのは専用ロールだけだからです。
+- production 以外（development / staging）で未設定のときは、アプリ本体のロールから別接続を取り、
+  読み取り専用トランザクションで実行します。**`ENVIRONMENT` を設定しないと既定は
+  `development`** なので、この経路になります。本番では必ず `ENVIRONMENT=production` を
+  設定してください。この経路では、実行のたびにアプリの接続プールから**2本目の接続**を
+  借ります（リクエストのセッションが持つ1本とは別）。プールの大きさを見積もるときに数えてください。
+- どちらの場合も、未設定であることを起動時のログと `kawasemi check_schema` が警告します。
+- SQLite では `PRAGMA query_only` で閉じるので、この設定は不要です（設定しても使いません）。
+
 ## 本番環境へのデプロイ
 
 ### セキュリティ設定

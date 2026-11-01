@@ -19,7 +19,6 @@ import io
 import json
 import re
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
@@ -55,6 +54,7 @@ from kawasemi.ai_input.resource_index.connections import get_registry
 from kawasemi.core.config import settings
 from kawasemi.core.exceptions import FHIRServerException
 from kawasemi.core.logging_config import get_logger
+from kawasemi.core.readonly_db import ReadOnlySessionUnavailableError, readonly_program_sql
 from kawasemi.utils.fhir_client import FHIRClient
 
 logger = get_logger(__name__)
@@ -541,50 +541,6 @@ def resolve_fhir_path(data: dict[str, Any], fhir_path: str) -> Any:
             current = current.get(part) if isinstance(current, dict) else None
 
     return current
-
-
-class ReadOnlySessionUnavailableError(RuntimeError):
-    """プログラム SQL を読み取り専用で実行する手段が用意できない。"""
-
-
-@asynccontextmanager
-async def readonly_program_sql(db: AsyncSession) -> AsyncIterator[None]:
-    """プログラム SQL の実行を**接続の権限で**読み取り専用に閉じる。
-
-    `_op_sql` は LLM が書いた SQL をアプリDBの**読み書き**セッションへ発行していた。
-    ゲートは `is_select_only_sql`（接頭辞＋禁止語＋複文禁止）だけで、**SELECT から到達できる
-    書き込み・副作用**を取りこぼす（Postgres の `SELECT ... INTO`、`pg_read_file`、
-    MySQL の `INTO OUTFILE` など）。**ブロックリストは取りこぼすので、保証を文字列検査に
-    置かない**——DB 側の権限で閉じる（external_db では既にそう運用している）。
-
-    方言ごとの実現:
-
-    - **SQLite**: `PRAGMA query_only = ON`。接続スコープなので、抜けるときに OFF へ戻す。
-      別コネクションを張らないので、テストの `:memory:` DB でも同じ関門を通る
-    - **その他（PostgreSQL 等）**: `SET TRANSACTION READ ONLY` は同じトランザクションの
-      後続の書き込み（evidence の保存）まで止めるので使わない。**専用の読み取り専用ロール**を
-      `READONLY_DATABASE_URL` で受け取る前提とし、**未設定なら実行しない**（フェイルクローズ）
-
-    Raises:
-        ReadOnlySessionUnavailableError: 読み取り専用で実行する手段が無い
-    """
-    bind = db.get_bind()
-    dialect = bind.dialect.name
-    if dialect == "sqlite":
-        await db.execute(text("PRAGMA query_only = ON"))
-        try:
-            yield
-        finally:
-            await db.execute(text("PRAGMA query_only = OFF"))
-        return
-    if settings.readonly_database_url:
-        # 専用ロールの DSN がある場合はそちらのセッションで読む（呼び出し側が使う）。
-        yield
-        return
-    raise ReadOnlySessionUnavailableError(
-        f"プログラム SQL を読み取り専用で実行できません（dialect={dialect}）。"
-        "READONLY_DATABASE_URL に読み取り専用ロールの DSN を設定してください。"
-    )
 
 
 class PathOutsideRootError(ValueError):
@@ -1468,11 +1424,12 @@ class DSLInterpreter:
                 "failure_code": FailureCode.UNCLASSIFIED,
             }
 
+        # **読み取り専用の関門を通す**。文字列検査（`is_select_only_sql`）は
+        # 多層防御の1枚で、保証の根拠はこちら側にある。SQLite 以外では `db` ではなく
+        # 読み取り専用トランザクションの別接続が貸し出される（`kawasemi.core.readonly_db`）。
         try:
-            # **読み取り専用の関門を通す**。文字列検査（`is_select_only_sql`）は
-            # 多層防御の1枚で、保証の根拠はこちら側にある。
-            async with readonly_program_sql(db):
-                result = await db.execute(text(rendered), binds)
+            async with readonly_program_sql(db) as reader:
+                result = await reader.execute(text(rendered), binds)
                 rows = result.fetchall()
         except ReadOnlySessionUnavailableError as e:
             # フェイルクローズ。**読めないことを失敗として記録する**（黙って読み書きで実行しない）

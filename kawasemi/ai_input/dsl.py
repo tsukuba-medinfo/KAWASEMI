@@ -130,9 +130,29 @@ _SQL_FORBIDDEN = re.compile(
     r"union|except|intersect|"
     # **SELECT から到達できる書き込み・ファイル読み書き**。ブロックリストは
     # 取りこぼすので**保証は接続の権限側**（読み取り専用セッション）に置くが、多層にする
-    r"into|outfile|dumpfile|pg_read_file|pg_read_binary_file|lo_import|lo_export)\b",
+    r"into|outfile|dumpfile|pg_read_file|pg_read_binary_file|lo_import|lo_export|"
+    # **読み取り専用トランザクションの外へ出る口・他の接続に作用する関数**（PostgreSQL）。
+    # - `dblink*` は別セッションを開くので、READ ONLY の外で書ける（拡張が入っていれば）
+    # - `pg_terminate_backend` / `pg_cancel_backend` は同じロールの他の接続を落とせる
+    #   （読み取り専用でも効く。アプリのロールで動く経路ではアプリ自身の接続が対象になる）
+    # - `pg_advisory*` / `pg_try_advisory*` はセッションに残り、他の処理を待たせうる
+    #   （後始末で `pg_advisory_unlock_all()` も呼ぶが、取らせないのが先）
+    # - `pg_sleep*` は抽出に使い道が無く、接続を握り続ける（`statement_timeout` も掛ける）
+    r"dblink\w*|pg_terminate_backend|pg_cancel_backend|pg_advisory\w*|pg_try_advisory\w*|"
+    r"pg_sleep\w*|"
+    # **文字列で渡した SQL を実行する関数**。連結（`'select pg_' || 'sleep(1)'`）で上の
+    # 語を組み立てられるので、関数ごと拒否する。PostgreSQL 17 の `pg_proc` で引数名に
+    # query / sql / select / stmt / command / cursor を持つ関数を洗い出し、SQL を実行するものを
+    # 採った（`ts_rewrite` は引数名が無いが、2引数形で SELECT 文の文字列を実行する）。
+    # `table_to_xml` 系は SQL 文字列は取らないが、同じ一族でスキーマ丸ごとの読み出しに使える
+    r"query_to_xml\w*|cursor_to_xml\w*|table_to_xml\w*|schema_to_xml\w*|database_to_xml\w*|"
+    r"ts_stat|ts_rewrite)\b",
     re.IGNORECASE,
 )
+
+# **Unicode エスケープの識別子・文字列**（PostgreSQL の `U&"\0064blink_exec"`）。
+# 禁止語を字面に出さずに書けるので、エスケープそのものを拒否する（抽出に使う理由が無い）。
+_SQL_UNICODE_ESCAPE = re.compile(r"\bu&\s*[\"']", re.IGNORECASE)
 
 # SQL コメント（行/ブロック）。複文判定・キーワード検査の前に除去して、
 # コメントによるすり抜け（`SELECT ... ; -- DROP ...`）や、コメント内キーワード
@@ -174,6 +194,8 @@ def is_select_only_sql(sql: str) -> bool:
     if ";" in stripped:  # 文末セミコロンは上で除去済み → 残れば複文
         return False
     if _SQL_FORBIDDEN.search(stripped):
+        return False
+    if _SQL_UNICODE_ESCAPE.search(stripped):
         return False
     return True
 

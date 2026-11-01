@@ -68,6 +68,7 @@ from kawasemi.ai_input.resource_index.derive import (
     resolve_db_op,
 )
 from kawasemi.core.logging_config import get_logger
+from kawasemi.core.readonly_db import ReadOnlySessionUnavailableError, readonly_program_sql
 
 logger = get_logger(__name__)
 
@@ -333,8 +334,12 @@ async def generate_statistical_profile(
             # **自アプリDBは再試行しない。** 一時的なエラーへの備えは外部DBに対する
             # もので、ローカルのセッションはその対象ではない。
             # 加えて、失敗したセッションを同じトランザクションのまま投げ直すと別の失敗を招く。
-            total_count = await _fetch_total_count(db, table)
-            rows = await _fetch_grouped_rows(db, table, column)
+            #
+            # **DSL の SQL と同じ関門を通す**（`readonly_program_sql`）。SQL は識別子検査を
+            # 通した表・カラム名から組むが、保証は文字列検査ではなく DB 側に置く。
+            async with readonly_program_sql(db) as reader:
+                total_count = await _fetch_total_count(reader, table)
+                rows = await _fetch_grouped_rows(reader, table, column)
             attempts = 1
         else:
             connection_id = candidate.get("connection_id") or payload.get("connection_id")
@@ -367,6 +372,10 @@ async def generate_statistical_profile(
                 )
             finally:
                 await engine.dispose()
+    except ReadOnlySessionUnavailableError as e:
+        # フェイルクローズ（production で読み取り専用ロールが無い）。黙って読み書きで実行しない
+        logger.error(f"統計プロファイルの集計を実行しませんでした: {e}")
+        return _not_applicable(str(e), source_category)
     except SQLAlchemyError as e:
         logger.warning(f"統計プロファイル生成に失敗: table={table} column={column} error={e}")
         return _not_applicable(
