@@ -53,6 +53,8 @@ const CSRF = document.querySelector('meta[name="csrf-token"]')?.content || '';
 const DEFAULT_MODEL = {{ default_ollama_model | tojson }};
 let ITEMS = {{ items | tojson }};
 let cur = 0;
+// 保存済みの内容（正準形）。何も変えていない「保存」はサーバへ送らない。
+ITEMS.forEach(it => { it.saved = canonSteps(it.steps); });
 
 // 語彙の正本は kawasemi/ai_input/schemas.py の RUNBOOK_ACTION_TYPES。
 // 値の集合が一致していることをテストで固定している（tests/ai_input/test_runbook_branch.py）。
@@ -61,6 +63,13 @@ const ACTION_TYPES = [
   ["transform", "変換"], ["llm", "LLM抽出"], ["manual", "手動確認"],
   ["condition", "条件の判定"], ["branch", "分岐（取得元・値の選択）"],
 ];
+
+// サーバの正準比較と同じ形（order は振り直し、欠けた欄は既定値）で比べる文字列
+function canonSteps(steps) {
+  return JSON.stringify((steps || []).map((s, i) => [
+    i + 1, s.title ?? '', s.description ?? '', s.action_type ?? null, s.data_hint ?? null,
+  ]));
+}
 
 function esc(s) { const d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
 function setStatus(msg, ok) { const el = document.getElementById('status'); el.textContent = msg; el.className = ok ? 'ok' : 'err'; }
@@ -143,7 +152,7 @@ function autoGrow(el) {
 }
 
 function autoGrowAll() {
-  document.querySelectorAll('#steps .step-desc').forEach(el => {
+  document.querySelectorAll('#steps .step-desc, #steps .step-hint').forEach(el => {
     autoGrow(el);
     el.addEventListener('input', () => autoGrow(el));
   });
@@ -165,20 +174,35 @@ function stepHtml(s, i) {
       <label class="fld">手順の説明</label>
       <textarea class="step-desc" placeholder="担当者が実行する具体的な手順">${esc(s.description)}</textarea>
       <label class="fld">参照データ源・クエリ例（任意）</label>
-      <input class="step-hint" placeholder="例: lab_result テーブルの blast_pct カラム" value="${esc(s.data_hint || '')}">
+      <textarea class="step-hint" rows="1" placeholder="例: lab_result テーブルの blast_pct カラム">${esc(s.data_hint || '')}</textarea>
     </div>`;
 }
 
 // --- 編集状態の DOM → メモリ反映 ---
+// **触っていない欄は元の値をそのまま返す。** 画面の文字列から読み直すと、前後の空白・
+// 改行（textarea は CRLF を LF にし、先頭の改行を1つ落とす）が変わり、何も編集していない
+// 保存が「内容の変更」になって確認済みが未確認へ戻ってしまう。編集した欄だけ整える。
+function touched(el) { return el.value !== el.defaultValue; }
+function initialOption(sel) {
+  const o = [...sel.options].find(x => x.defaultSelected) || sel.options[0];
+  return o ? o.value : '';
+}
+
 function collectSteps() {
   const steps = [];
+  const prev = ITEMS[cur].steps || [];
   document.querySelectorAll('#steps .step').forEach((el, i) => {
+    const orig = prev[Number(el.dataset.idx)] || {};
+    const t = el.querySelector('.step-title');
+    const d = el.querySelector('.step-desc');
+    const h = el.querySelector('.step-hint');
+    const a = el.querySelector('.action-select');
     steps.push({
       order: i + 1,
-      title: el.querySelector('.step-title').value.trim(),
-      description: el.querySelector('.step-desc').value.trim(),
-      action_type: el.querySelector('.action-select').value || null,
-      data_hint: el.querySelector('.step-hint').value.trim() || null,
+      title: touched(t) ? t.value.trim() : (orig.title ?? ''),
+      description: touched(d) ? d.value.trim() : (orig.description ?? ''),
+      action_type: a.value === initialOption(a) ? (orig.action_type ?? null) : (a.value || null),
+      data_hint: touched(h) ? (h.value.trim() || null) : (orig.data_hint ?? null),
     });
   });
   return steps;
@@ -216,13 +240,20 @@ async function post(url, body) {
 async function saveCurrent(confirm) {
   syncStepsToMemory();
   const it = ITEMS[cur];
+  if (!confirm && it.has_runbook && canonSteps(it.steps) === it.saved) {
+    setStatus('変更はありません（保存していません）', true);
+    return true;
+  }
   setStatus('保存中...', true);
   try {
-    const data = await post(`{{ base_path() }}/ai-input/questionnaires/${QID}/runbook/${encodeURIComponent(it.link_id)}?confirm=${confirm}`, { steps: it.steps });
+    const data = await post(`{{ base_path() }}/ai-input/questionnaires/${QID}/runbook/${encodeURIComponent(it.link_id)}?confirm=${confirm}`, { steps: it.steps, base_version: it.version ?? null });
+    if (data.conflict) { setStatus(`⚠ ${data.message}`, false); return false; }
     if (data.success) {
       it.status = data.status; it.has_runbook = true; it.stale = false;
+      it.version = data.version; it.saved = canonSteps(it.steps);
       // 確認済みの内容を変えて保存すると、サーバが未確認（draft）へ戻す
       if (data.demoted) setStatus(`⚠ 保存しました。${data.warning}`, false);
+      else if (data.unchanged) setStatus('変更はありません（保存していません）', true);
       else setStatus(confirm ? '✓ 確認しました' : '✓ 保存しました', true);
       renderProgress();
       // 状態の表示（確認済み／未確認）を戻った状態に合わせる
@@ -250,6 +281,7 @@ async function regenerate() {
     const data = await post(`{{ base_path() }}/ai-input/questionnaires/${QID}/runbook/${encodeURIComponent(it.link_id)}/regenerate`, { model });
     if (data.success) {
       it.steps = data.steps; it.status = data.status; it.has_runbook = true; it.stale = false;
+      it.version = data.version; it.saved = canonSteps(it.steps);
       setStatus('✓ 再生成しました', true);
       renderProgress(); renderItem();
     } else { setStatus(`エラー: ${data.message || '再生成に失敗しました'}`, false); }

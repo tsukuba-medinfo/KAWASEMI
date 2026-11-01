@@ -531,3 +531,396 @@ async def test_runbook_edit_leaves_confirmed_plan_unchanged(
     assert plan.status == "confirmed"
     assert plan.confirmed_by_id == confirmer
     assert plan.confirmed_at == confirmed_at
+
+
+# ---------------------------------------------------------------------------
+# 手順書が draft に戻った項目のプランを画面から見失わない
+# ---------------------------------------------------------------------------
+
+
+def test_build_plan_items_lists_plan_of_draft_runbook_read_only() -> None:
+    """手順書が未確認でもプランがある項目は載せ、読み取り専用の印を付ける。
+
+    プランの無い未確認手順書の項目は従来どおり載せない。
+    """
+    from kawasemi.ai_input.routes import _build_plan_items
+
+    runbooks = {
+        "a": InputRunbook(link_id="a", item_text="A", steps=[], status="confirmed"),
+        "b": InputRunbook(link_id="b", item_text="B", steps=[], status="draft"),
+        "c": InputRunbook(link_id="c", item_text="C", steps=[], status="draft"),
+    }
+    plans = {"b": InputPlan(link_id="b", program=_PROGRAM, status="confirmed")}
+    items = {it["link_id"]: it for it in _build_plan_items(runbooks, plans)}
+    assert set(items) == {"a", "b"}
+    assert items["a"]["runbook_confirmed"] is True
+    assert items["b"]["runbook_confirmed"] is False
+    assert items["b"]["status"] == "confirmed"
+    assert items["b"]["version"] is not None
+    assert items["a"]["version"] is None  # プランがまだ無い
+
+
+@pytest.mark.asyncio
+async def test_plan_page_shows_confirmed_plan_after_runbook_demotion(
+    designer_client: AsyncClient,
+    designer_user: User,
+    db_session: AsyncSession,
+    csrf_token: str,
+) -> None:
+    """手順書を編集して draft へ戻しても、確認済みプランは画面に読み取り専用で残り、
+    確認は拒否され、下書きへ戻すことはできる。"""
+    q, _ = await _confirmed_runbook(designer_client, designer_user, db_session, csrf_token)
+    await _save(designer_client, q.id, _PROGRAM, csrf_token, confirm=True)
+    edited = copy.deepcopy(_RB_STEPS)
+    edited[0]["title"] = "別の題"
+    assert (await _save_runbook(designer_client, q.id, edited, csrf_token)).json()[
+        "status"
+    ] == "draft"
+
+    page = await designer_client.get(f"/ai-input/questionnaires/{q.id}/plan")
+    assert page.status_code == 200
+    assert '"runbook_confirmed": false' in page.text
+    assert '"link_id": "item1"' in page.text
+    assert "下書きに戻す" in page.text
+
+    # 確認は手順書の確認待ち
+    resp = await _save(designer_client, q.id, _PROGRAM, csrf_token, confirm=True)
+    assert resp.status_code == 400
+
+    resp = await designer_client.post(
+        f"/ai-input/questionnaires/{q.id}/plan/item1/demote",
+        json={},
+        headers={"X-CSRF-Token": csrf_token},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["demoted"] is True
+    plan = await _get_plan(db_session, q.id)
+    assert plan.status == "draft"
+    assert plan.confirmed_by_id is None
+    assert plan.confirmed_at is None
+    assert not _program_changed(plan.program, _PROGRAM)  # program には触らない
+
+
+@pytest.mark.asyncio
+async def test_demote_draft_plan_is_noop_and_missing_plan_is_404(
+    designer_client: AsyncClient,
+    designer_user: User,
+    db_session: AsyncSession,
+    csrf_token: str,
+) -> None:
+    q = await _setup(db_session)
+    _act_as(designer_client, designer_user, RoleType.DESIGNER)
+    url = f"/ai-input/questionnaires/{q.id}/plan/item1/demote"
+    resp = await designer_client.post(url, json={}, headers={"X-CSRF-Token": csrf_token})
+    assert resp.status_code == 404
+
+    await _save(designer_client, q.id, _PROGRAM, csrf_token, confirm=False)
+    resp = await designer_client.post(url, json={}, headers={"X-CSRF-Token": csrf_token})
+    assert resp.status_code == 200
+    assert resp.json()["demoted"] is False
+
+
+# ---------------------------------------------------------------------------
+# 楽観的排他（版トークン）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_plan_save_with_stale_version_is_409_and_does_not_overwrite(
+    designer_client: AsyncClient,
+    designer_user: User,
+    db_session: AsyncSession,
+    csrf_token: str,
+) -> None:
+    """画面を開いた後に別の操作で変わった行は上書きしない（409）。"""
+    q, _ = await _confirmed(designer_client, designer_user, db_session, csrf_token)
+    page_version = (await _save(designer_client, q.id, _PROGRAM, csrf_token, confirm=False)).json()[
+        "version"
+    ]
+    assert page_version
+
+    # 別の利用者が先に編集した
+    other = copy.deepcopy(_PROGRAM)
+    other["steps"][0]["sql"] = "SELECT other FROM t WHERE pid = :patient_id"
+    resp = await designer_client.post(
+        f"/ai-input/questionnaires/{q.id}/plan/item1",
+        json={"program": other, "base_version": page_version},
+        headers={"X-CSRF-Token": csrf_token},
+    )
+    assert resp.status_code == 200, resp.text
+    new_version = resp.json()["version"]
+    assert new_version != page_version
+
+    # 古い版のまま保存しようとすると 409
+    mine = copy.deepcopy(_PROGRAM)
+    mine["steps"][0]["sql"] = "SELECT mine FROM t WHERE pid = :patient_id"
+    for url in (
+        f"/ai-input/questionnaires/{q.id}/plan/item1",
+        f"/ai-input/questionnaires/{q.id}/plan/item1?confirm=true",
+    ):
+        resp = await designer_client.post(
+            url,
+            json={"program": mine, "base_version": page_version},
+            headers={"X-CSRF-Token": csrf_token},
+        )
+        assert resp.status_code == 409
+        assert resp.json()["conflict"] is True
+        assert resp.json()["version"] == new_version
+    resp = await designer_client.post(
+        f"/ai-input/questionnaires/{q.id}/plan/item1/demote",
+        json={"base_version": page_version},
+        headers={"X-CSRF-Token": csrf_token},
+    )
+    assert resp.status_code == 409
+
+    plan = await _get_plan(db_session, q.id)
+    assert plan.program["steps"][0]["sql"] == other["steps"][0]["sql"]
+
+
+@pytest.mark.asyncio
+async def test_plan_save_with_null_version_conflicts_when_row_exists(
+    designer_client: AsyncClient,
+    designer_user: User,
+    db_session: AsyncSession,
+    csrf_token: str,
+) -> None:
+    """「まだ行が無い」と思っている画面（null）は、既に作られた行を上書きしない。
+
+    版を送らない呼び出し（API 直叩き）は従来どおり検査しない。
+    """
+    q = await _setup(db_session)
+    _act_as(designer_client, designer_user, RoleType.DESIGNER)
+    first = await designer_client.post(
+        f"/ai-input/questionnaires/{q.id}/plan/item1",
+        json={"program": _PROGRAM, "base_version": None},
+        headers={"X-CSRF-Token": csrf_token},
+    )
+    assert first.status_code == 200
+    edited = copy.deepcopy(_PROGRAM)
+    edited["steps"][0]["sql"] = "SELECT 9"
+    resp = await designer_client.post(
+        f"/ai-input/questionnaires/{q.id}/plan/item1",
+        json={"program": edited, "base_version": None},
+        headers={"X-CSRF-Token": csrf_token},
+    )
+    assert resp.status_code == 409
+    resp = await _save(designer_client, q.id, edited, csrf_token, confirm=False)
+    assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_runbook_save_with_stale_version_is_409(
+    designer_client: AsyncClient,
+    designer_user: User,
+    db_session: AsyncSession,
+    csrf_token: str,
+) -> None:
+    q, rb = await _confirmed_runbook(designer_client, designer_user, db_session, csrf_token)
+    # 画面が持つ版（同一内容の保存は何も書かずに現在の版を返す）
+    page_version = (await _save_runbook(designer_client, q.id, _RB_STEPS, csrf_token)).json()[
+        "version"
+    ]
+    assert page_version
+
+    edited = copy.deepcopy(_RB_STEPS)
+    edited[0]["title"] = "先に保存した題"
+    resp = await designer_client.post(
+        f"/ai-input/questionnaires/{q.id}/runbook/item1",
+        json={"steps": edited, "base_version": page_version},
+        headers={"X-CSRF-Token": csrf_token},
+    )
+    assert resp.status_code == 200, resp.text
+
+    mine = copy.deepcopy(_RB_STEPS)
+    mine[0]["title"] = "後から保存した題"
+    resp = await designer_client.post(
+        f"/ai-input/questionnaires/{q.id}/runbook/item1?confirm=true",
+        json={"steps": mine, "base_version": page_version},
+        headers={"X-CSRF-Token": csrf_token},
+    )
+    assert resp.status_code == 409
+    await db_session.refresh(rb)
+    assert rb.steps[0]["title"] == "先に保存した題"
+    assert rb.status == "draft"
+
+
+# ---------------------------------------------------------------------------
+# 何も変えていない保存は何も書かない（改行・CRLF・前後空白を含む値）
+# ---------------------------------------------------------------------------
+
+_CRLF_PROGRAM: dict[str, Any] = {
+    "steps": [
+        {
+            "op": "sql_extract",
+            "id": "s1",
+            "sql": "SELECT v\r\nFROM t WHERE pid = :patient_id",
+            "reasoning": "\n1行目\r\n2行目\n  ",
+        }
+    ],
+    "return": "$s1",
+}
+
+
+@pytest.mark.asyncio
+async def test_identical_save_with_newlines_and_crlf_is_a_noop(
+    designer_client: AsyncClient,
+    designer_user: User,
+    db_session: AsyncSession,
+    csrf_token: str,
+) -> None:
+    """改行・CRLF・前後空白を含む reasoning を同じまま送ると、確認済みのまま何も書かない。"""
+    q = await _setup(db_session)
+    _act_as(designer_client, designer_user, RoleType.DESIGNER)
+    resp = await _save(designer_client, q.id, _CRLF_PROGRAM, csrf_token, confirm=True)
+    assert resp.status_code == 200, resp.text
+    plan = await _get_plan(db_session, q.id)
+    before = (plan.updated_at, plan.confirmed_at, plan.confirmed_by_id)
+
+    resp = await _save(
+        designer_client, q.id, copy.deepcopy(_CRLF_PROGRAM), csrf_token, confirm=False
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "confirmed"
+    assert body["unchanged"] is True
+    plan = await _get_plan(db_session, q.id)
+    assert (plan.updated_at, plan.confirmed_at, plan.confirmed_by_id) == before
+    assert plan.program["steps"][0]["reasoning"] == "\n1行目\r\n2行目\n  "
+
+
+@pytest.mark.asyncio
+async def test_normalised_newlines_or_trimmed_reasoning_count_as_a_change(
+    designer_client: AsyncClient,
+    designer_user: User,
+    db_session: AsyncSession,
+    csrf_token: str,
+) -> None:
+    """サーバは文字どおりに比べる。CRLF→LF や trim は「変更」であり、だから画面は触って
+    いない欄を元の値のまま送る（plan.html / design_runbook.html の collectSteps）。"""
+    q = await _setup(db_session)
+    _act_as(designer_client, designer_user, RoleType.DESIGNER)
+    for mangle in (
+        lambda r: r.replace("\r\n", "\n"),
+        lambda r: r.strip(),
+        lambda r: r.replace("\r\n", " ").replace("\n", " "),  # 旧 <input> の改行落とし
+    ):
+        # 元の内容で確認し直してから、崩した内容を保存する
+        resp = await _save(designer_client, q.id, _CRLF_PROGRAM, csrf_token, confirm=True)
+        assert resp.json()["status"] == "confirmed"
+        mangled = copy.deepcopy(_CRLF_PROGRAM)
+        mangled["steps"][0]["reasoning"] = mangle(mangled["steps"][0]["reasoning"])
+        resp = await _save(designer_client, q.id, mangled, csrf_token, confirm=False)
+        assert resp.json()["status"] == "draft"
+
+
+@pytest.mark.asyncio
+async def test_identical_runbook_save_with_newlines_is_a_noop(
+    designer_client: AsyncClient,
+    designer_user: User,
+    db_session: AsyncSession,
+    csrf_token: str,
+) -> None:
+    q = await _setup(db_session, runbook_status="draft")
+    _act_as(designer_client, designer_user, RoleType.DESIGNER)
+    steps = [
+        {
+            "order": 1,
+            "title": "  題  ",
+            "description": "\n説明1\r\n説明2 ",
+            "action_type": "fetch",
+            "data_hint": "SELECT a\r\nFROM b",
+        }
+    ]
+    url = f"/ai-input/questionnaires/{q.id}/runbook/item1"
+    resp = await designer_client.post(
+        url + "?confirm=true", json={"steps": steps}, headers={"X-CSRF-Token": csrf_token}
+    )
+    assert resp.status_code == 200, resp.text
+    resp = await designer_client.post(
+        url, json={"steps": steps}, headers={"X-CSRF-Token": csrf_token}
+    )
+    assert resp.json()["status"] == "confirmed"
+    assert resp.json()["unchanged"] is True
+
+
+# ---------------------------------------------------------------------------
+# 実行記録: UTC の ISO 表記と実効モデル
+# ---------------------------------------------------------------------------
+
+
+def test_snapshot_writes_utc_aware_iso_for_naive_and_aware_datetimes() -> None:
+    """SQLite（naive）でも PostgreSQL（aware）でも同じ UTC 表記で書く。"""
+    from datetime import timedelta, timezone
+
+    naive = datetime(2026, 1, 2, 3, 4, 5, 6)
+    jst = datetime(2026, 1, 2, 12, 4, 5, 6, tzinfo=timezone(timedelta(hours=9)))
+    for dt in (naive, jst):
+        plan = InputPlan(link_id="i", program=_PROGRAM, confirmed_at=dt, updated_at=dt)
+        snap = program_snapshot([plan])["i"]
+        assert snap["confirmed_at"] == "2026-01-02T03:04:05.000006+00:00"
+        assert snap["plan_updated_at"] == "2026-01-02T03:04:05.000006+00:00"
+
+
+_LLM_PROGRAM: dict[str, Any] = {
+    "steps": [
+        {"op": "llm_extract", "id": "a", "prompt": "p", "llm_model": "approved-model"},
+        {"op": "llm_judge", "id": "b", "prompt": "q"},
+        {"op": "sql_extract", "id": "c", "sql": "SELECT 1"},
+    ],
+    "return": "$a",
+}
+
+
+def test_snapshot_records_effective_llm_models(monkeypatch: pytest.MonkeyPatch) -> None:
+    """LLM op ごとに実効モデルと出所を残し、実行時指定で承認と違えば overridden_from を書く。"""
+    monkeypatch.setattr(settings, "ollama_model", "default-model")
+    plan = InputPlan(link_id="i", program=_LLM_PROGRAM)
+
+    snap = program_snapshot([plan])["i"]["llm_models"]
+    assert snap == {
+        "a": {"effective": "approved-model", "source": "step", "approved": "approved-model"},
+        "b": {"effective": "default-model", "source": "default", "approved": None},
+    }
+
+    snap = program_snapshot([plan], "run-model")["i"]["llm_models"]
+    assert snap["a"] == {
+        "effective": "run-model",
+        "source": "request_override",
+        "approved": "approved-model",
+        "overridden_from": "approved-model",
+    }
+    # step にモデルの指定が無ければ「承認と違う」とは言えない
+    assert "overridden_from" not in snap["b"]
+    assert snap["b"]["source"] == "request_override"
+
+    # LLM op の無いプランには llm_models を付けない
+    assert "llm_models" not in program_snapshot([InputPlan(link_id="j", program=_PROGRAM)])["j"]
+
+
+@pytest.mark.asyncio
+async def test_llm_trace_marks_run_time_override(db_session: AsyncSession) -> None:
+    """実行時指定が承認された step.llm_model に優先したことを trace だけで読めること。"""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from kawasemi.ai_input.executor import DSLInterpreter
+
+    program = {
+        "steps": [{"op": "llm_extract", "id": "v", "prompt": "p", "llm_model": "approved-model"}],
+        "return": "$v",
+    }
+    plan = InputPlan(questionnaire_id=1, link_id="i", program=program, status="confirmed")
+
+    for override, source, overridden in (
+        ("run-model", "request_override", "approved-model"),
+        (None, "step", None),
+    ):
+        interp = DSLInterpreter()
+        interp._ollama_client.chat = AsyncMock(
+            return_value=SimpleNamespace(message=SimpleNamespace(content="x"))
+        )
+        _, evidence = await interp.execute([plan], "P1", db_session, llm_model_override=override)
+        llm = next(t for t in evidence["i"]["trace"] if t.get("op") == "llm_extract")["llm"]
+        assert llm["model"] == (override or "approved-model")
+        assert llm["model_source"] == source
+        assert llm.get("overridden_from") == overridden

@@ -451,10 +451,17 @@ class RunbookGenerateRequest(BaseModel):
     model: str | None = None
 
 
+# 楽観的排他の版トークン。画面は読み込んだ（最後に保存した）時点の `version` を送り、
+# サーバの行がその後に変わっていれば 409 を返す。**送らない呼び出し（API 直叩き・
+# 移行スクリプト）は検査しない**。行がまだ無いと思っている画面は null を送る。
+_BASE_VERSION_DOC = "読み込んだ時点の版（null は「行がまだ無い」）。省略すると検査しない"
+
+
 class RunbookSaveRequest(BaseModel):
     """ステップ2: 1項目分の手順書ステップ保存リクエスト"""
 
     steps: list[RunbookStep] = []
+    base_version: str | None = Field(default=None, description=_BASE_VERSION_DOC)
 
 
 # =============================================================================
@@ -645,6 +652,13 @@ class PlanSaveRequest(BaseModel):
     """ステップ3: 1項目分のDSLプログラム保存リクエスト"""
 
     program: DSLProgram
+    base_version: str | None = Field(default=None, description=_BASE_VERSION_DOC)
+
+
+class PlanDemoteRequest(BaseModel):
+    """ステップ3: 確認済みの取得プランを draft へ戻すリクエスト"""
+
+    base_version: str | None = Field(default=None, description=_BASE_VERSION_DOC)
 
 
 class AutofillRequest(BaseModel):

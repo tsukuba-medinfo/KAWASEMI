@@ -156,7 +156,7 @@ async def run_batch_job(job_id: int) -> None:
                     prefill_data=prefill_data,
                     evidence=evidence,
                     # バッチも本番実行なので実行時 program を固定保存する（版固定を全経路で成立）。
-                    program_snapshot=program_snapshot(plans),
+                    program_snapshot=program_snapshot(plans, model),
                     status=status,
                     error_summary=error_summary,
                 )

@@ -40,6 +40,7 @@
       <button type="button" class="btn btn--secondary" id="regen-btn" onclick="recompile()">この項目だけ再作成</button>
       {% endif %}
       <button type="button" class="btn btn--secondary" id="save-btn" onclick="saveCurrent(false)">保存（確認しない）</button>
+      <button type="button" class="btn btn--secondary" id="demote-btn" onclick="demoteCurrent()" style="display:none;">下書きに戻す</button>
       <div class="spacer"></div>
       <button type="button" class="btn btn--primary" id="confirm-btn" onclick="confirmNext()">確認して次へ →</button>
     </div>
@@ -58,6 +59,8 @@ const OP_LABELS = {{ op_labels | tojson }};
 const OPS = Object.keys(OP_LABELS);
 let ITEMS = {{ items | tojson }};
 let cur = 0;
+// 保存済みの内容（正準形）。何も変えていない「保存」はサーバへ送らない。
+ITEMS.forEach(it => { it.saved = canon(programOf(it)); });
 let graphSeq = 0;
 
 if (window.mermaid) mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
@@ -66,6 +69,19 @@ const META_KEYS = new Set(['op', 'id', 'needs_input', 'reasoning']);
 
 function esc(s) { const d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
 function setStatus(msg, ok) { const el = document.getElementById('status'); el.textContent = msg; el.className = ok ? 'ok' : 'err'; }
+
+// キー順と null に依らない比較用の文字列（サーバの正準比較と同じ向き）
+function canon(v) {
+  if (Array.isArray(v)) return '[' + v.map(canon).join(',') + ']';
+  if (v && typeof v === 'object') {
+    return '{' + Object.keys(v).filter(k => v[k] !== null && v[k] !== undefined).sort()
+      .map(k => JSON.stringify(k) + ':' + canon(v[k])).join(',') + '}';
+  }
+  return JSON.stringify(v === undefined ? null : v);
+}
+
+// 手順書が未確認の項目は読み取り専用（下書きに戻すことだけできる）
+function readOnly(it) { return it.runbook_confirmed === false; }
 
 function programOf(it) {
   if (!it.program || !Array.isArray(it.program.steps)) it.program = { steps: [], return: null };
@@ -117,6 +133,13 @@ function renderItem() {
     : '<span class="status-pill st-draft">未確認</span>';
   const needs = it.needs_input ? '<span class="needs-badge">⚠ 要入力あり</span>' : '';
   const stale = it.stale ? '<span class="stale-badge">⚠ 手順書が更新されました・再作成推奨</span>' : '';
+  const ro = readOnly(it);
+  const roBadge = ro
+    ? '<span class="stale-badge">手順書が未確認（読み取り専用）</span>'
+    : '';
+  const roNote = ro
+    ? `<div class="alert alert-error">この項目の手順書が未確認に戻っています。手順書を確認するまで、この取得プランは編集・確認できません。${it.status === 'confirmed' ? '<b>確認済みのまま実行されます。</b>止めるには「下書きに戻す」を押してください。' : ''}</div>`
+    : '';
 
   const stepsHtml = prog.steps.length
     ? prog.steps.map((s, i) => stepHtml(s, i)).join('')
@@ -126,8 +149,9 @@ function renderItem() {
     <div class="item-head">
       <span class="link-id-badge">${esc(it.link_id)}</span>
       <span class="item-text">${esc(it.item_text || '（テキストなし）')}</span>
-      ${statusPill} ${needs} ${stale}
+      ${statusPill} ${needs} ${stale} ${roBadge}
     </div>
+    ${roNote}
     <div class="editor-row">
       <div>
         <div class="steps-head">
@@ -156,6 +180,15 @@ function renderItem() {
     </div>`;
   document.getElementById('prev-btn').disabled = (cur === 0);
   document.getElementById('confirm-btn').textContent = (cur === ITEMS.length - 1) ? '確認して完了' : '確認して次へ →';
+  document.getElementById('confirm-btn').disabled = ro;
+  document.getElementById('save-btn').disabled = ro;
+  const regenBtn = document.getElementById('regen-btn');
+  if (regenBtn) regenBtn.disabled = ro;
+  document.getElementById('demote-btn').style.display = it.status === 'confirmed' ? '' : 'none';
+  if (ro) {
+    document.querySelectorAll('#item-card input, #item-card textarea, #item-card select, #item-card button')
+      .forEach(el => { el.disabled = true; });
+  }
   renderGraph();
   // **引数の JSON は全文が見えていないと確認にならない。** 高さを中身に合わせる
   // （手順書側と同じ理由。3行固定では SQL や分岐がスクロールしないと読めなかった）。
@@ -168,7 +201,7 @@ function autoGrow(el) {
 }
 
 function autoGrowAll() {
-  document.querySelectorAll('.args-area').forEach(el => {
+  document.querySelectorAll('.args-area, .reason-input').forEach(el => {
     autoGrow(el);
     el.addEventListener('input', () => autoGrow(el));
   });
@@ -210,7 +243,7 @@ function stepHtml(s, i) {
       </div>
       <label class="fld">処理ごとの引数（JSON）</label>
       <textarea class="args-area" oninput="onArgsInput(this)">${esc(args)}</textarea>
-      <input class="reason-input" placeholder="補足・要入力の理由（任意）" value="${esc(s.reasoning || '')}">
+      <textarea class="reason-input" rows="1" placeholder="補足・要入力の理由（任意）">${esc(s.reasoning || '')}</textarea>
     </div>`;
 }
 
@@ -235,16 +268,29 @@ function onArgsInput(el) {
   catch (e) { el.classList.add('invalid'); }
 }
 
+// **触っていない欄は元の値をそのまま返す。** 画面に出した文字列から読み直すと、
+// 改行（input 要素は改行を落とし、textarea は CRLF を LF にする）や前後の空白が変わり、
+// 何も編集していない保存が「内容の変更」になって確認済みが下書きへ戻ってしまう。
+// 変わったかどうかは各要素の初期値（defaultValue / defaultChecked）と比べて決める。
+function touched(el) { return el.value !== el.defaultValue; }
+
 function collectSteps() {
   const steps = [];
+  const prev = programOf(ITEMS[cur]).steps;
   document.querySelectorAll('#steps .step').forEach(el => {
-    let args = {};
-    try { args = JSON.parse(el.querySelector('.args-area').value || '{}'); } catch (e) { args = {}; }
+    const orig = prev[Number(el.dataset.idx)] || {};
+    const argsEl = el.querySelector('.args-area');
+    let args;
+    if (!touched(argsEl)) args = argsOf(orig);
+    else { try { args = JSON.parse(argsEl.value || '{}'); } catch (e) { args = {}; } }
+    const idEl = el.querySelector('.id-input');
+    const cb = el.querySelector('.needs-cb');
+    const rs = el.querySelector('.reason-input');
     steps.push(Object.assign({
       op: el.querySelector('.op-select').value,
-      id: el.querySelector('.id-input').value.trim(),
-      needs_input: el.querySelector('.needs-cb').checked,
-      reasoning: el.querySelector('.reason-input').value.trim() || null,
+      id: touched(idEl) ? idEl.value.trim() : orig.id,
+      needs_input: cb.checked === cb.defaultChecked ? orig.needs_input : cb.checked,
+      reasoning: touched(rs) ? (rs.value || null) : (orig.reasoning ?? null),
     }, args));
   });
   return steps;
@@ -260,7 +306,7 @@ function syncToMemory() {
   const prog = programOf(ITEMS[cur]);
   prog.steps = collectSteps();
   const pa = document.getElementById('params-area');
-  if (pa) {
+  if (pa && touched(pa)) {
     // 不正 JSON を黙って捨てると、利用者が allowed を追記したり危険な宣言を削除したりした
     // 編集が消えたまま「確認しました」になる。params は確定関門の対象そのものなので、
     // 例外を投げて保存側で止める（step の args と違い、サーバ側の 400 で顕在化しない）。
@@ -272,7 +318,7 @@ function syncToMemory() {
     prog.params = parsed;
   }
   const ret = document.getElementById('ret-input');
-  prog.return = ret && ret.value.trim() ? ret.value.trim() : null;
+  if (ret && touched(ret)) prog.return = ret.value.trim() || null;
 }
 
 function addStep() {
@@ -341,19 +387,28 @@ async function saveCurrent(confirm) {
   try { syncToMemory(); }
   catch (e) { setStatus(e.message, false); return; }
   const it = ITEMS[cur];
+  if (readOnly(it)) { setStatus('手順書が未確認のため、この取得プランは保存・確認できません', false); return false; }
+  if (!confirm && it.has_plan && canon(programOf(it)) === it.saved) {
+    setStatus('変更はありません（保存していません）', true);
+    return true;
+  }
   setStatus('保存中...', true);
   try {
-    const data = await post(`{{ base_path() }}/ai-input/questionnaires/${QID}/plan/${encodeURIComponent(it.link_id)}?confirm=${confirm}`, { program: programOf(it) });
+    const data = await post(`{{ base_path() }}/ai-input/questionnaires/${QID}/plan/${encodeURIComponent(it.link_id)}?confirm=${confirm}`, { program: programOf(it), base_version: it.version ?? null });
+    if (data.conflict) { setStatus(`⚠ ${data.message}`, false); return false; }
     if (data.success) {
       it.status = data.status; it.has_plan = true; it.stale = false;
+      it.version = data.version; it.saved = canon(programOf(it));
       it.needs_input = programOf(it).steps.some(s => s.needs_input);
       // 確認済みの program を変えて保存すると、サーバが未確認（draft）へ戻す。
       // 承認したのは変更前の program なので、確認し直すまで実行されない。
       if (data.demoted) setStatus(`⚠ 保存しました。${data.warning}`, false);
+      else if (data.unchanged) setStatus('変更はありません（保存していません）', true);
       // step が空のプランは確定できるが、取得の設計ができたわけではない。警告として出す。
       else if (data.warning) setStatus(`⚠ 確認しました。${data.warning}`, false);
       else setStatus(confirm ? '✓ 確認しました' : '✓ 保存しました', true);
       renderProgress();
+      document.getElementById('demote-btn').style.display = it.status === 'confirmed' ? '' : 'none';
       // 状態の表示（確認済み／未確認）を戻った状態に合わせる
       if (data.demoted) renderItem();
       return true;
@@ -362,6 +417,20 @@ async function saveCurrent(confirm) {
     setStatus(`エラー: ${(data.message || '保存に失敗しました')}${extra}`, false);
   } catch (e) { setStatus(`通信エラー: ${e}`, false); }
   return false;
+}
+
+async function demoteCurrent() {
+  const it = ITEMS[cur];
+  if (!confirm('この取得プランを下書き（未確認）に戻します。確認し直すまで実行されません。よろしいですか？')) return;
+  try {
+    const data = await post(`{{ base_path() }}/ai-input/questionnaires/${QID}/plan/${encodeURIComponent(it.link_id)}/demote`, { base_version: it.version ?? null });
+    if (data.conflict) { setStatus(`⚠ ${data.message}`, false); return; }
+    if (data.success) {
+      it.status = data.status; it.version = data.version;
+      setStatus('✓ 下書きに戻しました（確認し直すまで実行されません）', true);
+      renderProgress(); renderItem();
+    } else { setStatus(`エラー: ${data.message || '下書きに戻せませんでした'}`, false); }
+  } catch (e) { setStatus(`通信エラー: ${e}`, false); }
 }
 
 async function confirmNext() {
@@ -380,6 +449,7 @@ async function recompile() {
     const data = await post(`{{ base_path() }}/ai-input/questionnaires/${QID}/plan/${encodeURIComponent(it.link_id)}/recompile`, { model });
     if (data.success) {
       it.program = data.program; it.status = data.status; it.has_plan = true; it.stale = false; it.needs_input = data.needs_input;
+      it.version = data.version; it.saved = canon(programOf(it));
       setStatus('✓ 再作成しました', true);
       renderProgress(); renderItem();
     } else { setStatus(`エラー: ${data.message || '再作成に失敗しました'}`, false); }
