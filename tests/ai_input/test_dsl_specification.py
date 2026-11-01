@@ -149,11 +149,14 @@ def test_spec_value_vocabularies_match_code() -> None:
 
 
 def test_spec_sql_forbidden_words_match_code() -> None:
-    """§6.3 の SQL の禁止語が `_SQL_FORBIDDEN` の語と一致すること。"""
+    """§6.3 の SQL の禁止語が `_SQL_FORBIDDEN` の語と一致すること。
+
+    コードの `\\w*`（その語で始まる単語すべて）は、仕様では末尾の `*` で書く。
+    """
     m = re.fullmatch(r"\\b\((.*)\)\\b", _SQL_FORBIDDEN.pattern)
     assert m, "_SQL_FORBIDDEN の形が \\b(a|b|...)\\b でなくなった。このテストを直す"
-    code_words = m.group(1).split("|")
-    assert all(re.fullmatch(r"[a-z_]+", w) for w in code_words), code_words
+    code_words = [w.replace(r"\w*", "*") for w in m.group(1).split("|")]
+    assert all(re.fullmatch(r"[a-z_]+\*?", w) for w in code_words), code_words
     spec_words = " ".join(_marked_list("sql-forbidden")).split()
     assert sorted(spec_words) == sorted(code_words)
 
