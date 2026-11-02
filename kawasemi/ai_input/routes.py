@@ -22,10 +22,11 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingRes
 from fastapi.templating import Jinja2Templates
 from fastapi_csrf_protect import CsrfProtect
 from pydantic import ValidationError
-from sqlalchemy import case, func, select
+from sqlalchemy import case, func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from sqlalchemy.orm.attributes import flag_modified
 
 from kawasemi.ai_input.citation_metrics import citation_coverage
 from kawasemi.ai_input.clinical_drafter import AIClinicalDrafter
@@ -566,16 +567,35 @@ async def _plan_map(questionnaire_id: int, db: AsyncSession) -> dict[str, InputP
     return {p.link_id: p for p in result.scalars().all()}
 
 
+async def _sqlite_write_lock(db: AsyncSession, model: type[InputRunbook] | type[InputPlan]) -> None:
+    """SQLite では、読み直しの前に DB の書き込みロックを取る（`FOR UPDATE` の代わり）。
+
+    SQLite は `FOR UPDATE` を無視する。しかもドライバ（sqlite3 / aiosqlite）は SELECT の前に
+    BEGIN を出さないので、**読み直しと書き込みは同じトランザクションにならない**。読んで
+    版を比べた後、書く前に別の接続が commit できる（「書き込みは DB 全体で直列化される」
+    は、読んでから書くまでの間には効かない）。
+    ここで行に触れない UPDATE（`WHERE 1 = 0`）を先に流すと、ドライバが BEGIN を出し、
+    SQLite が書き込みロック（RESERVED）を取る。以後 commit / rollback までの間、他の接続の
+    書き込みは busy_timeout まで待つ（PostgreSQL の行ロックより粗いが、比べてから書くまでを
+    押さえる点は同じ）。行に触れないので `updated_at` も変わらない。PostgreSQL では何もしない。
+    """
+    conn = await db.connection()
+    if conn.dialect.name != "sqlite":
+        return
+    await db.execute(text(f"UPDATE {model.__tablename__} SET id = id WHERE 1 = 0"))
+
+
 async def _lock_row(db: AsyncSession, row: InputRunbook | InputPlan | None) -> None:
     """保存の読み比べ〜書き込みの間、対象行を行ロックで押さえ、最新の値で読み直す。
 
     楽観的排他の版比較（`_version_conflict`）と「内容が変わったか」の判定を、他の要求が
     同じ行を書き換えている途中の値で行わないためである。PostgreSQL では `FOR UPDATE`、
-    SQLite では句が無視されるが書き込みは DB 全体で直列化される。
+    SQLite では `_sqlite_write_lock` で DB の書き込みロックを先に取る。
     """
     if row is None:
         return
     model = type(row)
+    await _sqlite_write_lock(db, model)
     await db.execute(
         select(model)
         .where(model.id == row.id)
@@ -674,8 +694,10 @@ async def _commit_or_conflict(db: AsyncSession) -> JSONResponse | None:
     """
     try:
         await db.commit()
-    except IntegrityError:
+    except IntegrityError as e:
         await db.rollback()
+        if not _is_unique_violation(e):
+            raise
         return JSONResponse(
             {
                 "success": False,
@@ -688,6 +710,101 @@ async def _commit_or_conflict(db: AsyncSession) -> JSONResponse | None:
             status_code=409,
         )
     return None
+
+
+async def _lock_rows_for_write(
+    db: AsyncSession,
+    model: type[InputRunbook] | type[InputPlan],
+    questionnaire_id: int,
+    link_ids: list[str],
+) -> dict[str, Any]:
+    """AI 生成（LLM 呼び出し）の後、書き込む直前に対象行を行ロック付きで読み直す。
+
+    生成の経路は LLM の応答を待つ間（数十秒〜数分）に、別の要求がその行を確認・編集し
+    得る。**呼び出し前に読んだオブジェクトへ書いてはいけない**。読んだ時点で draft の行に
+    draft と空の確認者を代入しても、ORM は「読んだ値と同じ」と見て UPDATE から外すので、
+    `UPDATE ... SET program=?` だけが走り、**他人が確認した行に誰も確認していない生成
+    結果が入る**（確認済みのまま）。ここで最新の値を読み直し（`populate_existing`）、
+    呼び出し前に控えた版と比べてから書く。比べてから commit までは、PostgreSQL では
+    `FOR UPDATE` の行ロック、SQLite では `_sqlite_write_lock` の DB 書き込みロックで押さえる。
+    加えて `_upsert_*` は status・確認者・確認日時と内容の列を必ず UPDATE に含める
+    （`_force_write_columns`）。
+    """
+    if not link_ids:
+        return {}
+    await _sqlite_write_lock(db, model)
+    result = await db.execute(
+        select(model)
+        .where(model.questionnaire_id == questionnaire_id, model.link_id.in_(link_ids))
+        .order_by(model.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    rows: list[Any] = list(result.scalars().all())
+    return {row.link_id: row for row in rows}
+
+
+def _generation_conflict_response(current: str | None) -> JSONResponse:
+    """単一項目の再生成・再作成で、生成中に行が変わったときの 409。"""
+    return JSONResponse(
+        {
+            "success": False,
+            "conflict": True,
+            "message": (
+                "AI が生成している間に、この項目は別の操作で更新されました（確認・保存など）。"
+                "上書きしないよう生成結果を保存しませんでした。再読み込みして内容を確かめてください"
+            ),
+            "version": current,
+        },
+        status_code=409,
+    )
+
+
+# 一括生成の書き込みで、同時の新規作成（一意制約）に当たったときに読み直してやり直す回数。
+# やり直しでは相手が作った行が見えるので、その項目は版の不一致として skip に回る。
+_GENERATION_WRITE_ATTEMPTS = 3
+
+
+def _force_write_columns(row: InputRunbook | InputPlan) -> None:
+    """内容の列（program / steps）と status・確認者・確認日時を、値が変わっていなくても
+    UPDATE に含める。
+
+    ORM は読んだ値と同じ値の代入を UPDATE から外す。すると、読んでから書くまでの間に
+    別の要求が commit した値のうち、こちらが「変えていない」と見た列はそのまま残る。
+
+    - 生成が draft を書くとき、status を外すと `SET program=?` だけが走り、間に入った
+      確認が残って「確認済み＋誰も確認していない内容」になる。
+    - 確認が confirmed を書くとき、内容を外すと `SET status=?, confirmed_by_id=?, ...`
+      だけが走り、間に入った生成の内容が残って「確認済み（確認者は本人）＋AI の内容」になる。
+
+    どちらの列も必ず書けば、行は**書いた側が見た内容と status の組**になる。ロック
+    （`_lock_row` / `_lock_rows_for_write`）が間に入る書き込みを止めるのが本筋で、これは
+    ロックが効かない経路が残っても組を崩さないための二重化である。
+    """
+    content = "program" if isinstance(row, InputPlan) else "steps"
+    for key in (content, "status", "confirmed_by_id", "confirmed_at"):
+        flag_modified(row, key)
+
+
+def _is_unique_violation(exc: IntegrityError) -> bool:
+    """一意制約違反か（PostgreSQL の SQLSTATE 23505 / SQLite の UNIQUE 制約）。
+
+    同時の新規作成を 409 にするのは一意制約に当たったときだけである。NOT NULL や外部キー
+    の違反は競合ではなく不具合なので、409 に変えずにそのまま上げる。
+    """
+    orig = exc.orig
+    for source in (orig, getattr(orig, "__cause__", None)):
+        if source is None:
+            continue
+        code = getattr(source, "pgcode", None) or getattr(source, "sqlstate", None)
+        if code == "23505":
+            return True
+        if getattr(source, "sqlite_errorname", None) in (
+            "SQLITE_CONSTRAINT_UNIQUE",
+            "SQLITE_CONSTRAINT_PRIMARYKEY",
+        ):
+            return True
+    return "UNIQUE constraint failed" in str(orig)
 
 
 def _is_designed(ann: ClinicalAnnotation | None, loc: SystemLocation | None) -> bool:
@@ -2704,6 +2821,7 @@ async def _upsert_runbook(
         rb.confirmed_by_id = confirmed_by_id
         rb.confirmed_at = confirmed_at
         rb.dropped_action_types = dropped
+        _force_write_columns(rb)
         if llm_model is not None:
             rb.llm_model = llm_model
         return rb
@@ -2834,6 +2952,10 @@ async def generate_runbooks(
         )
 
     combined = _combined_inputs(target_link_ids, fields_text, annotations, locations)
+    # **LLM を呼ぶ前の版を控える**。書き込みの直前に読み直した版と比べ、生成中に別の
+    # 要求が確認・編集した項目は上書きしない（`_lock_rows_for_write`）。
+    versions_before = {lid: runbook_version(runbooks.get(lid)) for lid in target_link_ids}
+    user_id = current_user.id
 
     generator = AIRunbookGenerator()
     try:
@@ -2846,39 +2968,56 @@ async def generate_runbooks(
             db,
             questionnaire_id=questionnaire_id,
             recorder=recorder,
-            created_by_id=current_user.id,
+            created_by_id=user_id,
         )
         return JSONResponse({"success": False, "message": e.message}, status_code=500)
     await save_design_llm_calls_safely(
         db,
         questionnaire_id=questionnaire_id,
         recorder=recorder,
-        created_by_id=current_user.id,
+        created_by_id=user_id,
     )
 
     used_model = model or design_llm_model()
     generated_map = {g.link_id: g for g in generated}
-    saved = 0
+    to_write = {
+        lid: [s.model_dump() for s in generated_map[lid].steps]
+        for lid in target_link_ids
+        if lid in generated_map
+    }
     saved_link_ids: list[str] = []
-    for link_id in target_link_ids:
-        g = generated_map.get(link_id)
-        if not g:
-            continue
-        steps = [s.model_dump() for s in g.steps]
-        await _upsert_runbook(
-            questionnaire_id,
-            link_id,
-            fields_text.get(link_id),
-            steps,
-            RunbookStatus.DRAFT,
-            used_model,
-            runbooks,
-            db,
-        )
-        saved += 1
-        saved_link_ids.append(link_id)
-
-    await db.commit()
+    # 生成中に別の操作で行が変わった（確認・編集・同時の新規作成）ため書かなかった項目
+    skipped_conflict: list[str] = []
+    for _attempt in range(_GENERATION_WRITE_ATTEMPTS):
+        current = await _lock_rows_for_write(db, InputRunbook, questionnaire_id, list(to_write))
+        saved_link_ids, skipped_conflict = [], []
+        for link_id, steps in to_write.items():
+            if runbook_version(current.get(link_id)) != versions_before[link_id]:
+                skipped_conflict.append(link_id)
+                continue
+            await _upsert_runbook(
+                questionnaire_id,
+                link_id,
+                fields_text.get(link_id),
+                steps,
+                RunbookStatus.DRAFT,
+                used_model,
+                current,
+                db,
+            )
+            saved_link_ids.append(link_id)
+        try:
+            await db.commit()
+            break
+        except IntegrityError as e:
+            # 「無い」と読んだ項目を別の要求が先に作った。読み直すとその行が見えるので、
+            # 次の周ではその項目が版の不一致として skip に回る。
+            await db.rollback()
+            if not _is_unique_violation(e):
+                raise
+    else:
+        return _generation_conflict_response(None)
+    saved = len(saved_link_ids)
     # **未試行を別掲する**。この経路の「未試行」は**手順書を生成していない**
     # （再実行すれば対象に入る）。渡した link_id と返ってきた link_id の差で数える
     # ——**順序ではなく応答の有無で定義する**（途中のチャンクが飛ぶ形も同じ扱いにする）。
@@ -2901,9 +3040,17 @@ async def generate_runbooks(
             # ではない。表には今回書き換えなかった行が残っている。
             "skipped_not_designed": skipped_not_designed,
             "skipped_confirmed": skipped_confirmed,
+            # 生成中に別の操作で確認・編集・作成されたため、生成結果を書かなかった項目
+            "skipped_conflict": skipped_conflict,
             # 表にあるが今回書き換えなかった行（事後の検算）
             "rows_not_rewritten": sorted(runbook_rows_before - set(saved_link_ids)),
             "message": _join_notices(
+                (
+                    f"{len(skipped_conflict)}件は生成中に別の操作で更新されたため、"
+                    f"生成結果を保存していません: {', '.join(skipped_conflict)}"
+                    if skipped_conflict
+                    else None
+                ),
                 (
                     f"{len(unattempted)}項目は手順書が返りませんでした（未試行）。"
                     # **対象集合を偽って書かない**。この経路の対象は
@@ -2956,6 +3103,8 @@ async def regenerate_runbook(
     runbooks = await _runbook_map(questionnaire_id, db)
 
     combined = _combined_inputs([link_id], fields_text, annotations, locations)
+    # LLM を呼ぶ前の版。書き込みの直前に読み直した版と違えば 409（上書きしない）
+    version_before = runbook_version(runbooks.get(link_id))
 
     generator = AIRunbookGenerator()
     try:
@@ -3000,6 +3149,18 @@ async def regenerate_runbook(
         )
     steps = [s.model_dump() for s in g.steps]
 
+    # **生成中に確認・編集された行へ書かない**。呼び出し前に読んだオブジェクトではなく、
+    # 行ロック付きで読み直した行の版を比べる（`_lock_rows_for_write`）。
+    current = await _lock_rows_for_write(db, InputRunbook, questionnaire_id, [link_id])
+    current_version = runbook_version(current.get(link_id))
+    if current_version != version_before:
+        await db.rollback()
+        logger.warning(
+            f"手順書再生成: 生成中に行が更新されたため保存しない: "
+            f"questionnaire_id={questionnaire_id}, link_id={link_id}"
+        )
+        return _generation_conflict_response(current_version)
+
     saved = await _upsert_runbook(
         questionnaire_id,
         link_id,
@@ -3007,7 +3168,7 @@ async def regenerate_runbook(
         steps,
         RunbookStatus.DRAFT,
         used_model,
-        runbooks,
+        current,
         db,
     )
     conflict = await _commit_or_conflict(db)
@@ -3316,6 +3477,7 @@ async def _upsert_plan(
         plan.status = status
         plan.confirmed_by_id = confirmed_by_id
         plan.confirmed_at = confirmed_at
+        _force_write_columns(plan)
         if llm_model is not None:
             plan.llm_model = llm_model
         return plan
@@ -3428,6 +3590,11 @@ async def compile_plans(
         )
 
     combined = _compile_inputs(target_link_ids, runbooks, annotations, locations)
+    # **LLM を呼ぶ前の版と書き込みに要る値を控える**。書き込みの直前に読み直した版と比べ、
+    # 生成中に別の要求が確認・編集した項目は上書きしない（`_lock_rows_for_write`）。
+    versions_before = {lid: plan_version(plans.get(lid)) for lid in target_link_ids}
+    item_texts = {lid: runbooks[lid].item_text for lid in target_link_ids}
+    user_id = current_user.id
 
     compiler = AIPlanCompiler()
     try:
@@ -3440,19 +3607,18 @@ async def compile_plans(
             db,
             questionnaire_id=questionnaire_id,
             recorder=recorder,
-            created_by_id=current_user.id,
+            created_by_id=user_id,
         )
         return JSONResponse({"success": False, "message": e.message}, status_code=500)
     await save_design_llm_calls_safely(
         db,
         questionnaire_id=questionnaire_id,
         recorder=recorder,
-        created_by_id=current_user.id,
+        created_by_id=user_id,
     )
 
     used_model = model or design_llm_model()
     generated_map = {g.link_id: g for g in generated}
-    saved = 0
     # 二段ガードの1段目（登録時の早期拒否）: 自動構造化AIが無効の構成では
     # LLM op を含む program を draft 保存しない（実行段階で必ず拒否されるため）。
     rejected_llm: list[str] = []
@@ -3463,6 +3629,7 @@ async def compile_plans(
     compiled_link_ids: list[str] = []
     # step が1つも無いプログラム。保存はするが「取得の設計ができた」とは別に数える
     empty_programs: list[str] = []
+    to_write: dict[str, dict[str, Any]] = {}
     for link_id in target_link_ids:
         g = generated_map.get(link_id)
         if not g:
@@ -3471,25 +3638,47 @@ async def compile_plans(
         if not settings.enable_ai_extraction and _llm_step_ids(program):
             rejected_llm.append(link_id)
             continue
-        errors = validate_program(program)
+        to_write[link_id] = program
+
+    # 生成中に別の操作で行が変わった（確認・編集・同時の新規作成）ため書かなかった項目
+    skipped_conflict: list[str] = []
+    for _attempt in range(_GENERATION_WRITE_ATTEMPTS):
+        current = await _lock_rows_for_write(db, InputPlan, questionnaire_id, list(to_write))
+        compiled_link_ids, skipped_conflict = [], []
+        for link_id, program in to_write.items():
+            if plan_version(current.get(link_id)) != versions_before[link_id]:
+                skipped_conflict.append(link_id)
+                continue
+            await _upsert_plan(
+                questionnaire_id,
+                link_id,
+                item_texts[link_id],
+                program,
+                PlanStatus.DRAFT,
+                used_model,
+                current,
+                db,
+            )
+            compiled_link_ids.append(link_id)
+        try:
+            await db.commit()
+            break
+        except IntegrityError as e:
+            # 「無い」と読んだ項目を別の要求が先に作った。読み直すとその行が見えるので、
+            # 次の周ではその項目が版の不一致として skip に回る。
+            await db.rollback()
+            if not _is_unique_violation(e):
+                raise
+    else:
+        return _generation_conflict_response(None)
+    saved = len(compiled_link_ids)
+    # 検証結果と空プログラムは**保存した項目について**数える（skip した項目は保存していない）
+    for link_id in compiled_link_ids:
+        errors = validate_program(to_write[link_id])
         if errors:
             validation_errors[link_id] = errors
-        if is_empty_program(program):
+        if is_empty_program(to_write[link_id]):
             empty_programs.append(link_id)
-        await _upsert_plan(
-            questionnaire_id,
-            link_id,
-            runbooks[link_id].item_text,
-            program,
-            PlanStatus.DRAFT,
-            used_model,
-            plans,
-            db,
-        )
-        saved += 1
-        compiled_link_ids.append(link_id)
-
-    await db.commit()
     # **未試行を別掲する**。この経路の「未試行」は**プランを生成していない**
     # （再実行すれば対象に入る）で、「生成したが LLM op を含むので保存しなかった」
     # （`rejected_llm`）とは別である。混ぜると、押し直して埋まる項目と手順書を直さないと
@@ -3525,6 +3714,11 @@ async def compile_plans(
             f"取得手順を作れなかった）。取得の設計としては数えないでください: "
             f"{', '.join(sorted(empty_programs))}"
         )
+    if skipped_conflict:
+        messages.append(
+            f"{len(skipped_conflict)}件は作成中に別の操作で更新されたため、"
+            f"作成結果を保存していません: {', '.join(skipped_conflict)}"
+        )
     if skipped_confirmed_plan:
         messages.append(f"{len(skipped_confirmed_plan)}件は確認済みのため作り直していません。")
     if skipped_runbook_unconfirmed:
@@ -3546,6 +3740,8 @@ async def compile_plans(
             "skipped_no_runbook": skipped_no_runbook,
             "skipped_runbook_unconfirmed": skipped_runbook_unconfirmed,
             "skipped_confirmed_plan": skipped_confirmed_plan,
+            # 作成中に別の操作で確認・編集・作成されたため、作成結果を書かなかった項目
+            "skipped_conflict": skipped_conflict,
             # **表にあるが今回書き換えなかった行**（事後の検算）。件数を行数で数える
             # 集計は、これを別に数えれば古い行を今回の結果に混ぜない。
             "rows_not_rewritten": sorted(plan_rows_before - set(compiled_link_ids)),
@@ -3583,8 +3779,12 @@ async def recompile_plan(
     annotations = await _annotation_map(questionnaire_id, db)
     locations = await _location_map(questionnaire_id, db)
     plans = await _plan_map(questionnaire_id, db)
+    user_id = current_user.id
 
     combined = _compile_inputs([link_id], runbooks, annotations, locations)
+    # LLM を呼ぶ前の版。書き込みの直前に読み直した版と違えば 409（上書きしない）
+    version_before = plan_version(plans.get(link_id))
+    item_text = rb.item_text
     compiler = AIPlanCompiler()
     try:
         recorder = DesignLlmRecorder(DesignRole.PLAN)
@@ -3596,14 +3796,14 @@ async def recompile_plan(
             db,
             questionnaire_id=questionnaire_id,
             recorder=recorder,
-            created_by_id=current_user.id,
+            created_by_id=user_id,
         )
         return JSONResponse({"success": False, "message": e.message}, status_code=500)
     await save_design_llm_calls_safely(
         db,
         questionnaire_id=questionnaire_id,
         recorder=recorder,
-        created_by_id=current_user.id,
+        created_by_id=user_id,
     )
 
     used_model = model or design_llm_model()
@@ -3647,14 +3847,26 @@ async def recompile_plan(
     # が従来どおり行う。
     errors = validate_program(program)
 
+    # **生成中に確認・編集された行へ書かない**。呼び出し前に読んだオブジェクトではなく、
+    # 行ロック付きで読み直した行の版を比べる（`_lock_rows_for_write`）。
+    current = await _lock_rows_for_write(db, InputPlan, questionnaire_id, [link_id])
+    current_version = plan_version(current.get(link_id))
+    if current_version != version_before:
+        await db.rollback()
+        logger.warning(
+            f"取得プラン再作成: 生成中に行が更新されたため保存しない: "
+            f"questionnaire_id={questionnaire_id}, link_id={link_id}"
+        )
+        return _generation_conflict_response(current_version)
+
     saved = await _upsert_plan(
         questionnaire_id,
         link_id,
-        rb.item_text,
+        item_text,
         program,
         PlanStatus.DRAFT,
         used_model,
-        plans,
+        current,
         db,
     )
     conflict = await _commit_or_conflict(db)

@@ -450,7 +450,10 @@ async function recompile() {
   if (regenBtn) regenBtn.disabled = true;
   try {
     const data = await post(`{{ base_path() }}/ai-input/questionnaires/${QID}/plan/${encodeURIComponent(it.link_id)}/recompile`, { model });
-    if (data.success) {
+    // 作成中に別の操作で確認・編集された（409）。作成結果は保存されていないので、
+    // 画面の内容も置き換えない。最新の内容は再読込で見る。
+    if (data.conflict) { setStatus(`⚠ ${data.message}`, false); }
+    else if (data.success) {
       it.program = data.program; it.status = data.status; it.has_plan = true; it.stale = false; it.needs_input = data.needs_input;
       it.version = data.version; it.saved = canon(programOf(it));
       setStatus('✓ 再作成しました', true);
@@ -475,7 +478,9 @@ async function compileAll() {
       const note = data.message ? ` ${data.message}` : '';
       // **警告にするのは、押し直さないと埋まらない／直さないと埋まらないものがあるときだけ**。
       // 確認済みで作り直さなかった項目は意図した振る舞いなので、緑のまま注記を出す。
-      const warn = pending || (data.rejected_llm || []).length || Object.keys(data.validation_errors || {}).length;
+      // 作成中に別の操作で確認・編集された項目（skipped_conflict）は保存していないので警告にする
+      const warn = pending || (data.rejected_llm || []).length || Object.keys(data.validation_errors || {}).length
+        || (data.skipped_conflict || []).length;
       const mark = warn ? '⚠' : '✓';
       setStatus(`${mark} ${data.compiled} 件を作成しました。${note} 再読込します...`, !warn);
       setTimeout(() => location.reload(), (data.message || pending) ? 4000 : 800);
