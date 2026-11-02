@@ -443,3 +443,59 @@ async def test_dblink_escapes_the_readonly_transaction_but_sql_extract_rejects_i
     assert evidence["q"]["trace"] == []
     assert "SELECT" in evidence["q"]["error"], evidence
     assert await _rows(pg_engine) == [("P1", "original")]
+
+
+# レビューで PostgreSQL 17 の `sql_extract` から実際に書けた形。`{db}` に dblink_exec を入れる
+_COMMENT_BYPASSES = {
+    # リテラルの中の `--` / `/*` から後ろをコメントとして消していた（1回目）
+    "line_comment_in_literal": "SELECT '--' AS x, {db} WHERE :patient_id = :patient_id",
+    "block_comment_in_literal": "SELECT '/*' AS x, {db} WHERE :patient_id = :patient_id",
+    # PostgreSQL は `--` を `\r` でも終える（2回目）
+    "line_comment_ended_by_cr": "SELECT 1 --\r, {db} WHERE :patient_id = :patient_id\n",
+    # PostgreSQL の入れ子の開き `/*/` が閉じ `*/` と重なる（2回目）
+    "overlapping_nested_opener": (
+        "SELECT 1 /* /*/ -- */ */ , {db} WHERE :patient_id = :patient_id\n"
+    ),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("template", list(_COMMENT_BYPASSES.values()), ids=list(_COMMENT_BYPASSES))
+async def test_comment_tricks_do_not_hide_dblink_exec(
+    app_session: AsyncSession, pg_engine: AsyncEngine, dblink: str, template: str
+) -> None:
+    """コメントで `dblink_exec` を禁止語の検査から隠し、開発用フォールバック
+    （READONLY_DATABASE_URL 無し）で書けていた形（レビューの再現）。コメントは引用の外では
+    一切拒否するので、`sql_extract` で拒否され、何も書かれないこと。"""
+    insert = f"INSERT INTO {TABLE} VALUES (''P8'', ''via-comment'')"
+    sql = template.format(db=f"dblink_exec('{dblink}', '{insert}')")
+
+    assert not is_select_only_sql(sql)
+    prefill, evidence = await DSLInterpreter().execute([_plan(sql)], "P1", app_session)
+    assert "q" not in prefill
+    assert evidence["q"]["trace"] == []
+    assert "SELECT" in evidence["q"]["error"], evidence
+    assert await _rows(pg_engine) == [("P1", "original")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "glue",
+    ["$$a$$=$$b$$union", "$t$a$t$=$t$b$t$union all"],
+    ids=["empty_tag", "named_tag"],
+)
+async def test_a_keyword_right_after_a_dollar_quote_is_not_hidden(
+    app_session: AsyncSession, glue: str
+) -> None:
+    """閉じたドル引用の直後の `union` が禁止語の境界に掛からず、`sql_extract` で
+    `pg_authid` が読めていた（レビューの再現）。検証で拒否され、何も読まれないこと。"""
+    sql = (
+        f"SELECT v FROM {TABLE} WHERE patient_id = :patient_id AND {glue} "
+        "SELECT rolname FROM pg_authid"
+    )
+
+    assert not is_select_only_sql(sql)
+    prefill, evidence = await DSLInterpreter().execute([_plan(sql)], "NOPE", app_session)
+    assert "q" not in prefill, prefill
+    assert evidence["q"]["trace"] == []
+    assert "SELECT" in evidence["q"]["error"], evidence

@@ -21,6 +21,8 @@ from kawasemi.ai_input.dsl import (
     has_needs_input,
     is_select_only_sql,
     safe_arith,
+    sanitize_sql_identifier,
+    sql_bind_names,
     validate_program,
 )
 from kawasemi.ai_input.executor import (
@@ -52,6 +54,306 @@ from kawasemi.ai_input.viz import program_to_mermaid
 )
 def test_is_select_only_sql(sql: str, ok: bool) -> None:
     assert is_select_only_sql(sql) is ok
+
+
+# 文字列リテラルの中の `--` / `/*` から後ろをコメントとして消していたため、禁止語・複文・
+# `U&` の検査の前に本体が見えなくなっていた（レビューの再現。PostgreSQL 17 の開発用
+# フォールバックで dblink_exec が実際に書けた）
+_COMMENT_IN_LITERAL_BYPASSES = [
+    "SELECT '--', dblink_exec('host=x', 'INSERT INTO t VALUES (1)')",
+    "SELECT '--', pg_sleep(100)",
+    "SELECT '--'; DROP TABLE users",
+    "SELECT x FROM t WHERE a='--' UNION SELECT password_hash FROM users",
+    "SELECT '--' AS x, dblink_exec('host=x', 'INSERT ...') WHERE :patient_id = :patient_id",
+    # `/*` がリテラルの中にあると、以前は後ろの `*/` までが消えた
+    "SELECT '/*', pg_sleep(1) -- */",
+    "SELECT '/*' AS a, dblink_exec('x', 'y') /* */",
+    # ドル引用の本体の `--` はコメントではない
+    "SELECT $$--$$, pg_sleep(1)",
+    "SELECT $q$ -- $q$, pg_sleep(1)",
+    # 識別子の中のコメント記号
+    'SELECT "--", pg_sleep(1) FROM t',
+    'SELECT "/*", pg_sleep(1) FROM t -- */',
+    "SELECT `--`, pg_sleep(1) FROM t",
+    # E 文字列の `\'` で閉じたと見なすと、後ろの `--` がコメントになる
+    "SELECT E'\\'--', pg_sleep(1)",
+    "SELECT E'\\'' -- ', pg_sleep(1)",
+    # 引用の中の `U&`
+    "SELECT '--', U&\"\\0064blink_exec\"('x', 'y')",
+    # PostgreSQL は `--` コメントを `\r` でも終える（2回目のレビューの再現。PG 17 で書けた）
+    "SELECT 1 --\r, dblink_exec('host=x', 'INSERT INTO t VALUES (1)')\n",
+    "SELECT 'x' --\rUNION SELECT rolname FROM pg_authid\n",
+    # PostgreSQL の入れ子の開き `/*/` は閉じ `*/` と重なる（同上）
+    "SELECT 1 /* /*/ -- */ */ , dblink_exec('host=x', 'INSERT INTO t VALUES (1)')\n",
+    "SELECT 1 /* /*/ -- */ */ , pg_sleep(2)\n",
+    "SELECT 'x' /* /*/ -- */ */ UNION SELECT rolpassword FROM pg_authid\n",
+]
+
+
+@pytest.mark.parametrize("sql", _COMMENT_IN_LITERAL_BYPASSES)
+def test_comment_markers_inside_literals_do_not_hide_the_rest(sql: str) -> None:
+    assert is_select_only_sql(sql) is False
+    prog = {"steps": [{"op": "sql_extract", "id": "s", "sql": sql}], "return": "$s"}
+    assert any("SELECT" in e for e in validate_program(prog))
+    prog["steps"][0]["op"] = "external_db_extract"
+    prog["steps"][0]["connection_id"] = "c"
+    assert any("SELECT" in e for e in validate_program(prog))
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # 閉じていない引用・コメントは、境界が決まらないので拒否する
+        "SELECT 'abc FROM t",
+        'SELECT "abc FROM t',
+        "SELECT $$abc FROM t",
+        "SELECT 1 /* c",
+        "SELECT a[1 FROM t",
+        # バックスラッシュでエスケープした引用符は、方言（SQLite、
+        # standard_conforming_strings=off）で終端の位置が変わる。`''` で書けるので拒否する
+        "SELECT E'it\\'s' AS x",
+        "SELECT 'a\\' AS x",
+        # 入れ子のブロックコメント（SQLite は最初の `*/` で閉じる）
+        "SELECT /* /* */ pg_sleep(1) */ 1",
+        "SELECT /* /* */ 1 */ 1",
+        # MySQL の実行されるコメント
+        "SELECT 1 /*! , pg_sleep(1) */",
+        # SQLite の [識別子] の中のコメント記号
+        "SELECT [--], pg_sleep(1)",
+        "SELECT [--] FROM t",
+        # ドル引用の本体は SQLite ではコード。引用符・; を含むものは読みが割れる
+        "SELECT $a$ ' $a$ -- ', pg_sleep(1)",
+        "SELECT $a$ ; $a$",
+        # コメントは引用の外では一切拒否する
+        "SELECT 1; -- trailing comment",
+        "SELECT 1; /* c */",
+        "SELECT 1 */",
+        "SELECT v -- コメント 'x\nFROM labs /* 'y */ WHERE patient_id = :patient_id",
+        "SELECT 1 +--x\n 1",
+        "SELECT '--'/*'*/, 1",
+        # ドル引用・[…] の中のコメント記号（SQLite ではコード）
+        "SELECT $$--$$ AS x",
+        "SELECT $tag$ /* $tag$ AS x",
+        "SELECT [a--b] FROM t",
+        # SQLite は [a'] を識別子と読むが、ここで引用と読むと間の ; が隠れる
+        "SELECT [a'] ; SELECT 1 ; ['] FROM t",
+        # `]` を含む文字列を [ ] の中に書くと、SQLite の読みでは識別子が `[']` で閉じ、
+        # 残りが閉じない文字列になる（両方の読みで通らないので拒否）
+        "SELECT ARRAY[']'] AS x",
+        # 引用の外の制御文字・空白類（単独の \r、\f、\v、NUL、U+2028/2029、NBSP、ゼロ幅、BOM）
+        "SELECT 1\r, 2",
+        "SELECT 1\f, 2",
+        "SELECT 1\v, 2",
+        "SELECT 1\x00, 2",
+        "SELECT 1\u2028, 2",
+        "SELECT 1\u2029, 2",
+        "SELECT\u00a01",
+        "SELECT 1\u3000, 2",
+        "SELECT pg_sl\u200beep(1)",
+        "\ufeffSELECT 1",
+        # ESCAPE '\' は standard_conforming_strings=off で終端がずれる
+        "SELECT v FROM t WHERE a LIKE 'x\\_%' ESCAPE '\\'",
+        # 文末のセミコロンは1つだけ
+        "SELECT 1;;",
+        "SELECT 1;;;",
+        "SELECT 1; ;",
+        "SELECT 1; SELECT 2",
+        "SELECT 1; -- c\n;",
+        ";",
+        "-- only a comment",
+    ],
+)
+def test_ambiguous_or_unterminated_sql_is_rejected(sql: str) -> None:
+    assert is_select_only_sql(sql) is False
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT 1;",
+        "SELECT 1 ; ",
+        "SELECT 1;\n",
+        "SELECT '--' AS x FROM t WHERE patient_id = :patient_id",
+        "SELECT '/*' AS x FROM t",
+        "SELECT 'it''s' AS x",
+        "SELECT 'a;b' AS x",
+        "SELECT E'a\\nb' AS x",
+        "SELECT E'a\\\\' AS x",
+        'SELECT "--" FROM t',
+        'SELECT "a""b" FROM t',
+        "SELECT a[1] FROM t",
+        "SELECT x::int FROM t WHERE c = $1",
+        "SELECT a$b$ FROM t",
+        "SELECT $tag$ abc $tag$ AS x",
+        # Web 画面の textarea は CRLF を送る（保存された SQL に入る）
+        "SELECT v\r\nFROM t WHERE pid = :patient_id",
+        "SELECT v\n\tFROM t",
+        # 引用の中はデータ（コメント記号・制御文字・全角空白も許す）
+        "SELECT 'a\rb\u3000c' AS x",
+        "SELECT v FROM t WHERE a LIKE 'x!_%' ESCAPE '!'",
+        # PostgreSQL の配列の構築子・添字（SQLite の読みでは [ … ] が識別子になる）
+        "SELECT v FROM t WHERE status = ANY(ARRAY['final','amended'])",
+        "SELECT (ARRAY['a','b'])[1]",
+        "SELECT a[1][2], b[i:j] FROM t",
+        "SELECT (string_to_array(v, ','))[2] FROM t",
+        # 数字を含む識別子・語の一部は禁止語ではない
+        "SELECT updated_at, created_by, t1.v, x.lo FROM t1 JOIN x ON t1.id = x.id",
+        "SELECT v2 FROM t WHERE c IN (1, 2)",
+    ],
+)
+def test_legitimate_sql_still_passes(sql: str) -> None:
+    assert is_select_only_sql(sql) is True
+
+
+def test_bind_names_are_counted_like_sqlalchemy_text() -> None:
+    """コメントは拒否するので、バインド名は SQLAlchemy の `text()` と同じく素の文字列で数える
+    （コメントの中の `:name` を片方だけが拾う食い違いが無い）。"""
+    sql = "SELECT v FROM t WHERE pid = :patient_id -- :hidden"
+    assert sql_bind_names(sql) == {"patient_id", "hidden"} == set(text(sql).compile().params)
+    assert is_select_only_sql(sql) is False
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # 直前の数字が境界を消していた（PostgreSQL 14 以前は `1union` を `1` と `union` に分ける）
+        "SELECT 1union SELECT password_hash FROM users",
+        "SELECT 1.5union SELECT 1",
+        "SELECT 1e5union SELECT 1",
+        "SELECT x FROM t WHERE a = $1union SELECT 1",
+        "SELECT 1u&'\\0064'",
+        # 読み取り専用でも状態を変える・サーバの外へ手が届く関数
+        "SELECT pg_create_physical_replication_slot('s')",
+        "SELECT pg_create_logical_replication_slot('s', 'test_decoding')",
+        "SELECT pg_drop_replication_slot('s')",
+        "SELECT pg_logical_emit_message(true, 'p', 'm')",
+        "SELECT setval('seq', 1)",
+        "SELECT nextval('seq')",
+        "SELECT pg_reload_conf()",
+        "SELECT pg_switch_wal()",
+        "SELECT pg_stat_reset()",
+        "SELECT pg_stat_reset_shared('bgwriter')",
+        "SELECT pg_ls_dir('.')",
+        "SELECT pg_ls_waldir()",
+        "SELECT pg_stat_file('postgresql.conf')",
+        "SELECT pg_read_file('postgresql.conf')",
+        "SELECT pg_read_binary_file('postgresql.conf')",
+        "SELECT lo_import('/etc/passwd')",
+        "SELECT lo_from_bytea(0, 'x')",
+        "SELECT lo_unlink(1)",
+        "SELECT 1nextval('seq')",
+    ],
+)
+def test_forbidden_words_with_numeric_prefix_and_state_changing_functions(sql: str) -> None:
+    assert is_select_only_sql(sql) is False
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # 閉じたドル引用の直後のキーワード。境界の前に `$` を入れていたので見えず、
+        # PostgreSQL 17 でハッシュが読めた（レビューの再現）
+        "SELECT patient_id FROM patients WHERE patient_id = :patient_id "
+        "AND $$a$$=$$b$$union SELECT password_hash FROM users",
+        "SELECT patient_id FROM patients WHERE patient_id = :patient_id "
+        "AND $t$a$t$=$t$b$t$union all SELECT rolname FROM pg_authid",
+        "SELECT password_hash FROM users WHERE $$a$$=$$a$$except SELECT 'z'",
+        "SELECT password_hash FROM users WHERE $$a$$=$$a$$intersect SELECT password_hash FROM users",
+        "SELECT $$x$$into w2",
+        "SELECT $$x$$into temp w3",
+        "SELECT $表$x$表$union SELECT 1",
+        # 他の閉じ引用の直後も同じ
+        "SELECT 'x'union SELECT 1",
+        'SELECT 1 AS "x"union SELECT 2',
+        "SELECT `x`union SELECT 1",
+        "SELECT a[1]union SELECT 1",
+        "SELECT E'x'union SELECT 1",
+        "SELECT (1)union SELECT 1",
+        "SELECT $$x$$lo_import('/etc/passwd')",
+    ],
+)
+def test_keywords_right_after_a_closing_quote_are_rejected(sql: str) -> None:
+    assert is_select_only_sql(sql) is False
+
+
+_CLOSERS = ["'x'", '"x"', "`x`", "a[1]", "$$x$$", "$t$x$t$", "E'x'", "1", "1.5", "$1", ")"]
+_WORDS = ["union", "except", "intersect", "into", "insert", "pg_sleep", "dblink_exec", "setval"]
+
+
+@pytest.mark.parametrize("closer", _CLOSERS)
+@pytest.mark.parametrize("word", _WORDS)
+def test_every_closing_form_is_a_word_boundary(closer: str, word: str) -> None:
+    assert is_select_only_sql(f"SELECT {closer}{word}(1) FROM t") is False
+    assert is_select_only_sql(f"SELECT {closer}{word.upper()}(1) FROM t") is False
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # 文末の `;` の後ろの引用は2つ目の文（SQLite は `SELECT 1 ;`x`` を2文と読む）。
+        # 引用を空白に置き換えていたので「文末の `;` が1つ」に見えていた
+        "SELECT 1 ;`:a(*/`",
+        "SELECT 1; 'x'",
+        'SELECT 1; "x"',
+        "SELECT 1; [x]",
+        "SELECT 1; $$x$$",
+        # SQLite の TCL 形式の変数 `$a(…)` は `)` までが1つのトークン。中の `[` が引用を
+        # 始めないので、後ろの `;` が SQLite では引用の外に出る
+        "SELECT $a([) , $b$ ; SELECT 2 $b$ ]",
+        "SELECT @a([) , $b$ ; SELECT 2 $b$ ]",
+        "SELECT :a([) , $b$ ; SELECT 2 $b$ ]",
+        "SELECT $a(x y)",
+        "SELECT $a(",
+    ],
+)
+def test_sqlite_only_statement_separators_are_rejected(sql: str) -> None:
+    assert is_select_only_sql(sql) is False
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        'SELECT lo_value, lo_limit, "lo_normal" FROM t',
+        "SELECT v FROM t WHERE lo_flag = 1",
+        # 識別子の途中の `$` は SQLite でも変数を始めない
+        "SELECT my$func(a, b) FROM t",
+    ],
+)
+def test_lo_columns_are_not_forbidden(sql: str) -> None:
+    assert is_select_only_sql(sql) is True
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT lo_import('/etc/passwd')",
+        "SELECT lo_create (0)",
+        "SELECT \"lo_import\"('/etc/passwd')",
+        "SELECT pg_catalog.lo_unlink(1)",
+        "SELECT LO_EXPORT(1, '/tmp/x')",
+    ],
+)
+def test_lo_function_calls_are_forbidden(sql: str) -> None:
+    assert is_select_only_sql(sql) is False
+
+
+def test_lo_identifiers_pass_the_identifier_sanitizer() -> None:
+    assert sanitize_sql_identifier("lo_value", ["lo_value"], "c") == "lo_value"
+
+
+@pytest.mark.parametrize("sql", ["SELECT t1copy FROM t", "SELECT 'C1call' AS x", "SELECT a$union"])
+def test_digit_or_dollar_prefixed_keywords_are_rejected_fail_closed(sql: str) -> None:
+    """数字・`$` の直後の禁止語は、識別子やリテラルの一部でも拒否する（誤検知だが安全側）"""
+    assert is_select_only_sql(sql) is False
+
+
+def test_forbidden_words_inside_literals_are_still_rejected() -> None:
+    """リテラルの中身も禁止語の検査に含める（未知の「文字列を実行する関数」への網）。
+
+    `WHERE status = 'delete'` は誤検知になるが、以前からの挙動で、フェイルクローズ側。
+    """
+    assert is_select_only_sql("SELECT x FROM t WHERE status = 'delete'") is False
+    assert is_select_only_sql("SELECT some_ext_exec('INSERT INTO t VALUES (1)')") is False
 
 
 # --------------------------------------------------------------------------- #
@@ -607,9 +909,9 @@ def test_safe_arith_rejects_non_finite() -> None:
         # コメントで危険句を隠した複文すり抜けを防ぐ
         ("SELECT 1 -- ; DROP TABLE labs\n; DELETE FROM labs", False),
         ("SELECT 1 /* ; DROP TABLE labs */ ; UPDATE labs SET v=1", False),
-        # コメント除去後に純粋な SELECT になるものは許可
-        ("SELECT v FROM labs -- コメント", True),
-        ("/* 先頭コメント */ SELECT v FROM labs", True),
+        # コメントは消さずに拒否する（方言ごとのコメントの終わり方を追わない）
+        ("SELECT v FROM labs -- コメント", False),
+        ("/* 先頭コメント */ SELECT v FROM labs", False),
         # 追加した禁止キーワード
         ("COPY labs TO '/tmp/x'", False),
         ("CALL do_something()", False),
