@@ -370,11 +370,7 @@ button:hover { background-color: var(--color-primary-strong); }
 .menu-card p { color: var(--color-ink-2); margin-bottom: var(--space-lg); font-size: var(--text-sm); }
 
 /* ============================================================
- * 17. AI アシストパネル（入力フォーム）
- * ============================================================ */
-
-/* ============================================================
- * 18. AI Input (データ自動収集) — 共通ユーティリティ（レガシー導線）
+ * 17. AI Input (データ自動収集) — 共通ユーティリティ（レガシー導線）
  * ============================================================ */
 .hint { color: var(--color-ink-2); font-size: var(--text-sm); margin-bottom: var(--space-md); }
 .toolbar { display: flex; gap: var(--space-sm); flex-wrap: wrap; align-items: center; margin-bottom: var(--space-md); }
@@ -486,7 +482,7 @@ label.fld, .fld { font-size: var(--text-xs); color: var(--color-ink-2); display:
 .context-box .body { font-size: var(--text-sm); white-space: pre-wrap; color: var(--color-ink); }
 
 /* ============================================================
- * 19. AI Input — 自動入力 / チェック（左:フォーム 右:AI根拠）
+ * 18. AI Input — 自動入力 / チェック（左:フォーム 右:AI根拠）
  * ============================================================ */
 .af-layout { display: grid; grid-template-columns: 1fr 380px; gap: var(--space-lg); align-items: start; }
 @media (max-width: 900px) { .af-layout { grid-template-columns: 1fr; } }
@@ -547,7 +543,7 @@ code.ev-code { font-family: var(--font-mono); font-size: var(--text-xs); backgro
 .actions-bar { display: flex; gap: var(--space-md); align-items: center; margin-top: var(--space-lg); flex-wrap: wrap; }
 
 /* ============================================================
- * 20. AI Input — データ所在 候補選択（design_system / source-survey）
+ * 19. AI Input — データ所在 候補選択（design_system / source-survey）
  * ============================================================ */
 .statusbar { display: flex; gap: var(--space-md); flex-wrap: wrap; align-items: center; font-size: var(--text-sm); padding: var(--space-sm) var(--space-md); background: var(--color-surface-2); border: 1px solid var(--color-border); border-radius: var(--radius-md); margin-bottom: var(--space-md); }
 .sb-count { font-weight: 700; }
@@ -599,7 +595,7 @@ code.ev-code { font-family: var(--font-mono); font-size: var(--text-xs); backgro
 .alt-move:disabled { opacity: 0.35; cursor: not-allowed; }
 
 /* ============================================================
- * 21. データ自動収集 — 設計キャンバス（マトリクス + 集中エディタ）
+ * 20. データ自動収集 — 設計キャンバス（マトリクス + 集中エディタ）
  *     cv- 名前空間。状態(empty/draft/confirmed/stale) × 権限(編集可/閲覧のみ/上流待ち)。
  * ============================================================ */
 /* 進捗サマリ */
