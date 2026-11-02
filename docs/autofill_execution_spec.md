@@ -34,7 +34,7 @@ autofill は「取れなかった」を「取れた値」に変えないよう�
 
 - **入力が使えない LLM op は呼ばない**: `llm_extract` / `llm_judge` が参照する前段 step が全て
   失敗か空なら、LLM を呼ばずに step を失敗にし、前段の `failure_code` を伝播する
-  （詳細は [DSL リファレンス](./dsl_reference.md)「LLM op の入力が使えないとき」）
+  （詳細は [DSL 仕様](./dsl_specification.md) §8.4）
 - **値を回答型へ正規化し、合わない値は prefill しない**: 実行の入口は Questionnaire を executor に
   渡す（`questionnaire_content`）。値を項目の `item.type` へ正規化し（`questionnaire_responses.normalize_answer`）、
   **prefill するのは正規化した値**である。元の値と違えば evidence の項目に `normalized_from` を残す。

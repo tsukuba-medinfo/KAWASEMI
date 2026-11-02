@@ -15,7 +15,7 @@ WORKERS ?= 8
 TEST_KEYS = SECRET_KEY="$${SECRET_KEY:-make-test-only-secret-key-not-a-real-secret}" \
 	CSRF_SECRET_KEY="$${CSRF_SECRET_KEY:-make-test-only-csrf-secret-key-not-a-real-secret}"
 
-.PHONY: e2e e2e-live e2e-serve help hooks test
+.PHONY: dsl-schema e2e e2e-live e2e-serve help hooks test
 
 help: ## このヘルプを表示
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -23,6 +23,9 @@ help: ## このヘルプを表示
 
 test: ## テストを並列実行（既定 8 worker。`make test WORKERS=4` で変更）
 	$(TEST_KEYS) uv run pytest -n $(WORKERS)
+
+dsl-schema: ## DSL の step スキーマ（docs/schemas/dsl_step.schema.json）をコードから再生成
+	uv run python scripts/export_dsl_schema.py
 
 e2e: ## E2E 決定的層（関門 a〜e。Ollama・施設データ不要）
 	$(TEST_KEYS) uv run pytest tests/e2e/test_pipeline_e2e.py -q

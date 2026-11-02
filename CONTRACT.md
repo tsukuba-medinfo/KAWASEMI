@@ -160,6 +160,7 @@ indexer が出力ディレクトリ（既定 `var/resource_index/`）に生成�
 何の値かが列名ではなく同じ表の項目コード列の値で決まる。1項目を `db:<表>.<列>#<項目コード>` の1単位にし、
 列の単位の payload に次を足す。KAWASEMI は `item_code` があれば所在の文字列に項目と絞り込みを書き、
 DSL の照合で項目コードと `item_row_filters` の列名を必須トークンにする。
+（DSL とその照合の規則は [docs/dsl_specification.md](docs/dsl_specification.md) §9.3。）
 
 | キー | 内容 |
 |---|---|

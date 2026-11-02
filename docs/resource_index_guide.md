@@ -214,7 +214,7 @@ kawasemi-indexer build \
 > **`fhir_path` は FHIRPath ではない。** 実行側（`executor.resolve_fhir_path`）が解釈するのは
 > `.` 区切りの辿りと `name[0]` 形式の整数添字のみで、`where()` / `ofType()` / `as` / `|` などの
 > FHIRPath 構文は解釈されず黙って `null` になる。絞り込みは `query_template` の検索パラメータで
-> 表現すること。詳細は [dsl_reference.md](dsl_reference.md)。
+> 表現すること。詳細は [dsl_specification.md](dsl_specification.md) §5.2。
 
 ### 4.3 file(reference) ― 参照文書
 
@@ -435,7 +435,7 @@ else_branch: "該当なし"`）にも現れる。そこでは候補の値は失�
 （`llm_judge` に「空か」を尋ねる形）は、2つの検査のどちらも発火しない。`== ""` で書くことは
 できない（`right: ""` を必須フィールド検査が弾く）。空の定義が `is_empty_value`
 （`None` / `""` / `[]`）と揃わないため、そう書くべきでないことをプロンプトと
-`docs/dsl_reference.md` で示している。
+`docs/dsl_specification.md`（§5.8、§8.5）で示している。
 
 次の形は2つの検査の対象外である（いずれも静的に正当な形と区別できない）。
 

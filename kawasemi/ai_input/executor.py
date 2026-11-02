@@ -840,7 +840,8 @@ class DSLInterpreter:
         resolver 到達不能は例外として伝播する（SPoF: 明示停止）。
 
         study_id は組み込みパラメータとして DSL から参照できる（{{study_id}} /
-        :study_id）。バッチ実行でのみ供給され、単一被験者の実行では未指定になる。
+        :study_id）。バッチ実行ではジョブの値、単発・逐次の実行では要求本文の値（任意、
+        既定は空文字）が渡される。空のまま参照した step は失敗する。
 
         questionnaire_content を渡すと、値が項目の回答型に合うかを検査し、合わない値は
         prefill しない（`item_evidence`）。

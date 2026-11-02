@@ -400,8 +400,9 @@ def is_select_only_sql(sql: str) -> bool:
 # 実行時に自動で供給される組み込みパラメータ（program.params での宣言不要）。
 # patient_id は step の key_type に応じて解決済みの被験者キー。
 #
-# study_id は**バッチ実行でのみ供給される**（BatchJob.study_id）。単一被験者の
-# autofill（画面からの実行）では未指定なので、参照した step は実行時に失敗する。
+# study_id は実行要求から供給される。バッチ実行ではジョブの BatchJob.study_id、単発・
+# 逐次の autofill では要求本文の AutofillRequest.study_id（任意、既定は空文字）である。
+# 空のまま参照した step は実行時に失敗する。
 # 供給経路の無い識別子を組み込みとして増やさないこと（encounter_id は
 # 「executor に参照が無い」として削除した経緯があり、供給側を用意せずに宣言だけ
 # 復活させると同じ問題を再生産する）。
@@ -698,7 +699,7 @@ class ParamBinder:
         """値が外部データ由来か（前段 step の出力＝抽出結果なら True）。
 
         リテラル宣言は人間が確認済みのプログラム本文なので内部扱い。一方
-        **study_id はリクエストボディ由来**（BatchJob.study_id）で字種制約も無いため、
+        **study_id はリクエストボディ由来**（BatchJob.study_id / AutofillRequest.study_id）で字種制約も無いため、
         patient_id（key_resolver を通り字種検査済み）とは区別して外部扱いにする。
         「抽出値は原資料から導出されねばならず、依頼者の入力で操作できてはならない」
         というデータインテグリティの前提を守るため。

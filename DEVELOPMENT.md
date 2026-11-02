@@ -175,7 +175,7 @@ KAWASEMI/
 ├── DEVELOPMENT.md          # 本ドキュメント
 ├── README.md               # プロジェクト概要
 ├── QUICKSTART.md           # クイックスタートガイド
-└── QUICKSTART_AI.md        # AI 機能を起動して動かすまで（詳細は docs/ai_mode_guide.md、DSL は docs/dsl_reference.md）
+└── QUICKSTART_AI.md        # AI 機能を起動して動かすまで（詳細は docs/ai_mode_guide.md、DSL は docs/dsl_specification.md）
 ```
 
 構成ツリーは主要なモジュールとディレクトリを示す。次は省略している。

@@ -113,7 +113,7 @@ docker-compose exec kawasemi alembic upgrade head
 ### 読み取り専用ロール（READONLY_DATABASE_URL）
 
 DSL の `sql_extract` と統計プロファイルの自アプリDB集計は、LLM や索引が組んだ SELECT を
-アプリ本体の DB へ発行します。SELECT 限定の文字列検査は多層防御の1枚にすぎないので、
+アプリ本体の DB へ発行します。SELECT 限定の文字列検査は補助の層で境界ではないので、
 PostgreSQL では**読み取り専用ロール**を用意し、その DSN を `READONLY_DATABASE_URL` に設定してください。
 
 ```sql
@@ -149,7 +149,7 @@ READONLY_DATABASE_URL=postgresql+asyncpg://kawasemi_ro:...@postgres:5432/kawasem
   付いているので、`kawasemi_ro` から外すだけでは効きません）。
   例: `REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA <dblink を入れたスキーマ> FROM PUBLIC;`。
   外部表（`postgres_fdw`）は表として `GRANT` しない限り読めません。
-  なお DSL の文字列検査も `dblink*` などを拒否しますが、これは多層防御の1枚です。
+  なお DSL の文字列検査も `dblink*` などを拒否しますが、これは補助の層で、境界ではありません。
 - 設定すると、プログラム SQL はこの DSN の別エンジン（初回利用時に生成し、終了時に破棄）で、
   **読み取り専用トランザクション**（`BEGIN READ ONLY`）の中で実行され、毎回ロールバックされます。
   トランザクションの先頭で `statement_timeout` を掛けます（`READONLY_STATEMENT_TIMEOUT_SECONDS`、
@@ -165,6 +165,41 @@ READONLY_DATABASE_URL=postgresql+asyncpg://kawasemi_ro:...@postgres:5432/kawasem
   借ります（リクエストのセッションが持つ1本とは別）。プールの大きさを見積もるときに数えてください。
 - どちらの場合も、未設定であることを起動時のログと `kawasemi check_schema` が警告します。
 - SQLite では `PRAGMA query_only` で閉じるので、この設定は不要です（設定しても使いません）。
+
+### 外部DBの接続アカウント（connections.yaml）
+
+DSL の `external_db_extract` は、接続レジストリ（`connections.yaml`）に登録した外部DB（DWH など）へ、
+LLM や索引が組んだ SELECT を発行します。コードは外部DBの接続を読み取り専用にしません。
+**書き込みを止める境界は、接続に使うアカウントの権限です。** SELECT 限定の文字列検査は補助の層で、
+境界ではありません（`docs/dsl_specification.md` §6.3）。次を必ず守ってください。
+
+- **接続アカウントは読み取り専用にする**。書き込み・DDL・関数やプロシージャの作成・実行の権限を与えません。
+- **抽出に要る表とビューにだけ `SELECT` を与える**。読み取り専用のアカウントでも、与えられた表は
+  すべて読めます（たとえば `UNION` で別の表を読み足すことは、文字列検査が止めなくても権限が止める）。
+  スキーマ全体への `GRANT SELECT` は避け、患者情報以外の機微な表（認証情報など）は含めないでください。
+- **DB 側で文の実行時間の上限を掛ける**。外部DBへの SQL には、アプリからは `statement_timeout` を
+  掛けません。アカウントに設定してください。
+
+PostgreSQL の例:
+
+```sql
+CREATE ROLE kawasemi_extract LOGIN PASSWORD '...';
+ALTER ROLE kawasemi_extract SET default_transaction_read_only = on;
+ALTER ROLE kawasemi_extract SET statement_timeout = '60s';
+GRANT CONNECT ON DATABASE dwh TO kawasemi_extract;
+GRANT USAGE ON SCHEMA main TO kawasemi_extract;
+-- 抽出に要る表・ビューだけを列挙する（スキーマ全体には与えない）
+GRANT SELECT ON main.infection_cases TO kawasemi_extract;
+```
+
+- PostgreSQL は既定で、ほとんどの関数の `EXECUTE` を `PUBLIC` に与えています。アカウントから外すだけでは効かないので、
+  `dblink` などの拡張が入っている外部DBでは、アプリDBと同じく関数の実行権限を `PUBLIC` から外してください
+  （上の「読み取り専用ロール」を参照）。読み取り専用のトランザクションでも、別のセッションを開く関数は書けます。
+- PostgreSQL 14 以前では、既定で `PUBLIC` が `public` スキーマに `CREATE` を持ちます。関数や表を作らせないよう
+  `REVOKE CREATE ON SCHEMA public FROM PUBLIC;` を当ててください（15 以降は既定で外れています）。
+  これで「関数の作成・実行の権限を与えない」が満たせます。
+- PostgreSQL 以外の DB でも同じ考え方で、読み取り専用のアカウント、必要な表だけへの参照権限、
+  DB 側の実行時間の上限を設定してください。
 
 ## 本番環境へのデプロイ
 

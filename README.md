@@ -44,6 +44,10 @@ set in the shell environment, so they also run before `.env` is filled in.
 To use it at a facility, copy `site.example/` to `site/` (or point `SITE_DIR` at it) and fill in
 the connection registry, key types and data definitions. The documentation below is in Japanese.
 
+The DSL that expresses each item's collection procedure is specified in
+[docs/dsl_specification.md](docs/dsl_specification.md) (Japanese, with an English summary);
+its machine-readable step schema is [docs/schemas/dsl_step.schema.json](docs/schemas/dsl_step.schema.json).
+
 ---
 
 ## 日本語
@@ -63,7 +67,7 @@ JASPEHR 標準の Web フォームとして症例データを手動入力でき�
 | [QUICKSTART_AI.md](QUICKSTART_AI.md) | データ自動収集（AIモード）を起動して動かすまで |
 | [docs/ai_mode_guide.md](docs/ai_mode_guide.md) | データ自動収集（AIモード）のアーキテクチャ・各ステップの操作 |
 | [docs/e2e_guide.md](docs/e2e_guide.md) | 自己完結のデモ（架空の様式とダミーデータで工程を通す E2E 試験環境） |
-| [docs/dsl_reference.md](docs/dsl_reference.md) | DSL の op とその意味論（正本） |
+| [docs/dsl_specification.md](docs/dsl_specification.md) | DSL の仕様（構造・op・実行意味論・検証・再現性と監査。正本） |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | 開発環境の構築・コードスタイル・マイグレーション |
 | [docs/development_flow.md](docs/development_flow.md) | 開発の流れと検証手順 |
 
