@@ -41,17 +41,6 @@
     </div>
     {% endif %}
 
-    {% if ai_enabled %}
-    <div class="card ai-panel">
-        <h3>AI アシスト <small class="help-text">powered by Ollama ({{ ollama_model }})</small></h3>
-        <div class="page-head__actions">
-            <button type="button" class="btn btn--sm btn--ai" onclick="generateAIPlan()">AI実行計画を生成</button>
-            <button type="button" class="btn btn--sm btn--ai" id="btn-autofill" onclick="runAIAutofill()">AIで自動入力</button>
-        </div>
-        <div id="ai-status" class="ai-status"></div>
-    </div>
-    {% endif %}
-
     <form method="POST" action="{{ base_path() }}/forms/{{ questionnaire_id }}/submit" id="questionnaire-form">
         {% if assignment_info %}
         {% if assignment_info.is_input_target %}
@@ -87,16 +76,6 @@
             {% else %}
                 <label {% if field.required %}class="required"{% endif %}>{{ field.text }}</label>
                 <input type="{{ field.input_type }}" name="{{ field.link_id }}" value="{{ prefill_value }}" {% if field.required and not field.enable_when and not field.enable_when_ancestors %}required{% endif %}>
-            {% endif %}
-            {% if ai_enabled %}
-            <div class="ai-source-badge" data-link-id="{{ field.link_id }}"
-                 {% if field.link_id not in plans_map %}style="display:none"{% endif %}>
-                データソース:
-                <span class="source-type">{{ data_source_labels.get(plans_map[field.link_id].data_source_type, '未設定') if field.link_id in plans_map else '未設定' }}</span>
-                {% if field.link_id in plans_map and plans_map[field.link_id].fhir_path %}
-                <code>{{ plans_map[field.link_id].fhir_path }}</code>
-                {% endif %}
-            </div>
             {% endif %}
         </div>
         {% endfor %}
@@ -299,101 +278,6 @@ document.addEventListener('DOMContentLoaded', function() {
 {% endblock %}
 
 {% block extra_js %}
-{% if ai_enabled %}
-<script>
-const QUESTIONNAIRE_ID = {{ questionnaire_id }};
-
-function getCsrfToken() {
-    // raw トークンは meta から読む（cookie は signed のため header 検証に使えない）
-    const m = document.querySelector('meta[name="csrf-token"]');
-    return m ? m.content : '';
-}
-
-async function generateAIPlan() {
-    const statusDiv = document.getElementById('ai-status');
-    statusDiv.innerHTML = '<span class="ai-loading">AI実行計画を生成中...</span>';
-
-    try {
-        const resp = await fetch(`{{ base_path() }}/forms/${QUESTIONNAIRE_ID}/generate-plan`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': getCsrfToken() },
-        });
-        const data = await resp.json();
-        if (!resp.ok) throw new Error(data.detail || '計画生成に失敗しました');
-
-        // 各フィールドのバッジを更新
-        for (const plan of data.plans) {
-            const badge = document.querySelector(`.ai-source-badge[data-link-id="${plan.link_id}"]`);
-            if (badge) {
-                badge.style.display = 'block';
-                const sourceType = badge.querySelector('.source-type');
-                if (sourceType) sourceType.textContent = plan.data_source_type_label;
-                const codeEl = badge.querySelector('code');
-                if (plan.fhir_path) {
-                    if (codeEl) { codeEl.textContent = plan.fhir_path; }
-                    else {
-                        const c = document.createElement('code');
-                        c.textContent = plan.fhir_path;
-                        badge.appendChild(c);
-                    }
-                } else if (codeEl) { codeEl.remove(); }
-            }
-        }
-        statusDiv.innerHTML = `<span class="ai-success">実行計画を生成しました（${data.plans.length}件）</span>`;
-    } catch (e) {
-        statusDiv.innerHTML = `<span class="ai-error">エラー: ${e.message}</span>`;
-    }
-}
-
-async function runAIAutofill() {
-    const statusDiv = document.getElementById('ai-status');
-    const btn = document.getElementById('btn-autofill');
-
-    const subjectInput = document.getElementById('subject');
-    const subject = subjectInput ? subjectInput.value.trim() : '';
-    if (!subject) {
-        statusDiv.innerHTML = '<span class="ai-error">患者IDを入力してください</span>';
-        return;
-    }
-
-    btn.disabled = true;
-    statusDiv.innerHTML = '<span class="ai-loading">AIがデータを取得中... (時間がかかる場合があります)</span>';
-
-    try {
-        const resp = await fetch(`{{ base_path() }}/forms/${QUESTIONNAIRE_ID}/autofill`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': getCsrfToken() },
-            body: JSON.stringify({ subject }),
-        });
-        const data = await resp.json();
-        if (!resp.ok) throw new Error(data.detail || '自動入力に失敗しました');
-
-        let filledCount = 0;
-        for (const [linkId, value] of Object.entries(data.prefill_data)) {
-            if (value === null || value === undefined) continue;
-            const field = document.querySelector(`[name="${linkId}"]`);
-            if (!field) continue;
-            if (field.type === 'checkbox') {
-                field.checked = Boolean(value);
-            } else {
-                field.value = String(value);
-            }
-            filledCount++;
-        }
-
-        // enableWhen 条件を再評価
-        evaluateAllEnableWhen();
-
-        statusDiv.innerHTML = `<span class="ai-success">${filledCount}件のフィールドに自動入力しました</span>`;
-    } catch (e) {
-        statusDiv.innerHTML = `<span class="ai-error">エラー: ${e.message}</span>`;
-    } finally {
-        btn.disabled = false;
-    }
-}
-</script>
-{% endif %}
-
 {% if fhir_enabled %}
 <script>
 async function lookupPatient() {

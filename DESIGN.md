@@ -182,7 +182,7 @@ stale 連鎖・ゲートのルール（`ai_input/routes.py` の実装に対応�
 - 行/セルをクリックすると集中エディタ（`.cv-detail` / `.cv-stage`）に当該項目の全ステージが開く。編集可ステージは編集 UI、閲覧のみは読み取り専用 + 理由（`.cv-ronote`）、stale は警告（`.cv-reason`）。
 - 進捗サマリ（`.cv-progress`）と凡例（`.cv-legend`）を上部に置く。
 
-関連クラスは `app.css` の §21（`cv-` 名前空間）。
+関連クラスは `app.css` の §20（`cv-` 名前空間）。
 
 ---
 

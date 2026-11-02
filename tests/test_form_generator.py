@@ -411,12 +411,9 @@ class TestAncestorEnableWhen:
         env = Environment(loader=FileSystemLoader("kawasemi/web/templates"), autoescape=True)
         src = env.loader.get_source(env, "form.html")[0]
         start = src.index("{% for field in fields %}")
-        end = src.index("{% endfor %}", src.index("{% if ai_enabled %}", start)) + len(
-            "{% endfor %}"
-        )
-        html = env.from_string(src[start:end]).render(
-            fields=fields, prefill_data={}, ai_enabled=False, plans_map={}
-        )
+        # 項目ループの閉じタグ（行頭インデント8桁。内側の選択肢ループは深い）
+        end = src.index("\n        {% endfor %}", start) + len("\n        {% endfor %}")
+        html = env.from_string(src[start:end]).render(fields=fields, prefill_data={})
         child = html[html.index('data-link-id="child id"') :]
         child = child[: child.index("</div>")]
         assert 'data-enable-when="true"' in child
