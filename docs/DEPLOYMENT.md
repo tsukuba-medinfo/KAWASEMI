@@ -113,7 +113,7 @@ docker-compose exec kawasemi alembic upgrade head
 ### 読み取り専用ロール（READONLY_DATABASE_URL）
 
 DSL の `sql_extract` と統計プロファイルの自アプリDB集計は、LLM や索引が組んだ SELECT を
-アプリ本体の DB へ発行します。SELECT 限定の文字列検査は多層防御の1枚にすぎないので、
+アプリ本体の DB へ発行します。SELECT 限定の文字列検査は補助の層で境界ではないので、
 PostgreSQL では**読み取り専用ロール**を用意し、その DSN を `READONLY_DATABASE_URL` に設定してください。
 
 ```sql
@@ -192,8 +192,12 @@ GRANT USAGE ON SCHEMA main TO kawasemi_extract;
 GRANT SELECT ON main.infection_cases TO kawasemi_extract;
 ```
 
-- `dblink` などの拡張が入っている外部DBでは、アプリDBと同じく関数の実行権限を `PUBLIC` から外してください
+- PostgreSQL は既定で、ほとんどの関数の `EXECUTE` を `PUBLIC` に与えています。アカウントから外すだけでは効かないので、
+  `dblink` などの拡張が入っている外部DBでは、アプリDBと同じく関数の実行権限を `PUBLIC` から外してください
   （上の「読み取り専用ロール」を参照）。読み取り専用のトランザクションでも、別のセッションを開く関数は書けます。
+- PostgreSQL 14 以前では、既定で `PUBLIC` が `public` スキーマに `CREATE` を持ちます。関数や表を作らせないよう
+  `REVOKE CREATE ON SCHEMA public FROM PUBLIC;` を当ててください（15 以降は既定で外れています）。
+  これで「関数の作成・実行の権限を与えない」が満たせます。
 - PostgreSQL 以外の DB でも同じ考え方で、読み取り専用のアカウント、必要な表だけへの参照権限、
   DB 側の実行時間の上限を設定してください。
 

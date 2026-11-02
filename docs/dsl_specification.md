@@ -5,13 +5,14 @@
 KAWASEMI expresses *how one form item is collected inside a hospital* as a small program in a
 restricted DSL. A local LLM writes the program from a human-approved retrieval procedure
 (runbook); a deterministic interpreter executes it. The program is a JSON object: a list of
-typed `params`, a linear list of `steps` (each one primitive `op` such as `sql_extract`,
-`fhir_extract`, `csv_extract`, `file_extract`, `llm_extract`, `llm_judge`, `compare`, `branch`,
+typed `params`, a linear list of `steps` (each one primitive `op`, one of `sql_extract`,
+`external_db_extract`, `fhir_extract`, `csv_extract`, `file_extract`, `llm_extract`, `llm_judge`, `compare`, `branch`,
 `transform`, `select`, `aggregate`) in single-assignment form (`"$id"` references point only
 backwards), optional per-step `guard`s for conditional execution, and a `return` reference.
 There is no arbitrary code. SQL must pass a SELECT-only string check. The check lexes quotes
-under both PostgreSQL and SQLite rules and rejects comments, stray control characters, more
-than one trailing `;` and a list of forbidden words. It is an auxiliary, lexical layer that
+under both PostgreSQL and SQLite rules and rejects comments, stray control characters, unclosed
+quotes, backslash-escaped quotes, `U&` escapes, any `;` other than a single trailing one, and a
+list of forbidden words. It is an auxiliary, lexical layer that
 does not parse SQL, and it is not the security boundary (§6.3); the boundary is the database's
 privileges. On SQLite the application database is put in `PRAGMA query_only`
 mode. On PostgreSQL and other dialects the SQL runs on a separate connection inside a read-only
@@ -95,6 +96,8 @@ The machine-readable step schema is [`docs/schemas/dsl_step.schema.json`](schema
 | プラン | 工程3の成果物。1項目分の DSL プログラムとその状態（`ai_input_plans` の1行） |
 | 下書き（`draft`）、確定（`confirmed`） | 成果物の状態。確定は人が明示的に行う操作である。手順書、プラン、所在は内容を変えると `draft` に戻る（§2.2）。臨床的意味は戻らない |
 | 版（`version`） | 手順書とプランの行の内容、状態、確定者、確定日時から作るハッシュ。保存と確定で、人が見た版と今の版を照合する（§2.2） |
+| 正準形 | 内容を比べるために整えた JSON の表記。鍵の順序や `null` のフィールドの有無のような表記の揺れを除き、文字列は字面のまま残す。プランは保存と同じ変換を、手順書は `order` の振り直しと既定値の補完を通す（§2.2） |
+| stale（古い） | 下流の成果物が上流より古いことを示す画面の表示。プランなら、手順書の `updated_at` がプランの `updated_at` より新しいとき（`routes._plan_stale`）。表示だけで、状態も実行も変えない（§2.2） |
 | step、op | プログラムの命令1つと、その種類（§3.2、§5） |
 | 取得系 op | 原資料を読む5つの op（§3.3 の末尾） |
 | trace | 1 step の実行記録（§10.2） |
@@ -120,7 +123,7 @@ KAWASEMI はこの手順を、項目ごとの小さなプログラムとして�
 
 DSL は次の性質を持つように作られている。各性質を支える規則は括弧内の節で定める。
 
-- **限定されたプリミティブ**: 実行できるのは12個の op だけで、任意コードの実行、ループ、関数定義、外部プロセスの起動は表現できない。式の評価は単位変換の四則演算だけで、`eval` を使わない（§5.10）。
+- **限定されたプリミティブ**: 実行できるのは12個の op だけで、任意コードの実行、ループ、関数定義、外部プロセスの起動は表現できない。式の評価は単位変換の算術（`+ - * / %` と括弧）だけで、`eval` を使わない（§5.10）。
 - **データとしてのプログラム**: プログラムは JSON の値であり、保存、比較、スナップショット、検証が機械的にできる（§3）。
 - **単一代入と前方参照**: 各 step の結果は一度だけ名前に束縛され、参照は前方にしか向かない。データの流れはプログラムの字面から読み取れる（§3.4）。
 - **読み取り専用と閉じ込め**: SQL は SELECT 限定の文字列検査を通らなければならないが、この検査は字句の上の補助の層で、安全の境界ではない（§6.3）。境界は DB の側にあり、アプリ自身の DB では DB が書き込みを拒む。SQLite では `PRAGMA query_only`、PostgreSQL 等では別の接続の読み取り専用トランザクションである（§5.1）。外部 DB では、接続のアカウントを読み取り専用にし、抽出に要る表にだけ参照権限を与えることが運用の要件で、その権限が境界である（§5.3）。差し込まれる値はスロットごとのサニタイズを通り、ファイルは接続のルート配下に閉じ込められる（§6）。
@@ -179,13 +182,13 @@ HTTP の経路はすべて `/ai-input` の下にあり（`kawasemi/ai_input/rout
 3. 版が記録と違う行（その間に確定、編集、作成された行）には書かない。コンパイルと手順書の生成はその項目を飛ばして応答の `skipped_conflict` に挙げ、他の項目は書く。再コンパイルと手順書の再生成は 409 を返して何も書かない。
 4. 書くときは、内容（`program` / `steps`）と状態、確定者、確定日時の列を、値が変わっていなくても必ず UPDATE に含める（`routes._force_write_columns`。保存と確定の側も同じ）。行は常に、最後に書いた要求が見た内容と状態の組になる。
 
-同じ項目の行を別の要求が初めて作っていたときの一意制約の違反も競合として扱う（再コンパイルと再生成は 409、コンパイルと生成は巻き戻して読み直し、最大3回まで試し、その項目を `skipped_conflict` に入れる）。
+同じ項目の行を別の要求が初めて作っていたときの一意制約の違反も競合として扱う。再コンパイルと再生成は 409 を返す。コンパイルと生成は巻き戻して読み直し、その項目を `skipped_conflict` に入れて書き直す。これを最大3回まで試し、3回とも一意制約の違反になったときは 409 を返して何も書かない。
 生成の後で、元にした手順書がまだ確定済みで同じ内容かは確かめない。結果は `draft` のプランで、手順書より古いことは stale の表示で分かる。
 生成されたプログラムは決定的な是正（§9.3）を経て `draft` で保存され、コンパイルに使ったモデル名が `ai_input_plans.llm_model` に残る。
-手動の保存（§2.2）はこの列を書き換えない（`routes._upsert_plan` は `None` を渡された列を更新しない）。
+手動の保存（§2.2）はこの列を書き換えない（`routes._upsert_plan` は `llm_model` に `None` を渡されたときだけこの列を更新しない。確定者と確定日時は `None` でも書く）。
 人がプログラムを書き換えても、確定し直しても、`llm_model` は最後にコンパイルしたときのモデル名のままである。
 この列は、プログラムの今の内容をそのモデルが書いたことを意味せず、実行時に使われるモデルでもない（§5.6）。
-この時点の `validate_program` のエラーは保存を止めず、応答の `validation_errors` で返る。
+この時点の `validate_program` のエラーは保存を止めず、応答で返る（コンパイルは項目ごとに `validation_errors`、再コンパイルは `errors`）。
 このため検証を通らない `draft` が保存されうるが、そのままでは確定できない（§2.2）。
 `POST .../plan/{link_id}/recompile` は1項目を作り直し、確定済みのプランも `draft` に戻して確定者と確定日時を消す。
 応答には版（`version`。§2.2）が付く。
