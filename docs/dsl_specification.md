@@ -9,14 +9,18 @@ typed `params`, a linear list of `steps` (each one primitive `op` such as `sql_e
 `fhir_extract`, `csv_extract`, `file_extract`, `llm_extract`, `llm_judge`, `compare`, `branch`,
 `transform`, `select`, `aggregate`) in single-assignment form (`"$id"` references point only
 backwards), optional per-step `guard`s for conditional execution, and a `return` reference.
-There is no arbitrary code. SQL must pass a SELECT-only string check. That check is lexical
-and best-effort, can be bypassed, and is not a security boundary (§6.3); the boundary is the
-database's read-only access. On SQLite the application database is put in `PRAGMA query_only`
+There is no arbitrary code. SQL must pass a SELECT-only string check. The check lexes quotes
+under both PostgreSQL and SQLite rules and rejects comments, stray control characters, more
+than one trailing `;` and a list of forbidden words. It is an auxiliary, lexical layer that
+does not parse SQL, and it is not the security boundary (§6.3); the boundary is the database's
+privileges. On SQLite the application database is put in `PRAGMA query_only`
 mode. On PostgreSQL and other dialects the SQL runs on a separate connection inside a read-only
 transaction that is always rolled back. That connection uses the read-only role in
 `READONLY_DATABASE_URL`; without it, production refuses to run the SQL and other environments
 fall back to the application role, so the SQL can still read every table that role can read
-(§5.1). External databases rely on read-only roles. Every value
+(§5.1). External databases must be accessed with read-only accounts that are granted SELECT
+only on the tables extraction needs; those privileges are the boundary, and the code adds no
+further restriction (§5.3). Every value
 substituted into SQL identifiers, FHIR queries, file paths or prompts goes through a
 slot-specific sanitizer, and files are confined to a connection root.
 
@@ -119,7 +123,7 @@ DSL は次の性質を持つように作られている。各性質を支える�
 - **限定されたプリミティブ**: 実行できるのは12個の op だけで、任意コードの実行、ループ、関数定義、外部プロセスの起動は表現できない。式の評価は単位変換の四則演算だけで、`eval` を使わない（§5.10）。
 - **データとしてのプログラム**: プログラムは JSON の値であり、保存、比較、スナップショット、検証が機械的にできる（§3）。
 - **単一代入と前方参照**: 各 step の結果は一度だけ名前に束縛され、参照は前方にしか向かない。データの流れはプログラムの字面から読み取れる（§3.4）。
-- **読み取り専用と閉じ込め**: SQL は SELECT 限定の文字列検査を通らなければならないが、この検査は字句の上の最善努力で、安全の境界ではない（§6.3）。境界は DB の側にあり、アプリ自身の DB では DB が書き込みを拒む。SQLite では `PRAGMA query_only`、PostgreSQL 等では別の接続の読み取り専用トランザクションである（§5.1）。外部 DB は接続のロールの運用に依存する（§5.3）。差し込まれる値はスロットごとのサニタイズを通り、ファイルは接続のルート配下に閉じ込められる（§6）。
+- **読み取り専用と閉じ込め**: SQL は SELECT 限定の文字列検査を通らなければならないが、この検査は字句の上の補助の層で、安全の境界ではない（§6.3）。境界は DB の側にあり、アプリ自身の DB では DB が書き込みを拒む。SQLite では `PRAGMA query_only`、PostgreSQL 等では別の接続の読み取り専用トランザクションである（§5.1）。外部 DB では、接続のアカウントを読み取り専用にし、抽出に要る表にだけ参照権限を与えることが運用の要件で、その権限が境界である（§5.3）。差し込まれる値はスロットごとのサニタイズを通り、ファイルは接続のルート配下に閉じ込められる（§6）。
 - **人が読めること**: 各 step は1つの操作に対応し、`reasoning` に判断理由を持つ。実行されない記述（`select` の `where` / `order`）はその旨が trace に残る。
 - **生成と実行の分離**: LLM が関与するのは設計時のプログラムの生成と、プログラムが明示的に呼ぶ `llm_extract` / `llm_judge` だけである。生成されたプログラムは決定的に是正され（§9.3）、検証され（§9.1）、人の確定（§2）を経て実行される。インタプリタは op の意味をプログラムの外から変えない。
 - **失敗を値にしない**: 取れなかったことは値ではなく失敗コードとして残る（§4.6）。
@@ -168,11 +172,15 @@ HTTP の経路はすべて `/ai-input` の下にあり（`kawasemi/ai_input/rout
 `POST .../plan/compile` は、手順書が確定済みでプランが無いか `draft` の項目を対象に、`compiler.AIPlanCompiler` で
 プログラムを生成する。
 対象の項目は LLM を呼ぶ前に決まり、その時点で確定済みのプランは対象から外れる。
-LLM の応答を待つ間に、同じ項目のプランが別の要求で確定されると、結果は確定の側に倒れない。
-保存は LLM を呼ぶ前に読み込んだ行に対して行われ、行ロックも版の照合も無い。
-読み込んだときに `draft` だった行に `draft` と空の確定者を書いても、値が変わっていないので UPDATE に含まれず、生成したプログラムだけが書き込まれる。
-その結果、プランは `confirmed` と別の要求の確定者を保ったまま、誰も確定していない生成結果のプログラムを持つ（付録 B の18）。
-その間に別の要求が同じ項目のプランを初めて作っていたときは、保存の commit が一意制約の違反で失敗する（保存や再コンパイルと違い 409 には変換しない）。
+**生成は、LLM の応答を待つ間の他の要求の確定や編集を上書きしない**（コンパイル、再コンパイル、手順書の生成と再生成で同じ）。
+
+1. LLM を呼ぶ前に、対象の各行の版（§2.2）を記録する。
+2. 応答の後、対象の行を読み直して押さえる（`routes._lock_rows_for_write`）。PostgreSQL では `SELECT ... FOR UPDATE` の行ロック、SQLite では行に触れない `UPDATE` で DB の書き込みロックを先に取る（SQLite は `FOR UPDATE` を無視するため）。
+3. 版が記録と違う行（その間に確定、編集、作成された行）には書かない。コンパイルと手順書の生成はその項目を飛ばして応答の `skipped_conflict` に挙げ、他の項目は書く。再コンパイルと手順書の再生成は 409 を返して何も書かない。
+4. 書くときは、内容（`program` / `steps`）と状態、確定者、確定日時の列を、値が変わっていなくても必ず UPDATE に含める（`routes._force_write_columns`。保存と確定の側も同じ）。行は常に、最後に書いた要求が見た内容と状態の組になる。
+
+同じ項目の行を別の要求が初めて作っていたときの一意制約の違反も競合として扱う（再コンパイルと再生成は 409、コンパイルと生成は巻き戻して読み直し、最大3回まで試し、その項目を `skipped_conflict` に入れる）。
+生成の後で、元にした手順書がまだ確定済みで同じ内容かは確かめない。結果は `draft` のプランで、手順書より古いことは stale の表示で分かる。
 生成されたプログラムは決定的な是正（§9.3）を経て `draft` で保存され、コンパイルに使ったモデル名が `ai_input_plans.llm_model` に残る。
 手動の保存（§2.2）はこの列を書き換えない（`routes._upsert_plan` は `None` を渡された列を更新しない）。
 人がプログラムを書き換えても、確定し直しても、`llm_model` は最後にコンパイルしたときのモデル名のままである。
@@ -180,7 +188,6 @@ LLM の応答を待つ間に、同じ項目のプランが別の要求で確定�
 この時点の `validate_program` のエラーは保存を止めず、応答の `validation_errors` で返る。
 このため検証を通らない `draft` が保存されうるが、そのままでは確定できない（§2.2）。
 `POST .../plan/{link_id}/recompile` は1項目を作り直し、確定済みのプランも `draft` に戻して確定者と確定日時を消す。
-LLM を呼ぶ前に読み込んだ行に書く点はコンパイルと同じで、読み込んだときに `draft` だったプランが LLM の応答を待つ間に確定されると、同じく確定が残ったまま生成結果で上書きされる（付録 B の18）。
 応答には版（`version`。§2.2）が付く。
 
 ### 2.2 保存と確定（工程3）
@@ -199,7 +206,7 @@ LLM を呼ぶ前に読み込んだ行に書く点はコンパイルと同じで�
 2. `validate_program` のエラーがあれば 400 で拒否する（`confirm` の有無に関わらない）。
 3. LLM op を含み、設定で AI 抽出が無効なら 400 で拒否する。
 4. `confirm` なしで、既存のプランと正準形が同じなら何も書かない（下記）。
-5. `confirm=true` で、その項目の手順書が確定済みでなければ 400 で拒否する。
+5. `confirm=true` で、その項目の手順書が確定済みでなければ 400 で拒否する（手順書の行は押さえずに読む。付録 B の19）。
 6. `confirm=true` で `needs_input` の step が残っていれば 400 で拒否する。
 
 `confirm=true` で通れば `confirmed` にし、確定者をその要求の利用者に、確定日時をその時刻にする。
@@ -252,7 +259,7 @@ LLM を呼ぶ前に読み込んだ行に書く点はコンパイルと同じで�
 
 - 収集者（`collector`）の実行は本番として `ai_input_executions` に値、evidence、プログラムの写しを保存する。
 - 設計者の実行は試行で、メタ情報（`ai_input_trial_runs`）だけを残し、値も evidence も保存しない。
-- バッチ実行（データセット画面）は、確定済みのプランが1つ以上あり `draft` のプランが無いことを条件に、対象の被験者を順に実行し、被験者ごとに `ai_input_executions` を1行書く。バッチは開始時に確定済みのプランを一度だけ読み込み、ジョブの終わりまでそれを使う。ジョブの途中でプランが編集や下書きへ戻す操作で `draft` になっても、そのジョブの残りの被験者には読み込んだときのプログラムが実行される。
+- バッチ実行（データセット画面）は、確定済みのプランが1つ以上あり `draft` のプランが無いことを条件に、対象の被験者を順に実行し、被験者ごとに `ai_input_executions` を1行書く。バッチは開始時に確定済みのプランを一度だけ読み込み、ジョブの終わりまでそれを使う。ジョブの途中でプランが編集や下書きへ戻す操作で `draft` になっても、そのジョブの残りの被験者には読み込んだときのプログラムが実行される。被験者ごとの対象の状態は読み直さずに書く（付録 B の20）。
 
 単発と逐次の実行も、要求の受付時に確定済みのプランを読み込み、その実行の終わりまでそれを使う。逐次の実行は項目を1つずつ流すので、その途中で `draft` に戻されたプランも、その実行では実行される（付録 B の14）。
 
@@ -573,7 +580,12 @@ FHIR サーバから取得する。
 接続レジストリ（`connections.yaml`）の外部 DB を読む。
 
 - **意味**: `connection_id`（空なら旧名 `connection`）で DSN を解決し、`sql_extract` と同じ展開、再検査、バインドで実行する。
-- **読み取り専用**: コードは外部 DB の接続を読み取り専用にしない。書き込みを止める境界は、接続を読み取り専用ロールで運用することだけである。SELECT 限定の文字列検査（§6.3）は字句の上の最善努力で、迂回できる（付録 B の17）。
+- **読み取り専用**: コードは外部 DB の接続を読み取り専用にせず、文の実行時間の上限も掛けない。安全の境界は接続のアカウントの権限であり、運用で次を満たさなければならない（[DEPLOYMENT.md](DEPLOYMENT.md) の「外部DBの接続アカウント（connections.yaml）」）。
+  - 接続のアカウントは読み取り専用にする（書き込み、DDL、関数の作成と実行の権限を与えない）。
+  - 参照権限（`SELECT`）は抽出に要る表とビューにだけ与える。読み取り専用のアカウントでも、与えられた表はすべて読める（たとえば `UNION` による別の表の読み足しは、文字列検査ではなく権限が止める）。
+  - DB の側で文の実行時間の上限を掛ける（PostgreSQL なら `ALTER ROLE … SET statement_timeout`）。
+
+  SELECT 限定の文字列検査（§6.3）は補助の層で、境界ではない。
 - **失敗**: DSN を解決できなければ `source_unavailable`。そのほかは `sql_extract` と同じ。
 - **再試行**: SQLAlchemy の例外は10秒待って投げ直し、3回まで試す（§8.6）。
 - **trace**: `sql_extract` の項目に加えて `inputs.connection_id` と `attempts`（何回目で取れたか、または失敗までの回数）。
@@ -730,27 +742,47 @@ params の参照は差し込み先（スロット）で記法が決まる。
 | `match[].value` | なし（`null` は空文字） |
 | prompt | §6.5 |
 
-**SELECT 限定の検査**（`dsl.is_select_only_sql`）は、コメント（`--` から行末と `/* ... */`）を正規表現で消し、前後の空白を落とし、末尾に続くセミコロンを（`;;;` のように連続していればすべて）落としたうえで、
-先頭が `select` か `with` であること、セミコロンが残っていないこと（複文でないこと）、次の禁止語を
-単語として含まないこと（大文字小文字を区別しない）、PostgreSQL の Unicode エスケープ（`U&"..."` / `U&'...'`）を含まないことを要求する。
-末尾が `*` の語は、その語で始まる単語をすべて禁じる（例 `dblink*` は `dblink_exec` も禁じる）。
+**SELECT 限定の検査**（`dsl.is_select_only_sql`）は、SQL を何も消さずに次を要求する。
+
+1. **字句**（`dsl._lex_sql`）。同じ SQL を PostgreSQL の読みと SQLite の読みで1回ずつ字句解析し、両方で次を満たすものだけを受け付ける。
+   - 引用の外に、コメント記号（`--`、`/*`、`*/`）が無い。コメントは消さずに拒否する。
+   - 引用の外に、制御文字、書式文字、`\t` 以外の空白類（単独の `\r`、`\f`、`\v`、NUL、U+2028/U+2029、NBSP、全角空白、ゼロ幅文字、BOM など）が無い。改行は `\n` と `\r\n` だけ許す。
+   - 引用が閉じている。奇数個のバックスラッシュの直後の引用符（`E'\''`、`'a\'`）が無い。引用符は `''` で書く。
+   - 引用の外のセミコロンは、文末の1つだけ（`SELECT 1;` は通り、`SELECT 1;;` と `SELECT 1; SELECT 2` は通らない）。
+
+   引用は、PostgreSQL の読みでは `'…'`、`E'…'`、`"…"`、`` `…` ``、`$tag$…$tag$`、SQLite の読みでは `'…'`、`"…"`、`` `…` ``、`[…]` である。SQLite の読みでは TCL 形式の変数（`$a(…)` など）も1つのトークンとして読む。片方の読みでだけ引用の中に入る部分は、もう片方の読みで引用の外として検査される。
+2. 先頭が `select` か `with` である（大文字小文字を区別しない）。
+3. 次の禁止語を含まない。リテラルの中身も含めて探す（`WHERE status = 'delete'` も拒否される）。大文字小文字は区別しない。
+4. PostgreSQL の Unicode エスケープ（`U&"..."` / `U&'...'`）を含まない。
+
+禁止語の前の境界は「英字、`_`、非 ASCII 文字でない」、後ろの境界は「英数字、`_`、`$`、非 ASCII 文字でない」である（`dsl._SQL_WORD_START` / `_SQL_WORD_END`）。
+前に数字や `$` があっても境界になるので、`1union` や `$$b$$union` も拒否する。
+語の末尾の `*` は 0 文字以上の、`+` は 1 文字以上の単語の文字が続く語をすべて禁じる（例 `dblink*` は `dblink_exec` も、`pg_ls_+` は `pg_ls_dir` も禁じる）。
 
 <!-- dsl-list:sql-forbidden -->
-`insert update delete drop alter create truncate grant revoke attach pragma replace merge copy call vacuum execute union except intersect into outfile dumpfile pg_read_file pg_read_binary_file lo_import lo_export dblink* pg_terminate_backend pg_cancel_backend pg_advisory* pg_try_advisory* pg_sleep* query_to_xml* cursor_to_xml* table_to_xml* schema_to_xml* database_to_xml* ts_stat ts_rewrite`
+`insert update delete drop alter create truncate grant revoke attach pragma replace merge copy call vacuum execute union except intersect into outfile dumpfile pg_read_file pg_read_binary_file dblink* pg_terminate_backend pg_cancel_backend pg_advisory* pg_try_advisory* pg_sleep* query_to_xml* cursor_to_xml* table_to_xml* schema_to_xml* database_to_xml* ts_stat ts_rewrite pg_create_physical_replication_slot pg_create_logical_replication_slot pg_drop_replication_slot pg_logical_emit_message setval nextval pg_reload_conf pg_switch_wal pg_stat_reset* pg_ls_+ pg_stat_file`
 <!-- /dsl-list:sql-forbidden -->
 
-後半の語は PostgreSQL で読み取り専用トランザクションの外へ出るか、他の接続に作用する関数（`dblink*`、`pg_terminate_backend`、`pg_cancel_backend`、`pg_advisory*`、`pg_try_advisory*`、`pg_sleep*`）と、文字列で渡した SQL を実行する関数とその一族（`*_to_xml*`、`ts_stat`、`ts_rewrite`）である。
+加えて、`lo_` で始まる名前の**関数呼び出しの形**を拒否する（正規表現 <!-- dsl-value:sql-forbidden-call -->`lo_\w+"?\s*\(`<!-- /dsl-value:sql-forbidden-call -->。`lo_import(…)`、`"lo_import"(…)`、`pg_catalog.lo_unlink(…)` を含む）。
+ラージオブジェクトの関数を止めるためで、`lo_value` のような列名は通る。
 
-**この検査は字句の上の最善努力であり、安全の境界ではない**。
-SQL を構文解析せず、文字列リテラルを区別しない。
-コメントの除去は引用符を考慮しないので、リテラルの中に `--` や `/*` を書くと、その後ろの部分が検査から隠れる。
-たとえば `SELECT '--', dblink_exec(...)` と `SELECT '--'; DELETE FROM t` はどちらも検査を通る（付録 B の17）。
-禁止語も、検査が見る字面にしか効かない。
+後半の語は、PostgreSQL で読み取り専用トランザクションの外へ出るか他の接続に作用する関数（`dblink*`、`pg_terminate_backend`、`pg_cancel_backend`、`pg_advisory*`、`pg_try_advisory*`、`pg_sleep*`）、文字列で渡した SQL を実行する関数とその一族（`*_to_xml*`、`ts_stat`、`ts_rewrite`）、読み取り専用でも状態を変えるかサーバの外へ手が届く関数（レプリケーションスロット、`pg_logical_emit_message`、`setval`、`nextval`、`pg_reload_conf`、`pg_switch_wal`、`pg_stat_reset*`、`pg_ls_+`、`pg_stat_file`、ラージオブジェクト）である。
 
-安全の境界は DB の側にある。
-アプリ DB では SQLite の `PRAGMA query_only` と、それ以外の方言の読み取り専用トランザクションと読み取り専用ロール（§5.1）、外部 DB では読み取り専用ロールの運用（§5.3）である。
+**フェイルクローズ側の誤検知**。次のような正当な SQL も拒否される。
+
+- コメントを含む SQL（`SELECT v FROM labs -- 検査値`）。プログラムの SQL にはコメントを書かない。
+- `LIKE … ESCAPE '\'`。`standard_conforming_strings=off` の PostgreSQL では終端の位置がずれるため。`ESCAPE '!'` などで書く。
+- 数字や `$` の後ろに禁止語が続く識別子やリテラル（`t1copy`、`a$union`、`'C1call'`）。
+- リテラルの中の禁止語（`WHERE status = 'delete'`）。
+- 片方の方言の読みでだけ閉じない引用（`$$it's$$` は SQLite の読みで閉じない文字列になる。`ARRAY[']']` も同じ）。
+
+**この検査は補助の層であり、安全の境界ではない**。
+SQL を構文解析せず、2つの方言の字句の規則と語の一覧に頼る。
+一覧に無い関数（接続先の DB に入っている拡張の関数など）は止めないし、読み取りの範囲（どの表を読むか）も縛らない。
+安全の境界は DB の側の権限である。
+アプリ DB では SQLite の `PRAGMA query_only` と、それ以外の方言の読み取り専用トランザクションと読み取り専用ロール（§5.1）、外部 DB では接続のアカウントの権限（§5.3）である。
 読み取り専用トランザクションは、別のセッションを開く関数（`dblink` など）による書き込みを止めない。
-これを止めるのは、アプリ DB にそうした拡張を入れないか、入れたなら `REVOKE EXECUTE ... FROM PUBLIC` で実行権を外す運用である（[DEPLOYMENT.md](DEPLOYMENT.md) の「読み取り専用ロール（READONLY_DATABASE_URL）」）。
+これを止めるのは、DB にそうした拡張を入れないか、入れたなら `REVOKE EXECUTE ... FROM PUBLIC` で実行権を外す運用である（[DEPLOYMENT.md](DEPLOYMENT.md) の「読み取り専用ロール（READONLY_DATABASE_URL）」）。
 
 ### 6.4 パスの閉じ込め
 
@@ -1041,7 +1073,7 @@ V-11 {}: compare.cmp は {} のいずれかにしてください
 V-11 {}: select.pick は {} のいずれかにしてください
 V-11 {}: aggregate.func は {} のいずれかにしてください
 V-12 {}: op={} の {} に絶対パスは書けません（接続の root_path 起点の相対パスで書きます）
-V-13 {}: SQLはSELECTのみ許可されます
+V-13 {}: SQLはSELECTのみ許可されます（コメント・複文・閉じていない引用は書けません）
 V-14 {}: match 要素は辞書 {column, value} にしてください: {}
 V-14 {}: match 要素に column が必要です: {}
 V-14 {}: 列指定は文字列(列名)か整数(列index)にしてください: {}
@@ -1368,12 +1400,12 @@ DSL のプログラムは版を持たない。
 10. **prompt の未知の `$name` は検証で黙認される**（V-17）。書き損じた参照が字面のまま LLM へ渡りうる。
 11. **`return` は必須でない**。`return` の無いプログラムは検証を通り、項目の値は常に空になる（§3.1）。空の `steps` も同様に確定できる。
 12. **構造化出力のスキーマと検証の強さは一致しない**。`pick` / `func` の語彙、params、前方参照はスキーマに無く、値フィールドの型の閉じ方は検証に無い（§3.9）。
-13. **`external_db_extract` の読み取り専用はコードで強制されない**。書き込みを止める境界は接続を読み取り専用ロールで運用することだけで、SELECT 限定の文字列検査は迂回できる（§5.3、§6.3、付録 B の17）。アプリ DB は DB の側で読み取り専用にする（§5.1）。
+13. **`external_db_extract` の読み取り専用はコードで強制されない**。境界は接続のアカウントの権限で、読み取り専用のアカウントと、抽出に要る表だけへの参照権限と、DB 側の実行時間の上限が運用の要件である（§5.3）。SELECT 限定の文字列検査は補助の層である（§6.3）。アプリ DB は DB の側で読み取り専用にする（§5.1）。
 14. **再試行は外部 DB だけ**で、FHIR、ファイル、LLM の一時的な失敗は1回で失敗になる（§8.6）。
 15. **`multi: true` の `fhir_extract` で全 resource の `fhir_path` が `null` のとき**、結果は `[null, ...]` で空とみなされず、`failure_code` も付かない（§4.3、§5.2）。
 16. **プロンプトへの注入の区切り**はプロンプトインジェクションを起こしにくくするだけで、防ぐことは保証しない（§6.5）。
 17. **`READONLY_DATABASE_URL` の無い本番以外の環境では、アプリ DB の SQL はアプリのロールで読む**。書き込みは読み取り専用トランザクションが止めるが、アプリのロールが読める表（`users.password_hash` を含む）はすべて読める。`ENVIRONMENT` の未設定は `development` 扱いなので、本番で `ENVIRONMENT=production` を設定し忘れるとこの経路になる（起動時と `check_schema` が警告する。§5.1）。
-18. **読み取り専用トランザクションは、別のセッションを開く関数による書き込みを止めない**（`dblink` など）。これを止めるのは、アプリ DB にそうした拡張を入れないか、`REVOKE EXECUTE ... FROM PUBLIC` で実行権を外す運用である（[DEPLOYMENT.md](DEPLOYMENT.md)）。§6.3 の禁止語は迂回できるので、これを止める関門にはならない（付録 B の17）。SQLite には文の実行時間の上限が無い（`statement_timeout` は PostgreSQL だけ。§5.1）。
+18. **読み取り専用トランザクションは、別のセッションを開く関数による書き込みを止めない**（`dblink` など）。これを止めるのは、アプリ DB にそうした拡張を入れないか、`REVOKE EXECUTE ... FROM PUBLIC` で実行権を外す運用である（[DEPLOYMENT.md](DEPLOYMENT.md)）。§6.3 の禁止語は補助の層で、一覧に無い関数は止めないので、これを止める関門にはならない。SQLite には文の実行時間の上限が無い（`statement_timeout` は PostgreSQL だけ。§5.1）。
 
 ## 付録 B. コードの挙動として疑わしいもの
 
@@ -1397,5 +1429,7 @@ DSL のプログラムは版を持たない。
 14. **実行は開始時に読み込んだプランを最後まで実行する**。単発、逐次、バッチのどれも、確定済みのプランを開始時に一度だけ読み込む。実行の途中で編集や「下書きに戻す」でプランが `draft` になっても、その実行では読み込んだときのプログラムが実行され、実行記録はもう有効でない確定を指す。バッチではジョブの残りの被験者すべてに及ぶ（§2.3、§10.4）。
 15. **臨床的意味は、内容を変えた保存でも確定と元の確定者を保つ**。確定済みの記述を `confirm` なしで書き換えても `confirmed` のまま残る。手順書、プラン、データ所在は内容が変われば `draft` に戻る（§2.2）。
 16. **手順書を `draft` に戻しても、確定済みのプランは実行され続ける**。設計どおりの挙動である（実行されるのはプランで確定されたプログラム）が、手順書の確定が外れた項目の取得が、人が「下書きに戻す」を押すまで続く（§2.2）。
-17. **SELECT 限定の文字列検査は、リテラルの中のコメント記号で迂回できる**。`dsl._strip_sql_comments` は引用符を考慮せずに `--` から行末と `/* ... */` を消すので、`SELECT '--', dblink_exec(...)` や `SELECT '--'; DELETE FROM t` は、禁止語も複文も検査に見えないまま通る。PostgreSQL で `dblink` が入っていれば、前者は読み取り専用トランザクションの外で書き込める。末尾のセミコロンは連続していればすべて落とす（`SELECT 1;;;` も通る）。この検査は字句の上の最善努力で、安全の境界は DB の側にある（§5.1、§5.3、§6.3）。
-18. **LLM を呼ぶ生成の経路は、LLM の応答を待つ間の確定を上書きする**。コンパイル（`plan/compile`）、再コンパイル（`plan/{link_id}/recompile`）、手順書の生成と再生成（`runbook/generate`、`runbook/{link_id}/regenerate`）は、LLM を呼ぶ前に行を読み込み、応答の後にその行へ書く。行ロックも版の照合も無い。読み込んだときに `draft` だった行が待つ間に確定されると、書き込みは状態と確定者を変えないまま内容だけを置き換え、確定と別の要求の確定者が残る（SQLAlchemy は読み込んだ値と同じ値を UPDATE に含めない）。確定済みのプランや手順書が、誰も確定していない内容を持つことになる（§2.1）。
+17. **解消**。SELECT 限定の文字列検査が、リテラルの中のコメント記号で迂回できた問題（§6.3 参照）。
+18. **解消**。LLM を呼ぶ生成の経路が、LLM の応答を待つ間の確定を上書きした問題（§2.1 参照）。
+19. **プランの確定は、手順書の行を押さえずに手順書の状態を見る**。`save_plan` はプランの行は押さえる（§2.2）が、手順書は押さえずに読んで `confirmed` かを確かめる。確定の検査と commit の間に手順書が `draft` に戻されると、`draft` の手順書の下でプランが確定されうる（§2.2）。
+20. **バッチとデータセット画面の状態の書き込みに競合の検査が無い**。バッチは各被験者の対象を開始時に `pending` として読み、実行（LLM を呼びうる）の後で、読み直さずに `ai_drafted` を書く。その間に収集者が入力を始めたか確認者が完了した対象の状態を上書きしうる。データセット画面の入力の開始と回答の確定にも、検査と書き込みの間のロックが無い（同じ対象を2人が同時に始める、確定が二重に回答を作る）。これは DSL の外の処理だが、実行と記録の整合に関わる（§2.3）。

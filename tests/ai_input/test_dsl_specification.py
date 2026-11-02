@@ -30,6 +30,8 @@ from kawasemi.ai_input.dsl import (
     _MAX_STEPS,
     _REQUIRED_FIELDS,
     _SQL_FORBIDDEN,
+    _SQL_WORD_END,
+    _SQL_WORD_START,
     AGGREGATE_FUNCS,
     COMPARE_OPS,
     SELECT_PICKS,
@@ -167,16 +169,24 @@ def test_spec_value_vocabularies_match_code() -> None:
 
 
 def test_spec_sql_forbidden_words_match_code() -> None:
-    """§6.3 の SQL の禁止語が `_SQL_FORBIDDEN` の語と一致すること。
+    """§6.3 の SQL の禁止語と関数呼び出しの形が `_SQL_FORBIDDEN` と一致すること。
 
-    コードの `\\w*`（その語で始まる単語すべて）は、仕様では末尾の `*` で書く。
+    `_SQL_FORBIDDEN` は「境界 + (語|語|...) + 境界」と「境界 + 関数呼び出しの形」の2つの選択肢で
+    できている。語の末尾の `\\w*` は仕様では `*`、`\\w+` は `+` で書く。
     """
-    m = re.fullmatch(r"\\b\((.*)\)\\b", _SQL_FORBIDDEN.pattern)
-    assert m, "_SQL_FORBIDDEN の形が \\b(a|b|...)\\b でなくなった。このテストを直す"
-    code_words = [w.replace(r"\w*", "*") for w in m.group(1).split("|")]
-    assert all(re.fullmatch(r"[a-z_]+\*?", w) for w in code_words), code_words
+    pattern = _SQL_FORBIDDEN.pattern
+    head = _SQL_WORD_START + "("
+    tail = ")" + _SQL_WORD_END + "|" + _SQL_WORD_START
+    assert pattern.startswith(head) and tail in pattern, (
+        "_SQL_FORBIDDEN の形が変わった。このテストを直す"
+    )
+    words_part, call_form = pattern[len(head) :].split(tail, 1)
+    code_words = [w.replace(r"\w*", "*").replace(r"\w+", "+") for w in words_part.split("|")]
+    assert all(re.fullmatch(r"[a-z_]+[*+]?", w) for w in code_words), code_words
     spec_words = " ".join(_marked_list("sql-forbidden")).split()
     assert sorted(spec_words) == sorted(code_words)
+    (spec_call,) = _marked("dsl-value", "sql-forbidden-call")
+    assert spec_call.strip("`") == call_form
 
 
 def test_spec_max_steps_matches_code() -> None:
