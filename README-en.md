@@ -1,3 +1,5 @@
+<p align="center"><img src="kawasemi/web/static/img/kawasemi.png" alt="KAWASEMI" width="140"></p>
+
 # KAWASEMI
 
 **English** | [日本語](README.md)

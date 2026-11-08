@@ -54,6 +54,9 @@ header .container {
 h1 { font-size: var(--text-display); line-height: var(--lh-heading); margin: 0; }
 header h1 { font-size: 1.05rem; font-weight: 700; letter-spacing: .04em; color: var(--color-ink); }
 header h1::after { content: "."; color: var(--color-primary); }
+header .brand-icon { width: 32px; height: 32px; vertical-align: middle; margin-right: var(--space-sm); }
+/* 線画の透過 PNG はダーク背景で沈むため、白い円の下地を敷く */
+[data-theme="dark"] header .brand-icon { background: #fff; border-radius: 50%; }
 
 .nav { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-sm) var(--space-md); }
 .nav a, .nav span { color: var(--color-ink-2); text-decoration: none; white-space: nowrap; font-size: var(--text-sm); }
