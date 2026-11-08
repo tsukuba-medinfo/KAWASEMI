@@ -122,4 +122,4 @@ append_item_units("var/resource_index", "var/resource_index_items", units, embed
 
 ## ライセンス
 
-MIT（[`LICENSE`](../LICENSE)）。
+Apache License 2.0（[`LICENSE`](../LICENSE)）。
