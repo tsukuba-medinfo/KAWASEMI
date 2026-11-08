@@ -77,5 +77,5 @@ JASPEHR 標準の Web フォームとして症例データを手動入力でき�
 
 ## ライセンス
 
-[MIT License](LICENSE)
+[Apache License 2.0](LICENSE)（帰属表示は [NOTICE](NOTICE)）
 

@@ -6,6 +6,7 @@ authors = [
     {name = "KAWASEMI Contributors"}
 ]
 readme = "README.md"
+license = {text = "Apache-2.0"}
 # CI（.github/workflows/ci.yml）が検証するのは 3.12 単一。サポート表明と検証対象を
 # 一致させるため 3.12 を下限とする（版を1つ増やすと CI 時間が倍になる）。
 #
