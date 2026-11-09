@@ -520,6 +520,16 @@ _JUDGE_INSTRUCTION = (
     "- unknown: 与えられた情報では判断できない（推測で yes / no を選ばないこと）"
 )
 
+# `llm_extract` の出力形式の指示（#21）。プロンプトが「YYYY-MM-DD で抽出」と書いていても、
+# モデルは根拠の説明を付けて返すことがあり（実測: `**2026-05-12**` ＋ 解説文）、日付そのものは
+# 正しく読めていても回答型の検査（`item_evidence`）で値が捨てられた。値の語彙は閉じられない
+# ので（判定 op と違い structured output は使えない）、**指示で「値だけ」を求める**。
+# 指示は送ったプロンプトの一部として trace に全文が残る。
+_EXTRACT_INSTRUCTION = (
+    "抽出した値だけを出力してください。前置き・説明・根拠の引用・装飾（**、引用符、箇条書き）は"
+    "付けないでください。該当する情報が無いときは、何も出力しないでください。"
+)
+
 # params 宣言を持たないプログラム（従来形）用の空バインダ。組み込みパラメータ
 # （patient_id 等）は宣言不要なので、これだけで従来の {{patient_id}} 置換は動く。
 _EMPTY_BINDER = ParamBinder()
@@ -2139,10 +2149,9 @@ class DSLInterpreter:
         # 指示だけでは崩れ（モデルは自由文で答える）、スキーマだけでは「判定不能」が使われない
         # （選択肢として在るだけでは迷ったときに yes / no へ寄せる）。両方を付ける。
         #
-        # **付けるのは判定 op だけ**である。`llm_extract` は値そのものを取り出す op なので、
-        # 語彙を閉じると取り出せる値が無くなる。
-        if judge:
-            prompt = f"{prompt}\n\n{_JUDGE_INSTRUCTION}"
+        # **語彙を閉じるのは判定 op だけ**である。`llm_extract` は値そのものを取り出す op なので、
+        # 語彙を閉じると取り出せる値が無くなる。代わりに「値だけを出力する」指示を付ける（#21）。
+        prompt = f"{prompt}\n\n{_JUDGE_INSTRUCTION if judge else _EXTRACT_INSTRUCTION}"
         selected_model, model_source = effective_llm_model(step, model)
 
         response = await self._ollama_client.chat(
