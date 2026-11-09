@@ -4,6 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}KAWASEMI{% endblock %}</title>
+    <link rel="icon" type="image/png" sizes="64x64" href="{{ base_path() }}/static/img/favicon-64.png">
+    <link rel="apple-touch-icon" href="{{ base_path() }}/static/img/apple-touch-icon.png">
     <script>
         // テーマ初期化（FOUC 回避: スタイル適用前に data-theme を確定）
         (function () {
@@ -68,7 +70,7 @@
 <body>
     <header>
         <div class="container">
-            <h1>KAWASEMI</h1>
+            <h1><img class="brand-icon" src="{{ base_path() }}/static/img/kawasemi.png" alt="" width="32" height="32">KAWASEMI</h1>
             <nav class="nav">
                 <button type="button" class="theme-toggle" id="themeToggle" aria-label="ライト/ダーク表示の切替">🌙 ダーク</button>
                 {% if current_user %}
