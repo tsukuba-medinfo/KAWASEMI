@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from kawasemi.ai_input import executor as executor_mod
 from kawasemi.ai_input.compiler import COMPILE_SYSTEM_PROMPT
 from kawasemi.ai_input.executor import (
+    _EXTRACT_INSTRUCTION,
     _JUDGE_INSTRUCTION,
     _JUDGE_NO,
     _JUDGE_SCHEMA,
@@ -53,6 +54,29 @@ async def test_llm_extract_fills_value_and_records_trace(db_session: AsyncSessio
     # プロンプトに patient_id が展開されている（GxP 証跡）
     assert "P1" in llm_step["llm"]["prompt"]
     interp._ollama_client.chat.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_llm_extract_asks_for_the_value_only(db_session: AsyncSession) -> None:
+    """llm_extract のプロンプトに「値だけを出力」の指示が付き、送った全文が trace に残る（#21）。
+
+    語彙を閉じる判定 op の指示（`_JUDGE_INSTRUCTION`）は付かない。
+    """
+    interp = DSLInterpreter()
+    interp._ollama_client.chat = AsyncMock(return_value=_chat_response("2026-05-12"))
+    program = {
+        "steps": [{"op": "llm_extract", "id": "v", "prompt": "発症日を YYYY-MM-DD で抽出"}],
+        "return": "$v",
+    }
+    prefill, evidence = await interp.execute([_plan("onset_date", program)], "P1", db_session)
+
+    sent = interp._ollama_client.chat.await_args.kwargs["messages"][0]["content"]
+    assert sent.startswith("発症日を YYYY-MM-DD で抽出")
+    assert _EXTRACT_INSTRUCTION in sent
+    assert _JUDGE_INSTRUCTION not in sent
+    step = next(t for t in evidence["onset_date"]["trace"] if t.get("op") == "llm_extract")
+    assert step["llm"]["prompt"] == sent
+    assert prefill["onset_date"] == "2026-05-12"
 
 
 @pytest.mark.asyncio
