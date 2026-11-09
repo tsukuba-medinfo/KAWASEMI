@@ -68,12 +68,19 @@ OLLAMA_MODEL=<モデル名> make e2e-live           # モデルを指定する
 | `app.db` | 設計済みの様式・手順書・プラン・回答（`kawasemi e2e serve` で見る） |
 | `resource_index/` / `generated/` | その回の索引とダミー外部システム |
 
-**全体の制限時間（`LLM_TOTAL_TIMEOUT`）を上げる。**
-既定の 600 秒は設計ロールのチャンク処理全体の締め切りで、大きめのモデルでは DSL のコンパイルがこれで打ち切られ、一部の項目が「未試行」になる（関門 (c) の理由に `未試行（全体の制限時間など…）` と出る）。
-実機層では `.env.example` の vLLM の節と同じく、`LLM_TOTAL_TIMEOUT=3600` などに上げて回す。
+**制限時間を上げる（`OLLAMA_TIMEOUT` と `LLM_TOTAL_TIMEOUT`）。**
+時間制限は 2 つあり、どちらに当たっても DSL のコンパイルが打ち切られて、一部の項目が「未試行」になる
+（関門 (c) の理由に `未試行（…）` と出る）。
+
+- `OLLAMA_TIMEOUT`（既定 120 秒）は **1 コール**の上限。1 コールが数分かかるモデル（例: `qwen3.8:27b`）では、
+  コンパイルの塊が `ReadTimeout` になり、連続 3 回の失敗（`MAX_CONSECUTIVE_CHUNK_FAILURES`）で残りが打ち切られる。
+  **`LLM_TOTAL_TIMEOUT` を上げても直らない**ので、まずこちらを上げる（`.env.example` に `900` の例がある）。
+- `LLM_TOTAL_TIMEOUT`（既定 600 秒）は設計ロールのチャンク処理**全体**の締め切り。
+
+どちらの値も `run.md` の「全体の制限時間」「1 コールの上限」に記録される。
 
 ```
-LLM_TOTAL_TIMEOUT=3600 OLLAMA_MODEL=<モデル名> make e2e-live
+OLLAMA_TIMEOUT=900 LLM_TOTAL_TIMEOUT=3600 OLLAMA_MODEL=<モデル名> make e2e-live
 ```
 
 実機層は未試行の項目を自動では押し直さない（押し直しの結果を混ぜず、打ち切りをそのまま記録するため）。
