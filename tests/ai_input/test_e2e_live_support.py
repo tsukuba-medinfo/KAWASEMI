@@ -71,6 +71,8 @@ def test_run_record_is_a_record_with_models_and_reasons(tmp_path: Path) -> None:
     meta = {
         "started_at": "2026-10-23T01:00:00",
         "vision_available": False,
+        "llm_total_timeout": 3600,
+        "ollama_timeout": 900,
         "models": {
             "設計・実行の LLM": {"name": "m:1", "digest": "abcdef0123456789", "base_url": "u"}
         },
@@ -79,6 +81,8 @@ def test_run_record_is_a_record_with_models_and_reasons(tmp_path: Path) -> None:
     assert "評価の指標ではない" in md
     assert "| 設計・実行の LLM | m:1 | abcdef012345 | u |" in md
     assert VISION_UNAVAILABLE in md
+    assert "全体の制限時間（LLM_TOTAL_TIMEOUT）: 3600 秒" in md
+    assert "1 コールの上限（OLLAMA_TIMEOUT）: 900 秒" in md
     assert "上位8に無い" in md
     assert "| 計 | 42.5 |" in md
     js, mdp = write_run_record(tmp_path / "run", {**meta, "error": "boom"}, None)
@@ -175,6 +179,7 @@ def test_compile_reason_separates_unattempted_from_other_failures() -> None:
     }
     prog = {"steps": [{"op": "external_db_extract", "id": "v"}], "return": "$v"}
     assert compile_failure_reason("max_body_temp", compiled, None) == UNATTEMPTED
+    assert "OLLAMA_TIMEOUT" in UNATTEMPTED and "LLM_TOTAL_TIMEOUT" in UNATTEMPTED
     assert compile_failure_reason("diagnosis_text", compiled, None) == REJECTED_LLM
     assert compile_failure_reason("sex", compiled, {"steps": []}) == EMPTY_PROGRAM
     assert compile_failure_reason("pathogen", compiled, None) == "プランが返らなかった"

@@ -85,6 +85,7 @@ async def test_live_pipeline_runs_to_completion() -> None:
         "out_dir": str(out),
         "vision_available": vision_available,
         "llm_total_timeout": settings.llm_total_timeout,
+        "ollama_timeout": settings.ollama_timeout,
         "knowledge": {
             "dwh": str(knowledge_dwh or "examples/e2e/knowledge.yaml（固定資産）"),
             "billing": str(knowledge_billing or "examples/e2e/knowledge.billing.yaml（固定資産）"),

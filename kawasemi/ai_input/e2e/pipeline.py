@@ -211,7 +211,10 @@ async def _post(client: AsyncClient, url: str, csrf: str, body: Any = None) -> h
     return await client.post(url, json=body or {}, headers={"X-CSRF-Token": csrf})
 
 
-UNATTEMPTED = "未試行（全体の制限時間など。押し直せば対象に入る）"
+UNATTEMPTED = (
+    "未試行（全体の制限時間 LLM_TOTAL_TIMEOUT、または 1 コールの上限 OLLAMA_TIMEOUT による"
+    "コンパイル打ち切りなど。押し直せば対象に入る）"
+)
 EMPTY_PROGRAM = "空のプログラム（step が無い）"
 REJECTED_LLM = "LLM の応答を棄却（llm_extract / llm_judge を含むが自動構造化AIが無効）"
 
@@ -728,6 +731,8 @@ def run_record_markdown(meta: dict[str, Any], result: PipelineResult | None) -> 
     lines += ["", f"- Vision: {'使える' if vision else '使えない（関門 d を理由付きで skip）'}"]
     if meta.get("llm_total_timeout") is not None:
         lines.append(f"- 全体の制限時間（LLM_TOTAL_TIMEOUT）: {meta['llm_total_timeout']} 秒")
+    if meta.get("ollama_timeout") is not None:
+        lines.append(f"- 1 コールの上限（OLLAMA_TIMEOUT）: {meta['ollama_timeout']} 秒")
     for name, path in (meta.get("knowledge") or {}).items():
         lines.append(f"- 知識層（{name}）: {path}")
     if meta.get("elapsed_sec") is not None:
