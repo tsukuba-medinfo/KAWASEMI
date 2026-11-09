@@ -395,7 +395,26 @@ function confirmItem(btn) {
   const item = collectItem(card);
   if (!item.annotation) { setStatus('記述が空の項目は確認できません', false); return; }
   if (!confirm(`項目「${item.link_id}」を確認済み（confirmed）にします。確認者としてあなたの名前と日時が記録されます。よろしいですか？`)) return;
-  save(true, [item]);
+  confirmOne(card, item);
+}
+
+// 再読込しない。再読込すると、他項目の未保存の編集と AI 下書きが失われる。
+// 保存したのはこの項目だけなので、画面もこのカードだけを更新する（確認者・日時は
+// サーバが記録した値を、次に開いたときに読む）。
+async function confirmOne(card, item) {
+  setStatus('保存中...', true);
+  try {
+    const data = await postSave(true, [item]);
+    if (!data.success) { setStatus(`エラー: ${data.message || '保存に失敗しました'}`, false); return; }
+    const pill = card.querySelector('.status-pill');
+    if (pill) {
+      pill.classList.remove('st-draft', 'st-none', 'st-na');
+      pill.classList.add('st-confirmed');
+      pill.textContent = '確認済み';
+      pill.removeAttribute('title');
+    }
+    setStatus(`✓ 項目「${item.link_id}」を確認済みにしました。他の項目の編集内容はそのままです。`, true);
+  } catch (e) { setStatus(`通信エラー: ${e}`, false); }
 }
 
 async function saveAndExport() {
