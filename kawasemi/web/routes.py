@@ -1431,20 +1431,43 @@ async def submit_form(
     author = form_data.get("author") or None
     input_target_id_str = form_data.get("input_target_id") or None
 
-    # 責任境界: 確定保存は「自分が有効なリースを持つ症例」に限定する。
+    # 責任境界: 確定保存は「自分が有効なリースを持つ入力対象（患者 × この様式）」に限定する。
     # autofill（試行/本番）には患者縛りを課さない代わり、記入責任を負うこの保存経路で
-    # InputTarget の有効なリースによる患者アクセス制御を効かせる。
+    # 担当の検査を効かせる。患者だけでなく様式も一致させ（担当患者に対して別の様式の回答を
+    # 保存させない）、input_target_id が指定されたら、その対象でなければならない。
     # subject は "Patient/{id}" 形式の FHIR 参照なので裸の patient_id へ正規化する。
-    if subject:
-        subject_str = str(subject)
-        patient_ref = (
-            subject_str.split("/", 1)[1] if subject_str.startswith("Patient/") else subject_str
-        )
-        if not await _user_can_access_patient(db, current_user, patient_ref):
-            raise HTTPException(
-                status_code=403,
-                detail="この患者の回答を保存する権限がありません（割り当てを確認してください）",
+    subject_str = str(subject) if subject else ""
+    patient_ref = (
+        subject_str.split("/", 1)[1] if subject_str.startswith("Patient/") else subject_str
+    )
+    leased: InputTarget | None = None
+    if patient_ref:
+        leased = (
+            (
+                await db.execute(
+                    select(InputTarget).where(
+                        InputTarget.patient_id == patient_ref,
+                        InputTarget.questionnaire_id == questionnaire_id,
+                        valid_lease_clause(current_user.id),
+                    )
+                )
             )
+            .scalars()
+            .first()
+        )
+    wanted_id: int | None = None
+    if input_target_id_str:
+        try:
+            wanted_id = int(str(input_target_id_str))
+        except (ValueError, TypeError):
+            logger.warning(f"入力対象IDが不正です: {input_target_id_str!r}")
+            leased = None
+    if leased is None or (wanted_id is not None and wanted_id != leased.id):
+        raise HTTPException(
+            status_code=403,
+            detail="この患者・この様式の回答を保存する権限がありません"
+            "（「次の患者を受け取る」で受け取った対象のみ保存できます）",
+        )
 
     # 回答データの構築
     answers: dict[str, Any] = {}
@@ -1487,23 +1510,11 @@ async def submit_form(
 
     db.add(questionnaire_response)
 
-    # 入力対象のステータスを完了に更新
-    # 自分が有効なリースを持つ入力対象のみ完了にできる（他者対象の不正完了を防ぐ）
-    if input_target_id_str:
-        try:
-            it_id = int(str(input_target_id_str))
-        except (ValueError, TypeError):
-            logger.warning(f"入力対象IDが不正です: {input_target_id_str!r}")
-        else:
-            it_stmt = select(InputTarget).where(
-                InputTarget.id == it_id, valid_lease_clause(current_user.id)
-            )
-            it_result = await db.execute(it_stmt)
-            input_target = it_result.scalar_one_or_none()
-            if input_target and input_target.status != InputTargetStatus.COMPLETED:
-                input_target.status = InputTargetStatus.COMPLETED
-                input_target.completed_at = datetime.now(UTC)
-                logger.info(f"入力対象を完了しました: id={it_id}")
+    # 入力対象を完了にする（上で検査した、自分が有効なリースを持つ対象）
+    if leased.status != InputTargetStatus.COMPLETED:
+        leased.status = InputTargetStatus.COMPLETED
+        leased.completed_at = datetime.now(UTC)
+        logger.info(f"入力対象を完了しました: id={leased.id}")
 
     await db.commit()
     await db.refresh(questionnaire_response)
