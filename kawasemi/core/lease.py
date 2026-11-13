@@ -14,9 +14,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import ColumnElement, and_, case, or_, select, update
+from sqlalchemy import ColumnElement, and_, case, exists, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import aliased, selectinload
 
 from kawasemi.core.config import settings
 from kawasemi.models.input_target import InputTarget, InputTargetStatus
@@ -63,7 +63,7 @@ def valid_lease_clause(user_id: int, now: datetime | None = None) -> ColumnEleme
     )
 
 
-def _free_clause(now: datetime) -> ColumnElement[bool]:
+def free_clause(now: datetime) -> ColumnElement[bool]:
     """誰も有効に保持していない（未保持、または期限切れ）。"""
     return or_(
         InputTarget.started_by_id.is_(None),
@@ -148,7 +148,7 @@ async def claim_next_target(
         now = utcnow()
         query = (
             select(InputTarget.id)
-            .where(InputTarget.status.in_(_CLAIMABLE_STATUSES), _free_clause(now))
+            .where(InputTarget.status.in_(_CLAIMABLE_STATUSES), free_clause(now))
             .order_by(rank, InputTarget.id)
             .limit(1)
         )
@@ -161,12 +161,21 @@ async def claim_next_target(
             await db.rollback()
             return None
 
+        # 「この収集者が有効なリースを持たない」も UPDATE の条件に入れる。同じ人の二重送信
+        # （ダブルクリック・複数タブ）が、別々の候補を取って2件持つのを防ぐ。
+        mine = aliased(InputTarget)
+        holds_none = ~exists().where(
+            mine.started_by_id == user_id,
+            mine.lease_expires_at > now,
+            mine.status != InputTargetStatus.COMPLETED,
+        )
         result = await db.execute(
             update(InputTarget)
             .where(
                 InputTarget.id == candidate_id,
                 InputTarget.status.in_(_CLAIMABLE_STATUSES),
-                _free_clause(now),
+                free_clause(now),
+                holds_none,
             )
             .values(
                 started_by_id=user_id,
@@ -183,12 +192,45 @@ async def claim_next_target(
         )
         await db.commit()
         if result.rowcount:  # type: ignore[attr-defined]
-            return (
-                await db.execute(
-                    select(InputTarget)
-                    .where(InputTarget.id == candidate_id)
-                    .execution_options(populate_existing=True)
-                )
-            ).scalar_one()
-        # 取り合いに負けた: 別の候補で取り直す
+            return await _converge_to_one_lease(db, user_id, candidate_id)
+        # 負けた。自分が既に持っていた（二重送信の相手が先に取った）ならそれを返す
+        held = await get_active_lease(db, user_id)
+        if held is not None:
+            return held
+        # 他者に取られた: 別の候補で取り直す
     return None
+
+
+async def _converge_to_one_lease(db: AsyncSession, user_id: int, claimed_id: int) -> InputTarget:
+    """有効なリースが複数あれば id 最小の1件だけ残して手放し、残した対象を返す。
+
+    NOT EXISTS だけでは、PostgreSQL の READ COMMITTED で別の行を同時に UPDATE した
+    二重送信が両方通り得る。通った呼び出しがそれぞれ同じ規則（最小 id を残す）で収束させる。
+    """
+    rows = (
+        (
+            await db.execute(
+                select(InputTarget)
+                .where(valid_lease_clause(user_id))
+                .order_by(InputTarget.id)
+                .execution_options(populate_existing=True)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    keep = rows[0] if rows else None
+    for extra in rows[1:]:
+        extra.started_by_id = None
+        extra.lease_expires_at = None
+    if len(rows) > 1:
+        await db.commit()
+    if keep is None:  # 収束の相手が先に自分の分を手放した等。取り直しは呼び出し側に任せる
+        keep = (
+            await db.execute(
+                select(InputTarget)
+                .where(InputTarget.id == claimed_id)
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one()
+    return keep
