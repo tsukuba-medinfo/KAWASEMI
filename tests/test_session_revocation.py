@@ -114,10 +114,11 @@ async def test_password_reset_revokes_refresh_and_access_tokens(
 async def test_edit_without_a_password_keeps_sessions(
     admin_client: AsyncClient,
     collector_user: User,
+    collector_role,
     db_session: AsyncSession,
     csrf_token: str,
 ) -> None:
-    """パスワードを変えない編集では、利用者のセッションを切らない。"""
+    """パスワード・有効フラグ・役割を変えない編集では、利用者のセッションを切らない。"""
     async with _new_client() as victim:
         await _real_login(victim, "collector_test", "Collector123!")
         resp = await admin_client.post(
@@ -128,6 +129,7 @@ async def test_edit_without_a_password_keeps_sessions(
                 "full_name": "改名",
                 "password": "",
                 "is_active": "on",
+                "roles": [str(collector_role.id)],
                 "csrf_token": csrf_token,
             },
             headers={"X-CSRF-Token": csrf_token},

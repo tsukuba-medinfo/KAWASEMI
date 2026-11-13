@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from kawasemi.api.main import app
 from kawasemi.core.config import settings
-from kawasemi.core.login_throttle import LoginThrottle, login_throttle
+from kawasemi.core.login_throttle import LoginThrottle, login_throttle, throttle_key
 from kawasemi.models.auth_event import AuthEvent, AuthEventAction
 from kawasemi.models.user import User
 from kawasemi.web.auth_routes import limiter
@@ -122,7 +122,7 @@ async def test_unknown_usernames_are_counted_like_real_ones(
     monkeypatch.setattr(settings, "lockout_max_attempts", 2)
     for _ in range(2):
         await _attempt_login(client, "ghost_user", "whatever")
-    assert login_throttle.is_blocked(("ghost_user", "127.0.0.1"))
+    assert login_throttle.is_blocked(throttle_key("ghost_user", "127.0.0.1"))
     # 実在しないので監査イベントは作らない（user_id が無い）
     total = await db_session.execute(select(func.count()).select_from(AuthEvent))
     assert int(total.scalar_one()) == 0
@@ -137,7 +137,7 @@ async def test_a_third_party_cannot_lock_the_owner_out_from_another_ip(
 
     for _ in range(3):  # 攻撃者（127.0.0.1）が既知のユーザー名で失敗を積む
         await _attempt_login(client, "admin_test", "wrong-pass")
-    assert login_throttle.is_blocked(("admin_test", "127.0.0.1"))
+    assert login_throttle.is_blocked(throttle_key("admin_test", "127.0.0.1"))
 
     transport = ASGITransport(app=app, client=("10.9.8.7", 4321))
     async with AsyncClient(transport=transport, base_url="http://test") as owner:
@@ -158,7 +158,7 @@ async def test_successful_login_forgets_the_failures_of_that_pair(
     client.cookies.clear()  # ログイン済みのままだと /login が転送されるので、未ログインに戻す
     for _ in range(2):  # 積み直し。成功で消えていなければここでブロックに入る
         await _attempt_login(client, "admin_test", "wrong-pass")
-    assert not login_throttle.is_blocked(("admin_test", "127.0.0.1"))
+    assert not login_throttle.is_blocked(throttle_key("admin_test", "127.0.0.1"))
 
 
 # ===== 旧方式の locked_until が残っている行 =====
@@ -289,3 +289,43 @@ def test_throttle_is_bounded_and_keeps_active_blocks() -> None:
         t.register_failure((f"u{i}", "1.1.1.1"), max_attempts=3, window_seconds=1000, now=1 + i)
     assert len(t._entries) <= 50
     assert t.is_blocked(blocked, now=600)
+
+
+def test_throttle_key_is_bounded_whatever_the_username_length() -> None:
+    """M1: 巨大なユーザー名でも、保存されるキーは一定の大きさ（メモリを食わせられない）。"""
+    small = throttle_key("a", "127.0.0.1")
+    huge = throttle_key("あ" * 200_000, "127.0.0.1")
+    assert len(small[0]) == len(huge[0]) == 64
+    assert len(throttle_key("u", "x" * 5000)[1]) == 64
+    assert throttle_key("same", "1.1.1.1") == throttle_key("same", "1.1.1.1")
+    assert throttle_key("a", "1.1.1.1") != throttle_key("b", "1.1.1.1")
+
+
+def test_throttle_purges_expired_entries_without_waiting_for_the_cap() -> None:
+    """M1: 役目を終えた組は、上限に達しなくても一定回数ごとに掃除される。"""
+    t = LoginThrottle(max_entries=1_000_000)
+    for i in range(300):
+        t.register_failure((f"u{i}", "1.1.1.1"), max_attempts=5, window_seconds=10, now=0)
+    assert len(t._entries) == 300
+    # 窓を過ぎたあとの失敗が一定回数続くと、古い組が掃除される
+    for i in range(300, 600):
+        t.register_failure((f"u{i}", "1.1.1.1"), max_attempts=5, window_seconds=10, now=100)
+    assert len(t._entries) < 600
+    survivors = {k[0] for k in t._entries}
+    assert not {f"u{i}" for i in range(256)} & survivors  # 掃除の時点で期限切れだったもの
+
+
+@pytest.mark.asyncio
+async def test_oversized_username_is_handled_and_stored_small(
+    client: AsyncClient, monkeypatch
+) -> None:
+    """M1: 20万文字のユーザー名のログイン失敗でも、スロットルに残るキーは小さい。"""
+    monkeypatch.setattr(settings, "lockout_max_attempts", 2)
+    big = "あ" * 200_000
+    for _ in range(2):
+        resp = await _attempt_login(client, big, "x")
+        assert resp.status_code == 200
+        assert _GENERIC in resp.text
+    keys = list(login_throttle._entries)
+    assert keys and all(len(k[0]) == 64 and len(k[1]) <= 64 for k in keys)
+    assert login_throttle.is_blocked(throttle_key(big, "127.0.0.1"))

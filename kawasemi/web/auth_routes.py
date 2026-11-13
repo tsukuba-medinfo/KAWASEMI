@@ -26,6 +26,7 @@ from kawasemi.core.deps import get_current_user, get_current_user_optional
 from kawasemi.core.entry import current_entry
 from kawasemi.core.logging_config import get_logger
 from kawasemi.core.login_throttle import login_throttle
+from kawasemi.core.login_throttle import throttle_key as make_throttle_key
 from kawasemi.core.rate_limit import limiter, login_rate_limit
 from kawasemi.core.sessions import revoke_user_sessions
 from kawasemi.models.auth_event import AuthEvent, AuthEventAction
@@ -92,6 +93,28 @@ async def _issue_refresh_token(user_id: int, db: AsyncSession) -> str:
     return create_refresh_token(user_id, jti)
 
 
+async def _issue_session_refresh_token(user: User, db: AsyncSession) -> str | None:
+    """リフレッシュトークンを発行し、**発行の最中に失効が入っていないか**を確かめる。
+
+    管理者のパスワード再設定やログアウトは、`token_version` を +1 してその時点の未失効の
+    リフレッシュトークンを全件失効する。そのコミットが、こちらの発行（INSERT）と前後すると、
+    再設定のあとに新しいリフレッシュトークンが生き残りうる。そこで発行のあとに世代と有効フラグを
+    読み直し、変わっていれば今発行した分も含めて失効して None を返す。
+    """
+    version = user.token_version
+    token = await _issue_refresh_token(user.id, db)
+    await db.refresh(user, ["token_version", "is_active"])
+    if user.token_version != version or not user.is_active:
+        await db.execute(
+            update(RefreshToken)
+            .where(RefreshToken.user_id == user.id, RefreshToken.revoked.is_(False))
+            .values(revoked=True)
+        )
+        await db.commit()
+        return None
+    return token
+
+
 @router.get("/login", response_class=HTMLResponse)
 async def login_page(
     request: Request,
@@ -152,7 +175,7 @@ async def login(
     failed_msg = "ユーザー名またはパスワードが正しくありません"
 
     # スロットルは (ユーザー名, クライアント IP) の組。存在しないユーザー名も同じく数える。
-    throttle_key = (username, get_remote_address(request))
+    throttle_key = make_throttle_key(username, get_remote_address(request))
     blocked = login_throttle.is_blocked(throttle_key)
 
     # ユーザーを検索（is_active では絞らず取得する）
@@ -180,7 +203,7 @@ async def login(
         password_ok = False
 
     if not password_ok:
-        logger.warning(f"ログイン失敗: username={username}")
+        logger.warning(f"ログイン失敗: username={username[:64]!r}")
         if not blocked:
             tripped = login_throttle.register_failure(
                 throttle_key,
@@ -189,7 +212,7 @@ async def login(
             )
             if tripped:
                 logger.warning(
-                    f"ログイン失敗が続いたため受け付けを止めました: username={username}, "
+                    f"ログイン失敗が続いたため受け付けを止めました: username={username[:64]!r}, "
                     f"ip={throttle_key[1]}, minutes={settings.lockout_duration_minutes}"
                 )
                 # 管理者向けの証跡（応答には出さない）。実在するユーザーのときだけ残す
@@ -254,8 +277,10 @@ async def login(
     response = RedirectResponse(url=redirect_url, status_code=303)
 
     # アクセストークン＋リフレッシュトークンを Cookie に設定
+    refresh_token = await _issue_session_refresh_token(user, db)
+    if refresh_token is None:  # 認証の直後にパスワード再設定などが入った。失敗と同じに返す
+        return _error_response(failed_msg)
     _set_access_cookie(response, access_token)
-    refresh_token = await _issue_refresh_token(user.id, db)
     _set_refresh_cookie(response, refresh_token)
 
     return response
@@ -404,14 +429,23 @@ async def refresh_access_token(
         logger.warning("リフレッシュトークン拒否: jti 無効/期限切れ")
         return JSONResponse({"success": False, "message": "リフレッシュトークンが無効です"}, 401)
 
+    # ユーザー行を**ロックして**読む（PostgreSQL の FOR UPDATE。SQLite では無視される）。
+    # 管理者の再設定・ログアウトも users 行を更新するので、どちらかが先にコミットするまで
+    # もう一方は待つ。待ったあとでトークンの失効を読み直し、再設定の最中にローテーションが
+    # 走って新しいトークンが生き残るのを防ぐ。
     user_result = await db.execute(
         select(User)
         .where(User.id == int(payload["sub"]), User.is_active.is_(True))
         .options(selectinload(User.user_roles).selectinload(UserRole.role))
+        .with_for_update(of=User)
+        .execution_options(populate_existing=True)
     )
     user = user_result.scalar_one_or_none()
     if user is None:
         return JSONResponse({"success": False, "message": "ユーザーが無効です"}, 401)
+    await db.refresh(rt)
+    if rt.revoked:
+        return JSONResponse({"success": False, "message": "リフレッシュトークンが無効です"}, 401)
     if user.default_active_role() is None and user.held_role_names_outside_entry():
         # この入り口で使える役割が無い。役割なしのトークンを更新し続けない
         return JSONResponse(
@@ -427,7 +461,9 @@ async def refresh_access_token(
             "tv": user.token_version,
         }
     )
-    refresh_token = await _issue_refresh_token(user.id, db)
+    refresh_token = await _issue_session_refresh_token(user, db)
+    if refresh_token is None:  # 発行の最中に再設定・ログアウトが入った
+        return JSONResponse({"success": False, "message": "リフレッシュトークンが無効です"}, 401)
 
     response: Response = JSONResponse({"success": True})
     _set_access_cookie(response, access_token)

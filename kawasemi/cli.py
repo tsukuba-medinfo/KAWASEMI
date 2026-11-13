@@ -319,8 +319,29 @@ def _reset_e2e_passwords(db_path: Path) -> str:
     password = demo_password()
     hashed = get_password_hash(password)
     with sqlite3.connect(db_path) as con:
+        # この版より前に作られた実行結果の app.db には token_version 列が無い（その場合は世代を
+        # 上げる対象が無いので、パスワードだけ入れ替える）
+        user_cols = {row[1] for row in con.execute("PRAGMA table_info(users)")}
+        has_generation = "token_version" in user_cols
+        has_refresh = bool(
+            con.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='refresh_tokens'"
+            ).fetchone()
+        )
         for username in seed_users():
-            con.execute("UPDATE users SET password_hash=? WHERE username=?", (hashed, username))
+            # パスワードを変えるので、発行済みのトークンも無効にする（API の再設定と同じ。
+            # `core/sessions.py: revoke_user_sessions` の SQL 版。世代 +1 とリフレッシュ全件失効）
+            bump = ", token_version=token_version+1" if has_generation else ""
+            con.execute(
+                f"UPDATE users SET password_hash=?{bump} WHERE username=?",
+                (hashed, username),
+            )
+            if has_refresh:
+                con.execute(
+                    "UPDATE refresh_tokens SET revoked=1 "
+                    "WHERE user_id IN (SELECT id FROM users WHERE username=?)",
+                    (username,),
+                )
     return password
 
 

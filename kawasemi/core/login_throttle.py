@@ -10,7 +10,9 @@
 - ブロック中は失敗を積み増さない（延長しない＝締め出しが際限なく伸びない）。
 - 状態はプロセス内メモリである。複数ワーカーではワーカーごとに数えるので、実効の上限は
   ワーカー数倍になる（`core/rate_limit.py` の slowapi と同じ制約）。再起動で消える。
-- 件数の上限を持つ（ユーザー名を変えながらの大量の試行でメモリを食わせない）。
+- 件数にもバイト数にも上限を持つ。キーのユーザー名は SHA-256 に縮め（何文字の入力でも
+  1 件 64 文字）、件数は上限までで、役目を終えた組は一定回数ごとに掃除する
+  （ユーザー名を変えながらの大量の試行や巨大なユーザー名でメモリを食わせない）。
 
 クライアント IP は `request.client.host`。リバースプロキシ配下では uvicorn の
 `--proxy-headers` と `FORWARDED_ALLOW_IPS` が必要（docs/reverse_proxy.md）。無いと全員が
@@ -19,11 +21,25 @@
 
 from __future__ import annotations
 
+import hashlib
 import threading
 import time
 from dataclasses import dataclass
 
 _MAX_ENTRIES = 10_000
+# 役目を終えた組を掃除する間隔（register_failure の呼び出し回数）
+_PURGE_EVERY = 256
+
+
+def throttle_key(username: str, client_ip: str) -> tuple[str, str]:
+    """スロットルのキー。**入力の長さに依らず一定の大きさ**にする。
+
+    ユーザー名は認証前の入力そのもので、何万文字でも送れる。そのまま保存すると1件ごとに
+    その長さのメモリを食うので、SHA-256 の16進（64文字）に縮める。IP も長さを切る
+    （通常は 45 文字以内の文字列だが、プロキシ設定の誤りで長い値が来ても有界にする）。
+    """
+    digest = hashlib.sha256(username.encode("utf-8", "surrogatepass")).hexdigest()
+    return (digest, client_ip[:64])
 
 
 @dataclass
@@ -40,6 +56,7 @@ class LoginThrottle:
         self._entries: dict[tuple[str, str], _Entry] = {}
         self._max_entries = max_entries
         self._lock = threading.Lock()
+        self._calls = 0
 
     def is_blocked(self, key: tuple[str, str], now: float | None = None) -> bool:
         """この組が今ブロック中か。"""
@@ -63,6 +80,10 @@ class LoginThrottle:
         """
         now = time.monotonic() if now is None else now
         with self._lock:
+            # 定期的に、役目を終えた組を捨てる（上限に達するのを待たない）
+            self._calls += 1
+            if self._calls % _PURGE_EVERY == 0:
+                self._purge_expired(now, window_seconds)
             entry = self._entries.get(key)
             if entry is not None and entry.blocked_until > now:
                 return False
@@ -89,10 +110,8 @@ class LoginThrottle:
         with self._lock:
             self._entries.clear()
 
-    def _make_room(self, now: float, window_seconds: float) -> None:
-        """件数が上限に達したら、役目を終えた組を捨て、それでも足りなければ最古を捨てる。"""
-        if len(self._entries) < self._max_entries:
-            return
+    def _purge_expired(self, now: float, window_seconds: float) -> None:
+        """ブロックが明け、失敗を数える窓も過ぎた組を捨てる。"""
         expired = [
             k
             for k, e in self._entries.items()
@@ -100,6 +119,12 @@ class LoginThrottle:
         ]
         for k in expired:
             del self._entries[k]
+
+    def _make_room(self, now: float, window_seconds: float) -> None:
+        """件数が上限に達したら、役目を終えた組を捨て、それでも足りなければ最古を捨てる。"""
+        if len(self._entries) < self._max_entries:
+            return
+        self._purge_expired(now, window_seconds)
         if len(self._entries) >= self._max_entries:
             oldest = min(self._entries, key=lambda k: self._entries[k].window_started)
             del self._entries[oldest]
