@@ -42,7 +42,12 @@ from kawasemi.ai_input.dsl import (
     safe_arith,
     validate_program,
 )
-from kawasemi.ai_input.fetch_scope import fhir_query_scopes_patient, path_scopes_patient
+from kawasemi.ai_input.fetch_scope import (
+    FhirUrlError,
+    fhir_query_scopes_patient,
+    fhir_request_url,
+    path_scopes_patient,
+)
 from kawasemi.ai_input.key_resolver import (
     FhirIdentifierResolver,
     ResolveContext,
@@ -2171,8 +2176,18 @@ class DSLInterpreter:
             }
         if query_path not in fhir_cache:
             try:
-                url = f"{self._fhir_client.base_url}{query_path}"
+                url = fhir_request_url(self._fhir_client.base_url, query_path)
                 fhir_cache[query_path] = await self._fhir_client._get_resource(url)
+            except FhirUrlError as e:
+                # 設計者が書いたクエリの先頭が、設定したサーバー以外を指す（F21）。要求は出さない
+                logger.warning(f"FHIR クエリの URL を拒否: {e}")
+                return None, {
+                    **base,
+                    "inputs": {"query": query_path},
+                    "output": None,
+                    "error": f"fhir_query が不正です: {e}",
+                    "failure_code": FailureCode.PATH_NOT_PERMITTED,
+                }
             except FHIRServerException as e:
                 # FHIR サーバ側の異常はまず接続系（ダウン・認証失敗）とみなし、
                 # timeout 等メッセージから判るものは classify で上書きする

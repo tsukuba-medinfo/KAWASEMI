@@ -8,11 +8,13 @@ CSRF トークンを伴う。Questionnaire の登録（ファイル取り込み�
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from kawasemi.core.auth import create_access_token
 from kawasemi.core.config import settings
 from kawasemi.models.role import RoleType
 from kawasemi.models.user import User
+from tests.lease_helpers import lease_patient
 
 
 def _act_as(client: AsyncClient, user: User, role: str) -> None:
@@ -23,7 +25,10 @@ def _act_as(client: AsyncClient, user: User, role: str) -> None:
 
 @pytest.mark.asyncio
 async def test_create_questionnaire_response(
-    admin_client: AsyncClient, multi_role_user: User, csrf_token: str
+    admin_client: AsyncClient,
+    multi_role_user: User,
+    csrf_token: str,
+    db_session: AsyncSession,
 ):
     """QuestionnaireResponse作成のテスト"""
     # まずQuestionnaireを作成
@@ -45,6 +50,7 @@ async def test_create_questionnaire_response(
         headers={"X-CSRF-Token": csrf_token},
     )
     questionnaire_id = q_response.json()["id"]
+    await lease_patient(db_session, multi_role_user.id, "123", questionnaire_id=questionnaire_id)
     _act_as(admin_client, multi_role_user, RoleType.COLLECTOR)
 
     # QuestionnaireResponse作成
@@ -70,7 +76,10 @@ async def test_create_questionnaire_response(
 
 @pytest.mark.asyncio
 async def test_get_questionnaire_response(
-    admin_client: AsyncClient, multi_role_user: User, csrf_token: str
+    admin_client: AsyncClient,
+    multi_role_user: User,
+    csrf_token: str,
+    db_session: AsyncSession,
 ):
     """QuestionnaireResponse取得のテスト"""
     # Questionnaireを作成
@@ -87,6 +96,7 @@ async def test_get_questionnaire_response(
         headers={"X-CSRF-Token": csrf_token},
     )
     questionnaire_id = q_response.json()["id"]
+    await lease_patient(db_session, multi_role_user.id, "123", questionnaire_id=questionnaire_id)
     _act_as(admin_client, multi_role_user, RoleType.COLLECTOR)
 
     # QuestionnaireResponse作成
@@ -112,7 +122,10 @@ async def test_get_questionnaire_response(
 
 @pytest.mark.asyncio
 async def test_list_questionnaire_responses_with_filter(
-    admin_client: AsyncClient, multi_role_user: User, csrf_token: str
+    admin_client: AsyncClient,
+    multi_role_user: User,
+    csrf_token: str,
+    db_session: AsyncSession,
 ):
     """QuestionnaireResponseフィルタ付き一覧取得のテスト"""
     # Questionnaireを作成
@@ -129,10 +142,13 @@ async def test_list_questionnaire_responses_with_filter(
         headers={"X-CSRF-Token": csrf_token},
     )
     questionnaire_id = q_response.json()["id"]
+    await lease_patient(db_session, multi_role_user.id, "123", questionnaire_id=questionnaire_id)
+    await lease_patient(db_session, multi_role_user.id, "456", questionnaire_id=questionnaire_id)
+    await lease_patient(db_session, multi_role_user.id, "789", questionnaire_id=questionnaire_id)
     _act_as(admin_client, multi_role_user, RoleType.COLLECTOR)
 
     # 複数のQuestionnaireResponseを作成
-    subjects = ["Patient/123", "Patient/456", "Patient/123"]
+    subjects = ["Patient/123", "Patient/456", "Patient/789"]
     for subject in subjects:
         await admin_client.post(
             "/api/v100/questionnaire-responses/",
@@ -146,13 +162,16 @@ async def test_list_questionnaire_responses_with_filter(
 
     assert response.status_code == 200
     data = response.json()
-    assert len(data) == 2
+    assert len(data) == 1
     assert all(item["subject"] == "Patient/123" for item in data)
 
 
 @pytest.mark.asyncio
 async def test_bulk_export_questionnaire_responses(
-    admin_client: AsyncClient, multi_role_user: User, csrf_token: str
+    admin_client: AsyncClient,
+    multi_role_user: User,
+    csrf_token: str,
+    db_session: AsyncSession,
 ):
     """QuestionnaireResponse一括エクスポートのテスト"""
     # Questionnaireを作成
@@ -169,6 +188,9 @@ async def test_bulk_export_questionnaire_responses(
         headers={"X-CSRF-Token": csrf_token},
     )
     questionnaire_id = q_response.json()["id"]
+    await lease_patient(db_session, multi_role_user.id, "0", questionnaire_id=questionnaire_id)
+    await lease_patient(db_session, multi_role_user.id, "1", questionnaire_id=questionnaire_id)
+    await lease_patient(db_session, multi_role_user.id, "2", questionnaire_id=questionnaire_id)
     _act_as(admin_client, multi_role_user, RoleType.COLLECTOR)
 
     # 複数のQuestionnaireResponseを作成
@@ -217,7 +239,11 @@ async def test_bulk_export_no_data(
 
 @pytest.mark.asyncio
 async def test_collector_cannot_get_single_response(
-    admin_client: AsyncClient, multi_role_user: User, collector_user: User, csrf_token: str
+    admin_client: AsyncClient,
+    multi_role_user: User,
+    collector_user: User,
+    csrf_token: str,
+    db_session: AsyncSession,
 ):
     """collector は単一 QuestionnaireResponse を取得できない（PHI IDOR 防止・Stage2）
 
@@ -241,6 +267,7 @@ async def test_collector_cannot_get_single_response(
         headers={"X-CSRF-Token": csrf_token},
     )
     questionnaire_id = q_response.json()["id"]
+    await lease_patient(db_session, multi_role_user.id, "secret", questionnaire_id=questionnaire_id)
     _act_as(admin_client, multi_role_user, RoleType.COLLECTOR)
     create_response = await admin_client.post(
         "/api/v100/questionnaire-responses/",

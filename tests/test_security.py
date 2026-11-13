@@ -16,6 +16,7 @@ from kawasemi.core.auth import create_access_token
 from kawasemi.core.config import settings
 from kawasemi.models.user import User
 from tests.e2e.helpers import extract_form_csrf_token
+from tests.lease_helpers import lease_patient
 
 # ===== 認証要件テスト =====
 
@@ -196,7 +197,12 @@ class TestRoleBasedAccessControl:
 
     @pytest.mark.asyncio
     async def test_collector_can_create_questionnaire_response(
-        self, client: AsyncClient, admin_user: User, collector_user: User, csrf_token: str
+        self,
+        client: AsyncClient,
+        admin_user: User,
+        collector_user: User,
+        csrf_token: str,
+        db_session: AsyncSession,
     ):
         """collectorロールはQuestionnaireResponse作成できることを確認
 
@@ -220,6 +226,7 @@ class TestRoleBasedAccessControl:
             headers={"X-CSRF-Token": csrf_token},
         )
         questionnaire_id = q_response.json()["id"]
+        await lease_patient(db_session, collector_user.id, "123", questionnaire_id=questionnaire_id)
 
         # QuestionnaireResponse作成（collector権限で）
         client.cookies.set(
@@ -512,6 +519,7 @@ class TestSecurityIntegration:
         collector_user: User,
         reviewer_user: User,
         csrf_token: str,
+        db_session: AsyncSession,
     ):
         """認証・認可・CSRF保護が統合的に機能することを確認
 
@@ -539,6 +547,7 @@ class TestSecurityIntegration:
         )
         assert create_response.status_code == 201
         questionnaire_id = create_response.json()["id"]
+        await lease_patient(db_session, collector_user.id, "999", questionnaire_id=questionnaire_id)
 
         # 2. collectorユーザーがQuestionnaireを取得（認証のみ）
         act_as(collector_user)

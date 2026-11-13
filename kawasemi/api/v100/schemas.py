@@ -48,6 +48,9 @@ class QuestionnaireResponseCreate(BaseModel):
     answers: dict[str, Any] = Field(..., description="回答データ（linkIdをキーとした回答）")
     subject: str | None = Field(None, description="患者参照（例: 'Patient/123'）")
     author: str | None = Field(None, description="作成者参照")
+    input_target_id: int | None = Field(
+        None, description="保存する入力対象のID（指定するなら、自分が有効なリースを持つ対象）"
+    )
 
 
 class QuestionnaireResponseOut(BaseModel):

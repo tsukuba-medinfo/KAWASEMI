@@ -23,6 +23,7 @@ from kawasemi.core.exceptions import (
     QuestionnaireNotFoundException,
     QuestionnaireResponseNotFoundException,
 )
+from kawasemi.core.lease import mark_completed, require_leased_target
 from kawasemi.core.logging_config import get_logger
 from kawasemi.models.questionnaire import Questionnaire
 from kawasemi.models.questionnaire_response import QuestionnaireResponse, VerificationStatus
@@ -350,7 +351,8 @@ async def create_questionnaire_response(
 
     Questionnaireに対する回答データからQuestionnaireResponseを生成する
 
-    権限: collector
+    権限: collector。保存できるのは、自分が有効なリースを持つ入力対象（患者 × この様式）だけ
+    （`input_target_id` を指定するなら、その対象）。
     """
     # CSRF検証
     await csrf_protect.validate_csrf(request)
@@ -371,6 +373,12 @@ async def create_questionnaire_response(
 
     if not questionnaire:
         raise QuestionnaireNotFoundException(data.questionnaire_id)
+
+    # 責任境界: Web の保存と同じく、自分が有効なリースを持つ入力対象（患者 × この様式）に限る。
+    # subject の無い作成も 403（患者を特定できない回答は、担当の検査ができない）。
+    leased = await require_leased_target(
+        db, current_user, data.questionnaire_id, data.subject, data.input_target_id
+    )
 
     # QuestionnaireResponse リソースの構築
     response_resource = build_questionnaire_response_resource(
@@ -405,6 +413,8 @@ async def create_questionnaire_response(
     )
 
     db.add(questionnaire_response)
+    # 入力対象を完了にする（Web の保存と同じ）
+    mark_completed(leased)
     await db.commit()
     await db.refresh(questionnaire_response)
 
