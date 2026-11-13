@@ -15,10 +15,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from kawasemi.ai_input.models import InputPlan, InputRunbook
 from kawasemi.core.auth import create_access_token
 from kawasemi.core.config import Settings, settings
-from kawasemi.models.case_assignment import CaseAssignment
 from kawasemi.models.questionnaire import Questionnaire
 from kawasemi.models.role import RoleType
 from kawasemi.models.user import User
+from tests.lease_helpers import lease_patient
 
 
 def _act_as(client: AsyncClient, user: User, role: str) -> None:
@@ -158,13 +158,8 @@ async def test_execute_autofill_rejects_llm_plan_when_extraction_off(
             llm_model="model-a:12b",
         )
     )
-    # 本番 autofill の患者割り当てスコープを満たし、extraction ガードまで到達させる。
-    db_session.add(
-        CaseAssignment(
-            questionnaire_id=q.id, patient_id="PAT-001", assigned_to_id=collector_user.id
-        )
-    )
-    await db_session.commit()
+    # 本番 autofill の患者スコープ（有効なリース）を満たし、extraction ガードまで到達させる。
+    await lease_patient(db_session, collector_user.id, "PAT-001", questionnaire_id=q.id)
 
     monkeypatch.setattr(settings, "enable_ai_extraction", False)
     resp = await collector_client.post(

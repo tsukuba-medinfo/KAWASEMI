@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 from httpx import AsyncClient
 from sqlalchemy import select
@@ -19,6 +21,7 @@ from kawasemi.models.dataset import Dataset, DatasetQuestionnaire
 from kawasemi.models.input_target import InputTarget, InputTargetStatus
 from kawasemi.models.questionnaire import Questionnaire
 from kawasemi.models.questionnaire_response import QuestionnaireResponse
+from kawasemi.models.user import User
 from tests.conftest import TestSessionLocal
 
 QUESTIONNAIRE_CONTENT = {
@@ -342,8 +345,13 @@ async def test_batch_launch_blocked_when_design_incomplete(
 # --------------------------------------------------------------------------- check mode
 
 
-async def _seed_ai_drafted(db: AsyncSession, qid: int, ds: Dataset, patient_id: str) -> InputTarget:
-    """1 件を ai_drafted 状態にし、対応する InputExecution（ドラフト）を作る。"""
+async def _seed_ai_drafted(
+    db: AsyncSession, qid: int, ds: Dataset, patient_id: str, holder_id: int | None = None
+) -> InputTarget:
+    """1 件を ai_drafted 状態にし、対応する InputExecution（ドラフト）を作る。
+
+    holder_id を渡すと、その収集者が有効なリースを持つ（「次の患者を受け取る」後）状態にする。
+    """
     target = (
         await db.execute(
             select(InputTarget).where(
@@ -352,6 +360,9 @@ async def _seed_ai_drafted(db: AsyncSession, qid: int, ds: Dataset, patient_id: 
         )
     ).scalar_one()
     target.status = InputTargetStatus.AI_DRAFTED
+    if holder_id is not None:
+        target.started_by_id = holder_id
+        target.lease_expires_at = datetime.now(UTC) + timedelta(minutes=60)
     db.add(
         InputExecution(
             questionnaire_id=qid,
@@ -370,14 +381,14 @@ async def _seed_ai_drafted(db: AsyncSession, qid: int, ds: Dataset, patient_id: 
 
 @pytest.mark.asyncio
 async def test_check_mode_renders_prefilled(
-    collector_client: AsyncClient, db_session: AsyncSession
+    collector_client: AsyncClient, collector_user: User, db_session: AsyncSession
 ) -> None:
     """チェック画面は AIドラフト値を事前入力して表示する。"""
     q = await _make_questionnaire(db_session)
     await _add_confirmed_plans(db_session, q.id)
     ds = await _make_dataset_with_targets(db_session, q.id, ["p-001"])
     await db_session.commit()
-    await _seed_ai_drafted(db_session, q.id, ds, "p-001")
+    await _seed_ai_drafted(db_session, q.id, ds, "p-001", holder_id=collector_user.id)
 
     resp = await collector_client.get(f"/datasets/{ds.id}/check", params={"questionnaire_id": q.id})
     assert resp.status_code == 200
@@ -388,15 +399,18 @@ async def test_check_mode_renders_prefilled(
 
 @pytest.mark.asyncio
 async def test_check_confirm_creates_qr_and_completes(
-    collector_client: AsyncClient, db_session: AsyncSession, csrf_token: str
+    collector_client: AsyncClient,
+    collector_user: User,
+    db_session: AsyncSession,
+    csrf_token: str,
 ) -> None:
     """承認確定で QuestionnaireResponse を生成し InputTarget を completed にする。"""
     q = await _make_questionnaire(db_session)
     await _add_confirmed_plans(db_session, q.id)
     ds = await _make_dataset_with_targets(db_session, q.id, ["p-001"])
     await db_session.commit()
-    target = await _seed_ai_drafted(db_session, q.id, ds, "p-001")
-    # data_entry がレビューを開く（ソフトロック）
+    # 収集者が「次の患者を受け取る」で担当（有効なリース）になっている
+    target = await _seed_ai_drafted(db_session, q.id, ds, "p-001", holder_id=collector_user.id)
     await collector_client.get(f"/datasets/{ds.id}/check", params={"questionnaire_id": q.id})
 
     resp = await collector_client.post(
@@ -431,14 +445,17 @@ async def test_check_confirm_creates_qr_and_completes(
 
 @pytest.mark.asyncio
 async def test_check_flag_sets_needs_attention(
-    collector_client: AsyncClient, db_session: AsyncSession, csrf_token: str
+    collector_client: AsyncClient,
+    collector_user: User,
+    db_session: AsyncSession,
+    csrf_token: str,
 ) -> None:
-    """後回しは needs_attention を立て、状態は ai_drafted のまま保つ。"""
+    """後回しは needs_attention を立て、状態は ai_drafted のまま保ち、リースを手放す。"""
     q = await _make_questionnaire(db_session)
     await _add_confirmed_plans(db_session, q.id)
     ds = await _make_dataset_with_targets(db_session, q.id, ["p-001"])
     await db_session.commit()
-    target = await _seed_ai_drafted(db_session, q.id, ds, "p-001")
+    target = await _seed_ai_drafted(db_session, q.id, ds, "p-001", holder_id=collector_user.id)
 
     resp = await collector_client.post(
         f"/datasets/{ds.id}/check/{target.id}/flag",
@@ -453,3 +470,5 @@ async def test_check_flag_sets_needs_attention(
         ).scalar_one()
         assert refreshed.needs_attention is True
         assert refreshed.status == InputTargetStatus.AI_DRAFTED
+        assert refreshed.started_by_id is None
+        assert refreshed.lease_expires_at is None

@@ -1,11 +1,16 @@
-"""検証者(verifier)の v1 機能テスト
+"""チェックモード（AIドラフトのレビュー）は収集者だけが行う
 
-- 検証者はチェックモード（AIドラフトのレビュー）にアクセスできる。
-- 職務分離(SoD): 検証者は「自分が生成した取得結果（最新 InputExecution の実行者が本人）」
-  を検証(confirm)できない。
+欠損を埋める人が検証者を兼ねるので、チェック・確定・要確認は収集者の役割で、閲覧・検証者は
+この流れに入らない（以前あった「検証者は自分が実行した取得結果を確定できない」職務分離は、
+検証者がそもそも確定できなくなったことで、より強く満たされる）。
+
+- 収集者は、自分が有効なリースを持つ AIドラフト対象だけ開ける・確定できる。
+- 閲覧・検証者はチェックの開く/確定/要確認がいずれも 403。
 """
 
 from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from httpx import AsyncClient
@@ -82,50 +87,58 @@ async def _dataset_with_ai_drafted(
     return ds, target
 
 
+async def _hold(db: AsyncSession, user_id: int, target: InputTarget) -> None:
+    """`target` の有効なリースを `user_id` に持たせる（受け取り済みの状態）。"""
+    target.started_by_id = user_id
+    target.lease_expires_at = datetime.now(UTC) + timedelta(minutes=60)
+    await db.commit()
+
+
 @pytest.mark.asyncio
-async def test_verifier_can_open_check_mode(
-    reviewer_client: AsyncClient,
-    db_session: AsyncSession,
+async def test_collector_can_open_check_mode_for_the_leased_target(
+    collector_client: AsyncClient, collector_user: User, db_session: AsyncSession
 ) -> None:
-    """検証者はチェックモード画面にアクセスできる（AIドラフトのレビュー）。"""
     q = await _make_questionnaire(db_session)
     await _add_confirmed_plan(db_session, q.id)
-    ds, _ = await _dataset_with_ai_drafted(db_session, q.id, "p-001", executed_by_id=None)
+    ds, target = await _dataset_with_ai_drafted(db_session, q.id, "p-001", executed_by_id=None)
+    await _hold(db_session, collector_user.id, target)
 
-    resp = await reviewer_client.get(f"/datasets/{ds.id}/check", params={"questionnaire_id": q.id})
+    resp = await collector_client.get(f"/datasets/{ds.id}/check", params={"questionnaire_id": q.id})
     assert resp.status_code == 200
     assert "ドラフト太郎" in resp.text
 
 
 @pytest.mark.asyncio
-async def test_verifier_cannot_confirm_self_executed(
+async def test_reviewer_cannot_open_confirm_or_flag_check(
     reviewer_client: AsyncClient,
     reviewer_user: User,
     csrf_token: str,
     db_session: AsyncSession,
 ) -> None:
-    """SoD: 自分が実行(executed_by_id=自分)したドラフトは検証(confirm)できない。"""
+    """閲覧・検証者はチェックに入れない。リースを持っていても同じ（役割で弾く）。"""
     q = await _make_questionnaire(db_session)
     await _add_confirmed_plan(db_session, q.id)
     ds, target = await _dataset_with_ai_drafted(
         db_session, q.id, "p-001", executed_by_id=reviewer_user.id
     )
-    # 検証者がレビューを開く（ソフトロック）
-    await reviewer_client.get(f"/datasets/{ds.id}/check", params={"questionnaire_id": q.id})
+    await _hold(db_session, reviewer_user.id, target)
 
-    resp = await reviewer_client.post(
-        f"/datasets/{ds.id}/check/{target.id}/confirm",
-        data={"name": "山田太郎"},
-        headers={"X-CSRF-Token": csrf_token},
-        follow_redirects=False,
-    )
-    assert resp.status_code == 303
-    # 確定されず、QuestionnaireResponse も作られない
+    got = await reviewer_client.get(f"/datasets/{ds.id}/check", params={"questionnaire_id": q.id})
+    assert got.status_code == 403
+    for action in ("confirm", "flag"):
+        resp = await reviewer_client.post(
+            f"/datasets/{ds.id}/check/{target.id}/{action}",
+            data={"name": "山田太郎"},
+            headers={"X-CSRF-Token": csrf_token},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 403, action
     async with TestSessionLocal() as verify:
         refreshed = (
             await verify.execute(select(InputTarget).where(InputTarget.id == target.id))
         ).scalar_one()
         assert refreshed.status == InputTargetStatus.AI_DRAFTED
+        assert not refreshed.needs_attention
         qrs = (
             (
                 await verify.execute(
@@ -141,25 +154,25 @@ async def test_verifier_cannot_confirm_self_executed(
 
 
 @pytest.mark.asyncio
-async def test_verifier_can_confirm_other_executed(
-    reviewer_client: AsyncClient,
+async def test_collector_confirms_own_leased_draft(
+    collector_client: AsyncClient,
+    collector_user: User,
     csrf_token: str,
     db_session: AsyncSession,
 ) -> None:
-    """SoD: 他者（ここではバッチ実行=executed_by None）のドラフトは検証者が確定できる。"""
     q = await _make_questionnaire(db_session)
     await _add_confirmed_plan(db_session, q.id)
-    # バッチ実行のドラフト（executed_by_id=None）は検証者本人の生成ではないので確定可。
     ds, target = await _dataset_with_ai_drafted(db_session, q.id, "p-001", executed_by_id=None)
-    await reviewer_client.get(f"/datasets/{ds.id}/check", params={"questionnaire_id": q.id})
+    await _hold(db_session, collector_user.id, target)
 
-    resp = await reviewer_client.post(
+    resp = await collector_client.post(
         f"/datasets/{ds.id}/check/{target.id}/confirm",
         data={"name": "山田太郎"},
         headers={"X-CSRF-Token": csrf_token},
         follow_redirects=False,
     )
     assert resp.status_code == 303
+    assert resp.headers["location"].startswith("/input-targets")
     async with TestSessionLocal() as verify:
         refreshed = (
             await verify.execute(select(InputTarget).where(InputTarget.id == target.id))

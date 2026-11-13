@@ -17,10 +17,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from kawasemi.ai_input.models import InputExecution, InputPlan, InputTrialRun
 from kawasemi.core.auth import create_access_token
 from kawasemi.core.config import settings
-from kawasemi.models.case_assignment import CaseAssignment
 from kawasemi.models.questionnaire import Questionnaire
 from kawasemi.models.role import RoleType
 from kawasemi.models.user import User
+from tests.lease_helpers import lease_patient
 
 # 非LLMの確定済みプラン（EXTRACTION フラグのガードに引っかからない）。
 # 実行が成功/失敗どちらでも記録（InputExecution / InputTrialRun）は作られる。
@@ -98,11 +98,8 @@ async def test_data_entry_autofill_is_production_persisted(
 ) -> None:
     """収集者の autofill は本番: InputExecution に永続し InputTrialRun は作らない"""
     q = await _confirmed_plan(db_session)
-    # 本番 autofill は担当患者に限定されるため割り当てを用意する。
-    db_session.add(
-        CaseAssignment(questionnaire_id=q.id, patient_id="PAT-1", assigned_to_id=collector_user.id)
-    )
-    await db_session.commit()
+    # 本番 autofill は担当（有効なリース）の患者に限定されるためリースを用意する。
+    await lease_patient(db_session, collector_user.id, "PAT-1", questionnaire_id=q.id)
     resp = await collector_client.post(
         f"/ai-input/questionnaires/{q.id}/autofill",
         json={"patient_id": "PAT-1"},
@@ -122,7 +119,7 @@ async def test_data_entry_autofill_blocked_for_unassigned_patient(
     db_session: AsyncSession,
     csrf_token: str,
 ) -> None:
-    """本番 autofill の患者スコープ: 未割り当て患者は 403 で実行拒否。"""
+    """本番 autofill の患者スコープ: 担当（有効なリース）の無い患者は 403 で実行拒否。"""
     q = await _confirmed_plan(db_session, fhir_id="q-trial-unassigned")
     resp = await collector_client.post(
         f"/ai-input/questionnaires/{q.id}/autofill",
@@ -130,7 +127,7 @@ async def test_data_entry_autofill_blocked_for_unassigned_patient(
         headers={"X-CSRF-Token": csrf_token},
     )
     assert resp.status_code == 403, resp.text
-    assert "割り当て" in resp.json()["message"]
+    assert "担当" in resp.json()["message"]
     assert await _count(db_session, InputExecution) == 0
 
 
@@ -252,14 +249,7 @@ async def test_trial_autofill_still_works_for_an_assigned_patient(
     """
     monkeypatch.setattr(settings, "trial_run_patient_ids", "")
     q = await _confirmed_plan(db_session)
-    db_session.add(
-        CaseAssignment(
-            questionnaire_id=q.id,
-            patient_id="PAT-ASSIGNED",
-            assigned_to_id=designer_user.id,
-        )
-    )
-    await db_session.commit()
+    await lease_patient(db_session, designer_user.id, "PAT-ASSIGNED", questionnaire_id=q.id)
     _act_as(designer_client, designer_user, RoleType.DESIGNER)
 
     resp = await designer_client.post(
