@@ -255,7 +255,8 @@ class Settings(BaseSettings):
     # SELECT から到達できる書き込み・ファイル読み書き（`SELECT ... INTO` / `pg_read_file` /
     # `INTO OUTFILE`）を取りこぼすので、**保証は接続の権限側**に置く。
     #
-    # SQLite では `PRAGMA query_only` で接続スコープに閉じられるのでこの設定は不要。
+    # SQLite では `PRAGMA query_only`（書き込み）と接続の authorizer（アプリ自身の表の読み取り）で
+    # 接続スコープに閉じられるのでこの設定は不要。
     # **PostgreSQL 等では読み取り専用ロールの DSN をここに置く**。設定するとプログラム SQL
     # （`sql_extract` と統計プロファイルの自アプリDB集計）はこの DSN の別エンジンで、
     # 読み取り専用トランザクションの中で実行される。未設定のとき、ENVIRONMENT=production では

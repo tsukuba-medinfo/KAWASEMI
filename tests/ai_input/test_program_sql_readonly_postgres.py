@@ -35,7 +35,11 @@ from kawasemi.ai_input.executor import DSLInterpreter
 from kawasemi.ai_input.models import InputPlan
 from kawasemi.core import readonly_db
 from kawasemi.core.config import settings
-from kawasemi.core.readonly_db import readonly_program_sql
+from kawasemi.core.readonly_db import (
+    ProgramSqlDeniedError,
+    assert_relations_permitted,
+    readonly_program_sql,
+)
 
 PG_URL = os.environ.get("KAWASEMI_TEST_POSTGRES_URL", "")
 
@@ -499,3 +503,38 @@ async def test_a_keyword_right_after_a_dollar_quote_is_not_hidden(
     assert "q" not in prefill, prefill
     assert evidence["q"]["trace"] == []
     assert "SELECT" in evidence["q"]["error"], evidence
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT relname FROM pg_catalog.pg_class",
+        "SELECT table_name FROM information_schema.tables",
+        "SELECT usename FROM pg_user",  # ビュー。計画では基表（pg_shadow / pg_authid）まで展開される
+    ],
+    ids=["pg_catalog", "information_schema", "view_over_catalog"],
+)
+async def test_the_plan_check_refuses_catalog_relations(
+    app_session: AsyncSession, sql: str
+) -> None:
+    """F9: 実表を計画から調べる。読み取り専用トランザクションが止めない読み取りを塞ぐ。"""
+    async with readonly_program_sql(app_session) as reader:
+        with pytest.raises(ProgramSqlDeniedError):
+            await assert_relations_permitted(reader, sql)
+
+
+@pytest.mark.asyncio
+async def test_the_plan_check_permits_clinical_tables_and_limits_allowed_ones(
+    app_session: AsyncSession,
+) -> None:
+    sql = f"SELECT v FROM {TABLE} WHERE patient_id = :patient_id"
+    async with readonly_program_sql(app_session) as reader:
+        await assert_relations_permitted(reader, sql, {"patient_id": "P1"})
+        await assert_relations_permitted(
+            reader, sql, {"patient_id": "P1"}, allowed_tables=[f"public.{TABLE}"]
+        )
+        with pytest.raises(ProgramSqlDeniedError):
+            await assert_relations_permitted(
+                reader, sql, {"patient_id": "P1"}, allowed_tables=["other_table"]
+            )

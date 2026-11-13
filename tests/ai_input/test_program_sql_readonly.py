@@ -45,7 +45,9 @@ async def test_writes_are_refused_inside_the_guard(db_session: AsyncSession) -> 
     async with readonly_program_sql(db_session):
         with pytest.raises(Exception) as exc:  # noqa: PT011 - 方言ごとに例外型が違う
             await db_session.execute(text("CREATE TABLE evil_117 (x INTEGER)"))
-    assert "readonly" in str(exc.value).lower() or "read-only" in str(exc.value).lower(), exc.value
+    # 書き込みは `query_only`（readonly）と authorizer（not authorized）のどちらでも DB 側で止まる
+    message = str(exc.value).lower()
+    assert any(w in message for w in ("readonly", "read-only", "not authorized")), exc.value
 
 
 @pytest.mark.asyncio

@@ -24,6 +24,13 @@ from tests.e2e.helpers import ollama_unavailable_reason
 _VISION_SKIP = ollama_unavailable_reason(settings.ollama_vision_model or settings.ollama_model)
 
 
+def _patient_dir(root: Path) -> Path:
+    """患者ごとのディレクトリ（`path_pattern` は `{{patient_id}}` を含む必要がある）。"""
+    d = root / "P1"
+    d.mkdir(exist_ok=True)
+    return d
+
+
 def _chat_response(content: str) -> SimpleNamespace:
     """ollama の chat 応答（response.message.content）を模す。"""
     return SimpleNamespace(message=SimpleNamespace(content=content))
@@ -31,7 +38,7 @@ def _chat_response(content: str) -> SimpleNamespace:
 
 @pytest.mark.asyncio
 async def test_image_pdf_degrades_to_vision(fs_root: Path) -> None:
-    pdf = fs_root / "consent.pdf"
+    pdf = _patient_dir(fs_root) / "consent.pdf"
     make_handwriting_pdf(["研究参加 同意書", "同意日 : 2025年 3月 17日"], pdf)
 
     # pypdf はテキスト層を持たない画像PDFを空文字で返す（縮退条件の前提）
@@ -42,7 +49,12 @@ async def test_image_pdf_degrades_to_vision(fs_root: Path) -> None:
         return_value=_chat_response("同意日 : 2025年 3月 17日")
     )
 
-    step = {"op": "file_extract", "id": "doc", "connection_id": "test_fs", "path_pattern": pdf.name}
+    step = {
+        "op": "file_extract",
+        "id": "doc",
+        "connection_id": "test_fs",
+        "path_pattern": f"{{{{patient_id}}}}/{pdf.name}",
+    }
     output, trace = await interp._op_file(step, "P1", {"op": "file_extract", "id": "doc"})
 
     assert output == "同意日 : 2025年 3月 17日"
@@ -57,7 +69,7 @@ async def test_image_pdf_degrades_to_vision(fs_root: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_text_file_does_not_call_vision(fs_root: Path) -> None:
-    txt = fs_root / "note.txt"
+    txt = _patient_dir(fs_root) / "note.txt"
     txt.write_text("組織型: 類内膜癌 G2", encoding="utf-8")
 
     interp = DSLInterpreter()
@@ -65,7 +77,12 @@ async def test_text_file_does_not_call_vision(fs_root: Path) -> None:
         side_effect=AssertionError("テキストファイルで Vision を呼んではならない")
     )
 
-    step = {"op": "file_extract", "id": "doc", "connection_id": "test_fs", "path_pattern": txt.name}
+    step = {
+        "op": "file_extract",
+        "id": "doc",
+        "connection_id": "test_fs",
+        "path_pattern": f"{{{{patient_id}}}}/{txt.name}",
+    }
     output, trace = await interp._op_file(step, "P1", {"op": "file_extract", "id": "doc"})
 
     assert "類内膜癌" in output
@@ -81,13 +98,18 @@ async def test_handwritten_consent_real_vision(fs_root: Path) -> None:
 
     手書きOCRは非決定的なため、厳密一致ではなく「縮退経路を通り・非空・年を含む」で判定。
     """
-    pdf = fs_root / "consent.pdf"
+    pdf = _patient_dir(fs_root) / "consent.pdf"
     make_handwriting_pdf(
         ["研究参加 同意書", "同意日 : 2025年 3月 17日", "被験者署名 : 佐藤 良子"],
         pdf,
     )
     interp = DSLInterpreter()
-    step = {"op": "file_extract", "id": "doc", "connection_id": "test_fs", "path_pattern": pdf.name}
+    step = {
+        "op": "file_extract",
+        "id": "doc",
+        "connection_id": "test_fs",
+        "path_pattern": f"{{{{patient_id}}}}/{pdf.name}",
+    }
     output, trace = await interp._op_file(step, "P1", {"op": "file_extract", "id": "doc"})
 
     assert trace["method"] == "vision_ocr"
@@ -106,14 +128,19 @@ async def test_vision_trace_records_the_provider(fs_root: Path) -> None:
     いまは同じ client を読むので値はテキスト側と一致するが、**記録されていること自体**が
     テキストと vision の推論先を2本に分けるときの受け皿になる。
     """
-    pdf = fs_root / "consent.pdf"
+    pdf = _patient_dir(fs_root) / "consent.pdf"
     make_handwriting_pdf(["研究参加 同意書", "同意日 : 2025年 3月 17日"], pdf)
 
     interp = DSLInterpreter()
     interp._ollama_client.chat = AsyncMock(  # type: ignore[method-assign]
         return_value=_chat_response("同意日 : 2025年 3月 17日")
     )
-    step = {"op": "file_extract", "id": "doc", "connection_id": "test_fs", "path_pattern": pdf.name}
+    step = {
+        "op": "file_extract",
+        "id": "doc",
+        "connection_id": "test_fs",
+        "path_pattern": f"{{{{patient_id}}}}/{pdf.name}",
+    }
     _, trace = await interp._op_file(step, "P1", {"op": "file_extract", "id": "doc"})
 
     assert trace["method"] == "vision_ocr"

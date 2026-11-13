@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from httpx import AsyncClient
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kawasemi.ai_input.executor import (
@@ -149,6 +150,9 @@ async def test_executor_attaches_failure_codes(db_session: AsyncSession) -> None
     )
     db_session.add(q)
     await db_session.flush()
+    # 臨床データの表（アプリ自身の表は sql_extract から読めない）。行は無い
+    await db_session.execute(text("DROP TABLE IF EXISTS clinical_t"))
+    await db_session.execute(text("CREATE TABLE clinical_t (pid TEXT, v TEXT)"))
 
     plans = [
         # 実在しない表 → 例外 "no such table" → schema_mismatch
@@ -169,7 +173,7 @@ async def test_executor_attaches_failure_codes(db_session: AsyncSession) -> None
                     {
                         "op": "sql_extract",
                         "id": "s1",
-                        "sql": "SELECT username FROM users WHERE username = :patient_id",
+                        "sql": "SELECT v FROM clinical_t WHERE pid = :patient_id",
                     }
                 ],
                 "return": "$s1",

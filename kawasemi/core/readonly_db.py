@@ -7,8 +7,8 @@
 
 方言ごとの実現:
 
-- **SQLite**: 呼び出し側のセッションに `PRAGMA query_only = ON` を掛け、抜けるときに戻す。
-  別コネクションを張らないので、テストの `:memory:` DB でも同じ関門を通る（従来どおり）
+- **SQLite**: 呼び出し側のセッションに `PRAGMA query_only = ON` と authorizer（下の「読める表」）を
+  掛け、抜けるときに戻す。別コネクションを張らないので、テストの `:memory:` DB でも同じ関門を通る（従来どおり）
 - **その他（PostgreSQL 等）**: 呼び出し側のセッションは使わず、**別の接続**を取り、
   **読み取り専用トランザクション**（PostgreSQL は `postgresql_readonly` ＝ `BEGIN READ ONLY`、
   それ以外は `SET TRANSACTION READ ONLY`）の中で読み、**必ずロールバックする**。
@@ -26,6 +26,24 @@
   止まるからである。アプリのエンジンを使う経路では、実行のたびにアプリの接続プールから
   **2本目の接続**を借りる（セッションが持つ1本とは別）。
 
+**読める表の範囲を実行時に絞る**（F8/F9）。読み取り専用は書き込みを止めるだけで、
+`users.password_hash` のような**読み取りは止めない**。そこで、プログラム SQL が触れる表を
+実行の側でも検査する:
+
+- **拒否する表**: アプリ自身が持つ表（`Base.metadata` の全表。認証・権限・回答・割当・
+  実行記録）と `alembic_version`、SQLite のスキーマ表・`pragma_*`、PostgreSQL の
+  `pg_catalog` / `information_schema`。`sql_extract` が読むのは**臨床データの表**で、
+  アプリの内部表ではない
+- **許す表を限る**（`allowed_tables`）: 呼び出し側が渡すと、読める表がその表だけになる
+  （現在は呼び出し側が渡していない。SQL の患者の範囲は、アプリでは保証しない。docs/DEPLOYMENT.md）
+- SQLite は接続の `set_authorizer` で、**文を準備する時点**に DB 側が検査する（文字列検査では
+  ない。ビュー・CTE・サブクエリ経由でも、実際に読む表で判定される）。
+  PostgreSQL は `EXPLAIN (VERBOSE, FORMAT JSON)` の計画に出る実表で検査する（`assert_relations_permitted`。
+  ビューは基表まで展開される）。**PostgreSQL の境界は引き続きロールの権限**で、計画の検査は
+  「計画に出る表の読み取り」を塞ぐ追加の層である。**関数が表を読む形**（`query_to_xml` や
+  `dblink` など）は計画に実表として出ないので、`is_select_only_sql` の禁止語の一覧とロールの
+  権限に頼る。PostgreSQL・SQLite 以外の方言は表を検査できないので実行しない
+
 PostgreSQL では加えて:
 
 - トランザクションの先頭で `statement_timeout` を `SET LOCAL` 相当で掛ける
@@ -40,11 +58,14 @@ PostgreSQL では加えて:
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+import json
+import sqlite3
+from collections.abc import AsyncIterator, Callable, Iterable
 from contextlib import asynccontextmanager
 from typing import Any
 
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, create_async_engine
 
 from kawasemi.core.config import settings
@@ -74,6 +95,192 @@ UNCONFIGURED_PRODUCTION_WARNING = (
 
 class ReadOnlySessionUnavailableError(RuntimeError):
     """プログラム SQL を読み取り専用ロールで実行する手段が用意できない（production）。"""
+
+
+class ProgramSqlDeniedError(RuntimeError):
+    """プログラム SQL が、読むことを許されていない表に触れた（ポリシー拒否）。"""
+
+
+def denied_tables() -> frozenset[str]:
+    """プログラム SQL に読ませない表（小文字）。アプリ自身の内部表すべて。
+
+    `Base.metadata` から引くので、モデルに表が増えれば自動で入る（認証の表だけを列挙すると、
+    回答や実行記録のような PHI を持つ表が漏れる）。
+    """
+    # 遅延 import: モデルの登録を import 時の副作用に頼るので、循環を避けて呼ぶ時に読む
+    from kawasemi.ai_input import models as _ai_input_models  # noqa: F401
+    from kawasemi.models import Base
+
+    return frozenset(name.lower() for name in Base.metadata.tables) | {"alembic_version"}
+
+
+def _clean(identifier: str) -> str:
+    return identifier.strip().strip('"`[]').lower()
+
+
+def _normalize_allowed(
+    allowed_tables: Iterable[str] | None, *, keep_schema: bool = False
+) -> frozenset[str] | None:
+    """許す表の集合。SQLite の authorizer は表名だけを見るので既定ではスキーマを落とす。"""
+    if allowed_tables is None:
+        return None
+    out: set[str] = set()
+    for t in allowed_tables:
+        parts = [_clean(p) for p in str(t).split(".")]
+        out.add(".".join(parts[-2:] if keep_schema else parts[-1:]))
+    return frozenset(out)
+
+
+def table_read_permitted(
+    table: str | None,
+    allowed_tables: frozenset[str] | None = None,
+    schema: str | None = None,
+) -> bool:
+    """`table` を読んでよいか（SQLite の authorizer と PostgreSQL の計画検査が共有する規則）。
+
+    `allowed_tables` の要素が `schema.table` なら、計画が `schema` を与えているとき一致を見る
+    （同名の別スキーマの表を通さない）。`table` だけなら表名で見る。
+    """
+    name = _clean(table or "")
+    if not name:
+        return True
+    if name in denied_tables() or name.startswith(("sqlite_", "pragma_", "pg_")):
+        return False
+    if schema and _clean(schema) in {"pg_catalog", "information_schema"}:
+        return False
+    if allowed_tables is None:
+        return True
+    return name in allowed_tables or (
+        bool(schema) and f"{_clean(schema or '')}.{name}" in allowed_tables
+    )
+
+
+def _sqlite_authorizer(allowed_tables: frozenset[str] | None) -> Callable[..., int]:
+    """SQLite の `set_authorizer` 用コールバック。SELECT が読む表だけを通し、ほかは全部拒否する。"""
+    denied = denied_tables()
+    permitted_actions = {
+        sqlite3.SQLITE_SELECT,
+        sqlite3.SQLITE_FUNCTION,
+        sqlite3.SQLITE_RECURSIVE,
+    }
+
+    def authorizer(action: int, arg1: str | None, arg2: str | None, *_: object) -> int:
+        if action == sqlite3.SQLITE_READ:
+            name = (arg1 or "").lower()
+            if name in denied or name.startswith(("sqlite_", "pragma_")):
+                return sqlite3.SQLITE_DENY
+            if allowed_tables is not None and name not in allowed_tables:
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+        return sqlite3.SQLITE_OK if action in permitted_actions else sqlite3.SQLITE_DENY
+
+    return authorizer
+
+
+async def _set_sqlite_authorizer(db: AsyncSession, callback: Callable[..., int] | None) -> None:
+    """セッションの SQLite 接続へ authorizer を掛ける（None で外す）。
+
+    aiosqlite は接続を専用スレッドで持つので、そのスレッドの中で呼ぶ必要がある
+    （SQLAlchemy のアダプタは `set_authorizer` を公開していない）。掛けられないときは
+    **実行しない**（読ませてはならない表を読ませるより失敗させる）。
+    """
+    conn = await db.connection()
+    raw = await conn.get_raw_connection()
+    driver = raw.driver_connection
+    execute = getattr(driver, "_execute", None)
+    inner = getattr(driver, "_conn", None)
+    if execute is None or inner is None or not hasattr(inner, "set_authorizer"):
+        raise ReadOnlySessionUnavailableError(
+            "SQLite の接続に authorizer を掛けられないため、プログラム SQL を実行しません"
+        )
+    await execute(inner.set_authorizer, callback)
+
+
+def is_authorizer_denial(exc: BaseException) -> bool:
+    """SQLite の authorizer が文を拒否したときの例外か（`not authorized`）。"""
+    message = str(getattr(exc, "orig", None) or exc).lower()
+    return isinstance(exc, DBAPIError) and (
+        "not authorized" in message or "is prohibited" in message
+    )
+
+
+def _plan_relations(node: Any) -> set[tuple[str | None, str]]:
+    """`EXPLAIN (VERBOSE, FORMAT JSON)` の計画から、読まれる実表 `(schema, 表名)` を集める。"""
+    found: set[tuple[str | None, str]] = set()
+    if isinstance(node, dict):
+        name = node.get("Relation Name")
+        if isinstance(name, str):
+            found.add((node.get("Schema"), name))
+        for value in node.values():
+            found |= _plan_relations(value)
+    elif isinstance(node, list):
+        for item in node:
+            found |= _plan_relations(item)
+    return found
+
+
+async def assert_relations_permitted(
+    reader: AsyncSession | AsyncConnection,
+    sql: str,
+    binds: dict[str, Any] | None = None,
+    *,
+    allowed_tables: Iterable[str] | None = None,
+) -> None:
+    """PostgreSQL: SQL の**計画に出る実表**を実行前に調べ、許されない表なら拒否する。
+
+    調べるのは計画の `Relation Name`（ビューは基表まで展開される）だけである。**関数が表を
+    読む形**（`query_to_xml('select ...')`、`dblink` など）は計画に実表として現れないので、
+    ここでは捕まえない。そちらは `is_select_only_sql` の禁止語の一覧（補助の層）と、
+    ロールの権限（境界）に頼る。
+
+    SQLite は接続の authorizer が文の準備時に見るので何もしない。PostgreSQL・SQLite 以外の
+    方言は、表の検査ができないので**実行しない**（フェイルクローズ）。SELECT / WITH 以外は計画を
+    取らない（そのまま読み取り専用トランザクションが止める）。
+
+    Raises:
+        ProgramSqlDeniedError: 許されない表（またはスキーマ）を読む、または方言が不明
+    """
+    dialect = getattr(getattr(reader, "dialect", None), "name", None)
+    if dialect is None and isinstance(reader, AsyncSession):
+        dialect = reader.get_bind().dialect.name
+    if dialect == "sqlite":
+        return
+    if dialect != "postgresql":
+        raise ProgramSqlDeniedError(
+            f"この DB 方言（{dialect}）では読む表を検査できないため、プログラム SQL を実行しません"
+        )
+    if not sql.lstrip().lower().startswith(("select", "with")):
+        return
+    allowed = await _qualified_allowance(reader, allowed_tables)
+    # VERBOSE にすると、計画の各表が `Schema`（実際に解決されたスキーマ）を持つ
+    result = await reader.execute(text(f"EXPLAIN (VERBOSE, FORMAT JSON) {sql}"), binds or {})
+    plan = result.scalar_one()
+    if isinstance(plan, str | bytes):
+        plan = json.loads(plan)
+    for schema, table in _plan_relations(plan):
+        if not table_read_permitted(table, allowed, schema):
+            raise ProgramSqlDeniedError(f"このSQLが読む表は許されていません: {table}")
+
+
+async def _qualified_allowance(
+    reader: AsyncSession | AsyncConnection, allowed_tables: Iterable[str] | None
+) -> frozenset[str] | None:
+    """許す表を `schema.table` にそろえる。スキーマ無しの表は、接続の現在のスキーマの表とみなす。
+
+    SQL の中のスキーマ無しの表名は検索パスで解決される。許可の側もそれと同じ解決にしないと、
+    同名の別スキーマの表（`archive.master`）が、スキーマ無しの許可（`master`）で通ってしまう。
+    """
+    if allowed_tables is None:
+        return None
+    entries = [str(t) for t in allowed_tables]
+    current: str | None = None
+    if any("." not in e for e in entries):
+        current = _clean(str((await reader.execute(text("SELECT current_schema()"))).scalar_one()))
+    out: set[str] = set()
+    for e in entries:
+        parts = [_clean(p) for p in e.split(".")]
+        out.add(".".join(parts[-2:]) if len(parts) > 1 else f"{current}.{parts[0]}")
+    return frozenset(out)
 
 
 def _refuses_without_dsn() -> bool:
@@ -172,10 +379,15 @@ async def _readonly_transaction(engine: AsyncEngine) -> AsyncIterator[AsyncConne
 
 
 @asynccontextmanager
-async def readonly_program_sql(db: AsyncSession) -> AsyncIterator[AsyncSession | AsyncConnection]:
+async def readonly_program_sql(
+    db: AsyncSession, *, allowed_tables: Iterable[str] | None = None
+) -> AsyncIterator[AsyncSession | AsyncConnection]:
     """DSL 由来の SQL を読み取り専用で発行する相手（`execute` を持つ）を貸し出す。
 
     呼び出し側は yield された相手に `execute` する。`db` そのものとは限らない。
+    SQLite では実行の間、アプリ自身の表（`denied_tables`）を読む文を DB が拒否する。
+    `allowed_tables` を渡すと、読める表がその表だけになる。PostgreSQL の表の検査は
+    実行前に `assert_relations_permitted` を呼ぶ側が行う（文を知っているのは呼び出し側だけ）。
 
     Raises:
         ReadOnlySessionUnavailableError: 非 SQLite・READONLY_DATABASE_URL 未設定・production
@@ -183,9 +395,14 @@ async def readonly_program_sql(db: AsyncSession) -> AsyncIterator[AsyncSession |
     if db.get_bind().dialect.name == "sqlite":
         await db.execute(text("PRAGMA query_only = ON"))
         try:
+            await _set_sqlite_authorizer(db, _sqlite_authorizer(_normalize_allowed(allowed_tables)))
             yield db
         finally:
-            await db.execute(text("PRAGMA query_only = OFF"))
+            # authorizer を先に外す（PRAGMA 自体を拒否する規則なので、外さないと戻せない）
+            try:
+                await _set_sqlite_authorizer(db, None)
+            finally:
+                await db.execute(text("PRAGMA query_only = OFF"))
         return
 
     engine = get_readonly_engine()

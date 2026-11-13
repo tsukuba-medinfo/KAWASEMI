@@ -175,7 +175,7 @@ async def test_the_path_rejection_is_not_unclassified(
                 "op": "file_extract",
                 "id": "doc",
                 "connection_id": "fs",
-                "path_pattern": "reports/x.txt",
+                "path_pattern": "{{patient_id}}/x.txt",
             }
         ],
         "return": "$doc",
