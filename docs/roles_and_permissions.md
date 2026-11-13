@@ -18,7 +18,7 @@
 | `admin` | 管理者 | アカウント・役割の付与、接続と索引の状態、ログ、様式の取り込み（ファイルとして） | 設計・収集・検証の画面。**患者データを見ない。他の役割への切替もしない** |
 | `designer` | 設計者 | 臨床的意味・所在・手順書・取得プラン・設計キャンバス・様式の内容（Questionnaire の項目）と ValueSet の編集・取得メトリクス | 回答の入力・送信 |
 | `collector` | 収集者 | 次の患者の受け取り（先着の自動割り当て）・自動収集のバッチ起動と本番実行・手動入力・回答送信・チェック | 設計の確定、対象患者リストの登録 |
-| `reviewer` | 閲覧・検証者 | 回答の閲覧・チェック・検証（verify）・差戻し（reject）・エクスポート・取得メトリクス | 入力・設計 |
+| `reviewer` | 閲覧・検証者 | 回答の閲覧・検証（verify）・差戻し（reject）・エクスポート・取得メトリクス・データセットの閲覧（チェックはしない） | 入力・設計 |
 
 - 旧役割との対応: `collection_lead` / `plan_designer` / `data_manager` → `designer`、
   `data_entry` → `collector`、`verifier` / `data_user` → `reviewer`。旧名は `RoleType` に残さない
@@ -105,7 +105,7 @@
 | データセット一覧・詳細（`/datasets`, `/datasets/{id}`） | ✅ | ✗ | ✅ | ✅ |
 | バッチ autofill の起動（`POST /datasets/{id}/batch-autofill`） | ✗ | ✗ | ✅ | ✗ |
 | バッチジョブの進捗確認・取消（`/batch-jobs/{id}/*`） | ✗ | ✗ | ✅ | ✗ |
-| check 画面・check の確定/フラグ（`/datasets/{id}/check*`。自分が有効なリースを持つ対象のみ） | ✗ | ✗ | ✅ | ✗ |
+| check 画面・check の確定/フラグ（`/datasets/{id}/check*`。自分が有効なリースを持つ AIドラフト対象のみ。閲覧・検証者向けのチェックの流れは無い） | ✗ | ✗ | ✅ | ✗ |
 | 入力対象一覧・次の患者の受け取り（`/input-targets*`） | ✗ | ✗ | ✅ | ✗ |
 | フォーム画面の閲覧（`/forms`, `/forms/{id}`）・患者/Encounter 参照（`/api/patient/*`, `/api/encounter/*`） | ✗ | ✗ | ✅ | ✗ |
 | 回答の提出・確定保存（`POST /forms/{id}/submit`） | ✗ | ✗ | ✅ | ✗ |
@@ -168,14 +168,14 @@ manual 縮退の提案・承認・確定操作の分離も同じ（[manual 縮�
 | 操作 | 実装 | 弾く条件 |
 |---|---|---|
 | 回答の verify / reject | `web/routes.py: verify_response` / `reject_response` | `response.submitted_by_id == current_user.id`（**提出者だけを見る**） |
-| check モードの確定（`/datasets/{id}/check/{target_id}/confirm`） | `web/dataset_routes.py: confirm_check` | アクティブ役割が `reviewer` のとき、直近 `InputExecution` の `executed_by_id == current_user.id` |
+| check モードの確定（`/datasets/{id}/check/{target_id}/confirm`） | `web/dataset_routes.py: confirm_check` | 収集者だけが入れる。自分が有効なリースを持つ AIドラフト対象でなければ確定できない（欠損を埋める人が確定も行うので、閲覧・検証者のチェックの流れと、その自己検証の分岐は無い） |
 | 所在の確からしさの判定 | `ai_input/routes.py` | 作成者と判定者が同一なら `is_self_assessment=True` を記録（止めない） |
 | 管理者と患者データ | `require_roles` / `user_can_access_patient` | 管理者は回答・入力対象・データセット・設計の画面に入れない。患者スコープの全許可も無い |
 
 - **止まらない経路が1つ残っている**（以前からの既知。4役割へ畳んだときも変えていない）。A が `collector` として
   autofill 本番を実行し（`executed_by_id=A`）、B が提出した回答（`submitted_by_id=B`）は、
-  **A が `reviewer` も保有していれば検証できる**。`confirm_check` が閉じている穴が `verify_response` では
-  閉じていない。
+  **A が `reviewer` も保有していれば検証できる**。`verify_response` は提出者しか見ないので、
+  autofill の実行者との同一性は止まらない。
 - 1人の利用者に `collector` と `reviewer` を同時に付与すると、自己検証禁止は上表の判定だけで効く。
   監査の厳しい用途では、同じ人に収集者と閲覧・検証者を同時に付与しない運用で担保する。
 - 管理者はアカウントと役割の付与を持つので、**自分に設計者や収集者を付与できる**。これは
@@ -195,7 +195,8 @@ manual 縮退の提案・承認・確定操作の分離も同じ（[manual 縮�
 **収集者（`collector`）** にあたり、管理者が登録した対象患者リスト（データセット）から「次の患者を受け取る」で
 先着の自動割り当てを受け（一度に1件、期限付きの排他リース）、自動収集を起動し、記入に責任を持つ。
 収集結果の妥当性を独立に確認する **閲覧・検証者（`reviewer`）** が、検証・差戻し・エクスポートを行う
-（職務分離のため、自分が入力した回答は検証できない）。
+（職務分離のため、自分が入力した回答は検証できない）。check モード（AIドラフトの確認・確定）は収集者の仕事で、
+閲覧・検証者は入らない。
 
 ### データ収集を実施する施設のシステム管理者
 
