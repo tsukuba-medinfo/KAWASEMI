@@ -244,7 +244,7 @@ http://localhost:8000/ai-input/questionnaires/{id}/autofill
 
 > **試行と本番の区別**: autofill は確定済みプランを実行する**決定論的な処理で、実行者に依存しません**。設計者（`designer`）が実行すると**試行**（結果は永続せず設計検証用・揮発）、収集者（`collector`）が実行すると**本番・対話**（`InputExecution` に永続）になります。非対話の**本番・バッチ**（`/datasets/{id}/batch-autofill`）も **collector** が起動します。詳細は [docs/autofill_execution_spec.md](autofill_execution_spec.md) を参照してください。
 >
-> **収集後の流れ（検証→エクスポート）**: 収集者が確定保存（submit）した回答は、閲覧・検証者（`reviewer`）が verify/reject します（自己検証は禁止＝SoD、検証済は施錠）。エクスポートも `reviewer` が行い、**既定では検証済のみ**（`include_unverified=true` で全件）。詳細は [roles_and_permissions.md](roles_and_permissions.md) を参照してください。
+> **収集後の流れ（検証→エクスポート）**: 収集者が確定保存（submit）または check で確定した回答は、閲覧・検証者（`reviewer`）が verify/reject します（自己検証は禁止＝SoD、検証済は施錠）。エクスポートも `reviewer` が行い、**既定では検証済のみ**（`include_unverified=true` で全件）。詳細は [roles_and_permissions.md](roles_and_permissions.md) を参照してください。
 
 **実行の流れ**:
 

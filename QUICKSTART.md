@@ -64,7 +64,7 @@ uv run alembic upgrade head
 ## 手動入力を試す
 
 ```bash
-# ユーザー・ロール・サンプル Questionnaire・症例割り当てを作成（既存のDBはリセットされる。
+# ユーザー・ロール・サンプル Questionnaire・対象患者リストを作成（既存のDBはリセットされる。
 # 全表を消してから alembic upgrade head を当て直す）
 uv run python examples/init_demo_data.py
 ```

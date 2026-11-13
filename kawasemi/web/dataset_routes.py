@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime
 from typing import Annotated, Any
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Form, Query, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -18,10 +19,18 @@ from kawasemi.ai_input.schemas import validate_study_id
 from kawasemi.api.v100.questionnaire_responses import build_questionnaire_response_resource
 from kawasemi.core.config import settings
 from kawasemi.core.database import get_db
-from kawasemi.core.deps import RequireCollector, require_roles
+from kawasemi.core.deps import RequireAdmin, RequireCollector, require_roles
+from kawasemi.core.lease import (
+    aware_utc,
+    claim_next_target,
+    extend_lease,
+    get_active_lease,
+    lease_is_valid,
+    release_lease,
+    utcnow,
+)
 from kawasemi.core.logging_config import get_logger
 from kawasemi.models.batch_job import BatchJob, BatchJobStatus
-from kawasemi.models.case_assignment import CaseAssignment
 from kawasemi.models.dataset import Dataset, DatasetQuestionnaire
 from kawasemi.models.input_target import InputTarget, InputTargetStatus
 from kawasemi.models.questionnaire import Questionnaire
@@ -42,18 +51,19 @@ logger = get_logger(__name__)
 templates = Jinja2Templates(directory="kawasemi/web/templates")
 register_template_globals(templates)
 
-# データセットの作成・削除・バッチ起動は収集の行為なので収集者（管理者から移した）。
-# チェック（AIドラフトのレビュー）は収集者に加え閲覧・検証者も行う。
-# 閲覧・検証者の確定には自己検証禁止(SoD)を別途 confirm_check で適用する。
-RequireCheckReviewer = Annotated[User, Depends(require_roles("collector", "reviewer"))]
-# データセット一覧/詳細の閲覧（閲覧・検証者はチェック対象に辿り着くため閲覧可）。管理者は患者データを見ない。
-RequireDatasetViewer = RequireCheckReviewer
+# データセット = 研究計画で固定した対象患者リスト。登録・削除は管理者だけが行う
+# （誰を収集するかは計画で決まり、収集者が患者を選ぶと逸脱になるため）。管理者が見るのは
+# 患者IDの一覧だけで、患者データ（FHIR）は見ない。
+# 収集者は「次の患者を受け取る」で先着の自動割り当てを受け、受け取った対象のチェック・確定まで
+# 同じ人が行う（欠損を埋める人が検証者を兼ねるので、閲覧・検証者はこの流れに入らない）。
+# 一覧/詳細は管理者・収集者・閲覧・検証者が閲覧できる。
+RequireDatasetViewer = Annotated[User, Depends(require_roles("admin", "collector", "reviewer"))]
 
 _LLM_OPS = {OpType.LLM_EXTRACT, OpType.LLM_JUDGE}
 
 
 # =============================================================================
-# データセット管理（admin）
+# データセット管理（登録・削除は admin）
 # =============================================================================
 
 
@@ -90,7 +100,7 @@ async def list_datasets(
 @router.get("/datasets/new", response_class=HTMLResponse)
 async def new_dataset(
     request: Request,
-    current_user: RequireCollector,
+    current_user: RequireAdmin,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> HTMLResponse:
     """データセット作成画面"""
@@ -175,7 +185,7 @@ async def _render_dataset_new(
 @router.post("/datasets/new/confirm", response_class=HTMLResponse)
 async def confirm_dataset(
     request: Request,
-    current_user: RequireCollector,
+    current_user: RequireAdmin,
     csrf_protect: Annotated[CsrfProtect, Depends()],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> HTMLResponse:
@@ -212,7 +222,7 @@ async def confirm_dataset(
 @router.post("/datasets/new")
 async def create_dataset(
     request: Request,
-    current_user: RequireCollector,
+    current_user: RequireAdmin,
     csrf_protect: Annotated[CsrfProtect, Depends()],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> Response:
@@ -274,15 +284,15 @@ async def create_dataset(
 async def show_dataset(
     request: Request,
     dataset_id: int,
-    current_user: RequireCheckReviewer,
+    current_user: RequireDatasetViewer,
     db: Annotated[AsyncSession, Depends(get_db)],
     status: str | None = Query(None),
     questionnaire_id: str | None = Query(None),
 ) -> Response:
     """データセット詳細・入力対象一覧画面（バッチ起動・チェック導線を含む）
 
-    閲覧とチェック操作は collector / reviewer に許可する。データセットの
-    作成・削除・バッチ起動は collector。
+    閲覧は admin / collector / reviewer に許可する。データセットの作成・削除は admin、
+    バッチ起動と入力対象の受け取りは collector。
     """
     result = await db.execute(
         select(Dataset)
@@ -357,7 +367,7 @@ async def show_dataset(
 async def delete_dataset(
     request: Request,
     dataset_id: int,
-    current_user: RequireCollector,
+    current_user: RequireAdmin,
     csrf_protect: Annotated[CsrfProtect, Depends()],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> RedirectResponse:
@@ -425,6 +435,25 @@ async def list_input_targets(
     all_result = await db.execute(select(InputTarget))
     all_targets = list(all_result.scalars().all())
 
+    # 自分の現在のリースと、受け取れる件数（プール）
+    my_lease = await get_active_lease(db, current_user.id)
+    now = utcnow()
+    pool_free = [
+        t
+        for t in all_targets
+        if t.status != InputTargetStatus.COMPLETED
+        and (
+            t.started_by_id is None
+            or t.lease_expires_at is None
+            or aware_utc(t.lease_expires_at) <= now
+        )
+    ]
+    pool_counts = {
+        "ai_drafted": sum(1 for t in pool_free if t.status == InputTargetStatus.AI_DRAFTED),
+        "pending": sum(1 for t in pool_free if t.status == InputTargetStatus.PENDING),
+        "in_progress": sum(1 for t in pool_free if t.status == InputTargetStatus.IN_PROGRESS),
+    }
+
     return templates.TemplateResponse(
         "input_target_list.html",
         {
@@ -432,6 +461,9 @@ async def list_input_targets(
             "current_user": current_user,
             "input_targets": input_targets,
             "all_targets": all_targets,
+            "my_lease": my_lease,
+            "my_lease_url": _open_url(my_lease) if my_lease else None,
+            "pool_counts": pool_counts,
             "datasets": datasets,
             "questionnaires": questionnaires,
             "statuses": InputTargetStatus.ALL,
@@ -446,63 +478,49 @@ async def list_input_targets(
     )
 
 
-@router.post("/input-targets/{target_id}/start")
-async def start_input_target(
+def _open_url(target: InputTarget) -> str:
+    """受け取った対象を開く URL。AIドラフト済みはチェック画面、それ以外は入力フォーム。"""
+    if target.status == InputTargetStatus.AI_DRAFTED:
+        return (
+            f"/datasets/{target.dataset_id}/check"
+            f"?questionnaire_id={target.questionnaire_id}&target_id={target.id}"
+        )
+    return (
+        f"/forms/{target.questionnaire_id}"
+        f"?patient_id={quote(target.patient_id, safe='')}&input_target_id={target.id}"
+    )
+
+
+def _targets_redirect(notice: str) -> RedirectResponse:
+    return RedirectResponse(url=f"/input-targets?notice={quote(notice)}", status_code=303)
+
+
+@router.post("/input-targets/claim")
+async def claim_input_target(
     request: Request,
-    target_id: int,
     current_user: RequireCollector,
     csrf_protect: Annotated[CsrfProtect, Depends()],
     db: Annotated[AsyncSession, Depends(get_db)],
+    dataset_id: Annotated[str, Form()] = "",
+    questionnaire_id: Annotated[str, Form()] = "",
 ) -> RedirectResponse:
-    """入力対象の入力を開始（ロック）"""
+    """「次の患者を受け取る」: 先着で対象を1件自動割り当てし、排他リースを付けて開く。
+
+    収集者は患者を選べない（対象リストは管理者が登録する）。既に有効なリースがあれば、それを
+    そのまま開く（一度に1件）。取り合いの排他は kawasemi.core.lease の条件付き UPDATE で取る。
+    """
     await csrf_protect.validate_csrf(request)
-    result = await db.execute(select(InputTarget).where(InputTarget.id == target_id))
-    target = result.scalar_one_or_none()
-
-    if not target:
-        return RedirectResponse(url="/input-targets", status_code=303)
-
-    if target.status != InputTargetStatus.PENDING:
-        # すでにロック済みまたは完了済み
-        return RedirectResponse(url="/input-targets", status_code=303)
-
-    # **明示的に割り当てられた対象だけ開始できる**。
-    #
-    # `user_can_access_patient` は `started_by_id == user.id` を患者 PHI 認可の根拠にする。
-    # つまりこのルートは**認可の根拠を自分で作れる書き込み**である。以前はロール検査も
-    # 割り当て検査も無かったため、pending な対象を総当たりで start すれば任意患者の
-    # FHIR PHI（氏名・生年月日・性別）を `GET /api/patient/{patient_id}` から読めた。
-    #
-    # **自己起点の所有権行を認可の唯一の根拠にしない**。割り当ての正本は `CaseAssignment`
-    # （患者 × Questionnaire × 担当者）なので、そこに行があることを要求する。
-    # 管理者の全許可は無い（患者データを見ない）。
-    assigned = await db.execute(
-        select(CaseAssignment.id)
-        .where(
-            CaseAssignment.patient_id == target.patient_id,
-            CaseAssignment.questionnaire_id == target.questionnaire_id,
-            CaseAssignment.assigned_to_id == current_user.id,
-        )
-        .limit(1)
-    )
-    if assigned.first() is None:
-        logger.warning(
-            "割り当てのない入力対象の開始を拒否しました: "
-            f"target_id={target_id}, user={current_user.username}"
-        )
-        return RedirectResponse(url="/input-targets", status_code=303)
-
-    target.status = InputTargetStatus.IN_PROGRESS
-    target.started_by_id = current_user.id
-    await db.commit()
-
-    logger.info(
-        f"入力対象の入力を開始しました: target_id={target_id}, user={current_user.username}"
-    )
-    return RedirectResponse(
-        url=f"/forms/{target.questionnaire_id}?patient_id={target.patient_id}&input_target_id={target.id}",
-        status_code=303,
-    )
+    warnings: list[str] = []
+    ds_id = parse_int_filter(dataset_id, "データセット", warnings)
+    q_id = parse_int_filter(questionnaire_id, "Questionnaire", warnings)
+    if warnings:
+        # 絞り込みの指定が壊れているときに、黙って全体から受け取らない
+        return _targets_redirect(warnings[0])
+    target = await claim_next_target(db, current_user.id, dataset_id=ds_id, questionnaire_id=q_id)
+    if target is None:
+        return _targets_redirect("受け取れる患者がありません")
+    logger.info(f"入力対象を受け取りました: target_id={target.id}, user={current_user.username}")
+    return RedirectResponse(url=_open_url(target), status_code=303)
 
 
 # =============================================================================
@@ -571,23 +589,6 @@ async def _active_batch_job(
     return result.scalar_one_or_none()
 
 
-async def _ai_drafted_queue(
-    db: AsyncSession, dataset_id: int, questionnaire_id: int
-) -> list[InputTarget]:
-    """チェック対象（ai_drafted）の InputTarget を患者ID順で返す。"""
-    result = await db.execute(
-        select(InputTarget)
-        .where(
-            InputTarget.dataset_id == dataset_id,
-            InputTarget.questionnaire_id == questionnaire_id,
-            InputTarget.status == InputTargetStatus.AI_DRAFTED,
-        )
-        .options(selectinload(InputTarget.started_by))
-        .order_by(InputTarget.patient_id)
-    )
-    return list(result.scalars().all())
-
-
 async def _latest_execution(
     db: AsyncSession, questionnaire_id: int, patient_id: str
 ) -> InputExecution | None:
@@ -607,8 +608,6 @@ async def _latest_execution(
 def _detail_redirect(dataset_id: int, questionnaire_id: int, notice: str | None = None) -> str:
     url = f"/datasets/{dataset_id}?questionnaire_id={questionnaire_id}"
     if notice:
-        from urllib.parse import quote
-
         url += f"&notice={quote(notice)}"
     return url
 
@@ -780,49 +779,50 @@ async def cancel_batch_job(
     )
 
 
+async def _held_ai_drafted(
+    db: AsyncSession, user: User, dataset_id: int, target_id: int | None = None
+) -> InputTarget | None:
+    """呼び出し者が有効なリースを持つ、このデータセットの AIドラフト対象（無ければ None）。"""
+    target = await get_active_lease(db, user.id)
+    if (
+        target is None
+        or target.dataset_id != dataset_id
+        or target.status != InputTargetStatus.AI_DRAFTED
+        or (target_id is not None and target.id != target_id)
+    ):
+        return None
+    return target
+
+
+_NO_LEASE_NOTICE = "この対象を担当していません。「次の患者を受け取る」から受け取ってください"
+
+
 @router.get("/datasets/{dataset_id}/check", response_class=HTMLResponse)
 async def check_mode(
     request: Request,
     dataset_id: int,
-    current_user: RequireCheckReviewer,
+    # 欠損を埋める人が検証者を兼ねるので、チェックは収集者だけが行う。
+    current_user: RequireCollector,
     db: Annotated[AsyncSession, Depends(get_db)],
     questionnaire_id: int = Query(...),
     target_id: int | None = Query(None),
 ) -> Response:
-    """チェックモード: AIドラフト済みの InputTarget を1件ずつレビューする画面。"""
+    """チェックモード: 自分が受け取った AIドラフト済みの対象を1件レビューする画面。
+
+    **この GET は担当を作らない**（以前は開いた人を started_by に書いており、そこが患者データ
+    の認可の根拠になっていた）。表示できるのは自分が有効なリースを持つ対象だけで、`target_id`
+    はリースと食い違えば無視する。開くとリースを延長する。
+    """
     questionnaire = (
         await db.execute(select(Questionnaire).where(Questionnaire.id == questionnaire_id))
     ).scalar_one_or_none()
     if questionnaire is None:
         return RedirectResponse(url=f"/datasets/{dataset_id}", status_code=303)
 
-    queue = await _ai_drafted_queue(db, dataset_id, questionnaire_id)
-    if not queue:
-        return RedirectResponse(
-            url=_detail_redirect(
-                dataset_id, questionnaire_id, "チェック対象（AIドラフト）がありません"
-            ),
-            status_code=303,
-        )
-
-    # 現在の対象を決定（target_id 指定があればそれ、なければ先頭）
-    idx = 0
-    if target_id is not None:
-        for i, t in enumerate(queue):
-            if t.id == target_id:
-                idx = i
-                break
-    current = queue[idx]
-
-    # ソフトロック: 未保持なら自分が担当として記録する。既に他者が開いている場合は奪わず
-    # 警告のみ（開くことは妨げない）。最初に開いた人を保持者として確定できるようにし、
-    # 後から開いた人が保持者を上書きして「最初の人が確定できない」逆転を防ぐ。
-    locked_by = None
-    if current.started_by_id is None:
-        current.started_by_id = current_user.id
-        await db.commit()
-    elif current.started_by_id != current_user.id and current.started_by:
-        locked_by = current.started_by.full_name
+    current = await _held_ai_drafted(db, current_user, dataset_id)
+    if current is None or current.questionnaire_id != questionnaire_id:
+        return _targets_redirect(_NO_LEASE_NOTICE)
+    await extend_lease(db, current, current_user.id)
 
     execution = await _latest_execution(db, questionnaire_id, current.patient_id)
     prefill = (execution.prefill_data or {}) if execution else {}
@@ -830,9 +830,6 @@ async def check_mode(
 
     generator = FormGenerator(questionnaire.content)
     form_fields = generator.generate_form_fields()
-
-    prev_id = queue[idx - 1].id if idx > 0 else None
-    next_id = queue[idx + 1].id if idx + 1 < len(queue) else None
 
     return templates.TemplateResponse(
         "ai_input/check.html",
@@ -846,11 +843,6 @@ async def check_mode(
             "prefill": prefill,
             "evidence": evidence,
             "execution": execution,
-            "position": idx + 1,
-            "queue_total": len(queue),
-            "prev_id": prev_id,
-            "next_id": next_id,
-            "locked_by": locked_by,
             "op_labels": OpType.LABELS,
         },
     )
@@ -861,7 +853,7 @@ async def confirm_check(
     dataset_id: int,
     target_id: int,
     request: Request,
-    current_user: RequireCheckReviewer,
+    current_user: RequireCollector,
     csrf_protect: Annotated[CsrfProtect, Depends()],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> Response:
@@ -873,30 +865,11 @@ async def confirm_check(
     if target is None or target.dataset_id != dataset_id:
         return RedirectResponse(url=f"/datasets/{dataset_id}", status_code=303)
 
-    # ソフトロックの所有確認: 「自分が担当」または「未保持」の対象のみ確定できる。
-    # 他者がレビュー中（started_by が別人）の対象は確定を弾く（二重確定の防止）。
-    if target.started_by_id is not None and target.started_by_id != current_user.id:
-        return RedirectResponse(
-            url=_detail_redirect(
-                dataset_id, target.questionnaire_id, "他の担当者がレビュー中のため確定できません"
-            ),
-            status_code=303,
-        )
-
-    # 職務分離(SoD): 検証者は「自分が生成したデータ」を検証できない。
-    # チェック対象のドラフト元 InputExecution を実行したのが本人なら、検証者としての確定を弾く
-    # （収集者として autofill 本番実行した本人が、検証者へ切り替えて自己承認するのを防ぐ）。
-    if current_user.active_role == "reviewer":
-        draft = await _latest_execution(db, target.questionnaire_id, target.patient_id)
-        if draft is not None and draft.executed_by_id == current_user.id:
-            return RedirectResponse(
-                url=_detail_redirect(
-                    dataset_id,
-                    target.questionnaire_id,
-                    "自分が実行した取得結果は検証できません（職務分離）",
-                ),
-                status_code=303,
-            )
+    # 自分が有効なリースを持つ AIドラフト対象だけ確定できる（他者の担当・期限切れ・状態違いは弾く）。
+    # チェックは収集者だけが行い、ここへ来るのは収集者なので、以前あった閲覧・検証者向けの
+    # 職務分離（SoD）の分岐は到達不能になり除いた。
+    if target.status != InputTargetStatus.AI_DRAFTED or not lease_is_valid(target, current_user.id):
+        return _targets_redirect(_NO_LEASE_NOTICE)
 
     questionnaire = (
         await db.execute(select(Questionnaire).where(Questionnaire.id == target.questionnaire_id))
@@ -947,11 +920,8 @@ async def confirm_check(
         f"チェック確定: target={target_id} patient={target.patient_id} by={current_user.username}"
     )
 
-    # 次の AIドラフトへ（残っていなければ詳細へ）
-    return RedirectResponse(
-        url=f"/datasets/{dataset_id}/check?questionnaire_id={target.questionnaire_id}",
-        status_code=303,
-    )
+    # 確定でリースは認可を失う（完了済み）。次の患者は一覧から受け取る
+    return _targets_redirect("確定しました。次の患者を受け取れます")
 
 
 @router.post("/datasets/{dataset_id}/check/{target_id}/flag")
@@ -959,11 +929,11 @@ async def flag_check(
     request: Request,
     dataset_id: int,
     target_id: int,
-    current_user: RequireCheckReviewer,
+    current_user: RequireCollector,
     csrf_protect: Annotated[CsrfProtect, Depends()],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> RedirectResponse:
-    """チェック1件を「要確認」にして後回しにする（状態は ai_drafted のまま）。"""
+    """チェック1件を「要確認」にして後回しにする（状態は ai_drafted のまま、リースは手放す）。"""
     await csrf_protect.validate_csrf(request)
     target = (
         await db.execute(select(InputTarget).where(InputTarget.id == target_id))
@@ -971,26 +941,9 @@ async def flag_check(
     if target is None or target.dataset_id != dataset_id:
         return RedirectResponse(url=f"/datasets/{dataset_id}", status_code=303)
 
-    target.needs_attention = True
-    await db.commit()
+    if target.status != InputTargetStatus.AI_DRAFTED or not lease_is_valid(target, current_user.id):
+        return _targets_redirect(_NO_LEASE_NOTICE)
 
-    # キュー（患者ID順）での現在位置の次の AIドラフトへ進む（末尾なら詳細へ）。
-    # check_mode の prev/next と同じくインデックス基準で一貫させる。
-    queue = await _ai_drafted_queue(db, dataset_id, target.questionnaire_id)
-    next_id = None
-    for i, t in enumerate(queue):
-        if t.id == target.id:
-            if i + 1 < len(queue):
-                next_id = queue[i + 1].id
-            break
-    if next_id is None:
-        return RedirectResponse(
-            url=_detail_redirect(
-                dataset_id, target.questionnaire_id, "末尾です（要確認として記録しました）"
-            ),
-            status_code=303,
-        )
-    return RedirectResponse(
-        url=f"/datasets/{dataset_id}/check?questionnaire_id={target.questionnaire_id}&target_id={next_id}",
-        status_code=303,
-    )
+    target.needs_attention = True
+    await release_lease(db, target)
+    return _targets_redirect("要確認として記録し、担当を手放しました")

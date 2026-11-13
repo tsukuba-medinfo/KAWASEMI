@@ -79,7 +79,7 @@
             </form>
         </div>
         <div class="run-status" id="done-{{ s.active_job.id }}"></div>
-        {% else %}
+        {% elif current_user.active_role == 'collector' %}
         <div class="page-head__actions" style="margin-top: 0.7rem;">
             {% if s.readiness.ready %}
             <form method="post" action="{{ base_path() }}/datasets/{{ dataset.id }}/batch-autofill"
@@ -98,11 +98,12 @@
             </span>
             {% endif %}
 
-            {% if c.ai_drafted > 0 %}
-            <a href="{{ base_path() }}/datasets/{{ dataset.id }}/check?questionnaire_id={{ q.id }}"
-               class="btn btn--sm btn--success">
-                チェック開始（{{ c.ai_drafted }}件）
-            </a>
+            {% if c.ai_drafted > 0 or c.pending > 0 %}
+            <form method="post" action="{{ base_path() }}/input-targets/claim" style="margin: 0;">
+                <input type="hidden" name="dataset_id" value="{{ dataset.id }}">
+                <input type="hidden" name="questionnaire_id" value="{{ q.id }}">
+                <button type="submit" class="btn btn--sm btn--success">次の患者を受け取る</button>
+            </form>
             {% endif %}
         </div>
         {% endif %}

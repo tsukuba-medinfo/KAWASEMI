@@ -473,7 +473,6 @@ async def health() -> dict[str, str]:
 from kawasemi.ai_input.routes import router as ai_input_router  # noqa: E402
 from kawasemi.api.v100 import router as v100_router  # noqa: E402
 from kawasemi.web.admin_routes import router as admin_router  # noqa: E402
-from kawasemi.web.assignment_routes import router as assignment_router  # noqa: E402
 from kawasemi.web.auth_routes import router as auth_router  # noqa: E402
 from kawasemi.web.dataset_routes import router as dataset_router  # noqa: E402
 from kawasemi.web.routes import ai_web_router  # noqa: E402
@@ -483,7 +482,6 @@ app.include_router(v100_router, prefix="/api/v100")
 app.include_router(auth_router)  # 認証ルーター（/login, /logout）
 app.include_router(admin_router)  # 管理者ルーター（/admin/*）
 app.include_router(dataset_router)  # データセット・入力対象ルーター
-app.include_router(assignment_router)  # 旧症例割り当てルーター（互換性維持）
 # データ自動収集（ステップ1〜4）は常時マウント。AI関与は端点ガードで制御する
 # （DRAFTING=ドラフト生成系403 / EXTRACTION=LLM opプラン拒否。docs/ai_flags_spec.md）
 app.include_router(ai_input_router)

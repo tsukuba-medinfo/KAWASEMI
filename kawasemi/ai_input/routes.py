@@ -100,6 +100,7 @@ from kawasemi.core.deps import (
     require_roles,
 )
 from kawasemi.core.exceptions import AIServiceException, ResourceNotFoundException
+from kawasemi.core.lease import extend_leases_for_patient
 from kawasemi.core.logging_config import get_logger
 from kawasemi.models.questionnaire import Questionnaire
 from kawasemi.models.role import RoleType
@@ -4179,13 +4180,17 @@ async def _autofill_patient_allowed(db: AsyncSession, user: User, patient_id: st
     **試行は合成・ホワイトリスト患者に限る**（`settings.trial_run_patient_ids`）。
     割り当てを持つ患者は従来どおり通るので、運用上の後退は無い。
 
-    - 本番（`collector`）: `user_can_access_patient` のみ（従来と同じ）
-    - 試行（`designer`）: ホワイトリストにある患者、または割り当てのある患者
+    - 本番（`collector`）: `user_can_access_patient`（その患者の対象に有効なリースを持つこと）のみ
+    - 試行（`designer`）: ホワイトリストにある患者、または有効なリースのある患者
     - `admin`: この経路に入れない（`RequireAutofillRunner` に含まれない。患者データを見ない）
     """
     if _is_trial_run(user) and patient_id in settings.trial_run_patient_id_set:
         return True
-    return await user_can_access_patient(db, user, patient_id)
+    allowed = await user_can_access_patient(db, user, patient_id)
+    if allowed:
+        # 保持者の操作（autofill 実行）でリースを延長する
+        await extend_leases_for_patient(db, user.id, patient_id)
+    return allowed
 
 
 def _is_trial_run(user: User) -> bool:
@@ -4271,7 +4276,10 @@ async def execute_autofill(
     # 患者に限る（以前は設計ロールなら患者スコープ認可が一切評価されなかった）。
     if not await _autofill_patient_allowed(db, current_user, patient_id):
         return JSONResponse(
-            {"success": False, "message": "この患者は担当に割り当てられていません"},
+            {
+                "success": False,
+                "message": "この患者は担当ではありません（「次の患者を受け取る」で受け取った患者のみ実行できます）",
+            },
             status_code=403,
         )
 
@@ -4408,7 +4416,10 @@ async def execute_autofill_stream(
     # 患者に限る（以前は設計ロールなら患者スコープ認可が一切評価されなかった）。
     if not await _autofill_patient_allowed(db, current_user, patient_id):
         return JSONResponse(
-            {"success": False, "message": "この患者は担当に割り当てられていません"},
+            {
+                "success": False,
+                "message": "この患者は担当ではありません（「次の患者を受け取る」で受け取った患者のみ実行できます）",
+            },
             status_code=403,
         )
 

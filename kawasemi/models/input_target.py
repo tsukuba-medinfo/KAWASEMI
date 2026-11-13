@@ -37,7 +37,8 @@ class InputTarget(Base, TimestampMixin):
 
     データセット内のQuestionnaire × Patient IDの1組み合わせを表す。
     入力担当者が選んで入力する単位。
-    1件につき1人がロックして入力する（started_by_idが設定されたらロック済み）。
+    1件につき1人が排他リース付きで担当する（started_by_id が保持者、lease_expires_at が期限）。
+    担当は管理者が登録した対象リストから先着で自動的に割り当てる（kawasemi.core.lease）。
     """
 
     __tablename__ = "input_targets"
@@ -68,6 +69,12 @@ class InputTarget(Base, TimestampMixin):
     # （ソフトロック: 他者には「レビュー中」を表示、開くこと自体は妨げない）。
     started_by_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+
+    # 排他リースの失効時刻。started_by_id が保持者、これが期限。期限を過ぎたら未保持と同じで、
+    # 患者データへの認可も失う（掃除ジョブは不要）。判定は kawasemi.core.lease に集約する。
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
     )
 
     # チェックで「要確認（差し戻し/後回し）」と人が印を付けた状態。状態は ai_drafted の

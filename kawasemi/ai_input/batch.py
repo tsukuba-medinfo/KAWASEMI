@@ -17,13 +17,14 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from kawasemi.ai_input.executor import DSLInterpreter, program_snapshot
 from kawasemi.ai_input.models import ExecutionStatus, InputExecution, InputPlan, PlanStatus
 from kawasemi.core.database import AsyncSessionLocal
+from kawasemi.core.lease import free_clause, utcnow
 from kawasemi.core.logging_config import get_logger
 from kawasemi.models.batch_job import BatchJob, BatchJobStatus
 from kawasemi.models.input_target import InputTarget, InputTargetStatus
@@ -147,27 +148,46 @@ async def run_batch_job(job_id: int) -> None:
                     },
                 }
 
-                execution = InputExecution(
-                    questionnaire_id=job.questionnaire_id,
-                    patient_id=target.patient_id,
-                    subject_id=target.subject_id,
-                    executed_by_id=executed_by_id,
-                    batch_job_id=job_id,
-                    prefill_data=prefill_data,
-                    evidence=evidence,
-                    # バッチも本番実行なので実行時 program を固定保存する（版固定を全経路で成立）。
-                    program_snapshot=program_snapshot(plans, model),
-                    status=status,
-                    error_summary=error_summary,
-                )
-                db.add(execution)
-
                 # 状態遷移: success/partial → ai_drafted、failed → pending 維持。
-                if status == ExecutionStatus.FAILED:
-                    job.failed += 1
+                # 状態の書き込みは「まだ pending で誰のリースも無い」ときだけ通す条件付き UPDATE。
+                # 実行中に収集者が受け取った（in_progress）・完了した対象を、スナップショットの
+                # 古い値で ai_drafted へ巻き戻さない。取り損ねた対象は記録も作らずに飛ばす。
+                skipped = False
+                if status != ExecutionStatus.FAILED:
+                    res = await db.execute(
+                        update(InputTarget)
+                        .where(
+                            InputTarget.id == target.id,
+                            InputTarget.status == InputTargetStatus.PENDING,
+                            free_clause(utcnow()),
+                        )
+                        .values(status=InputTargetStatus.AI_DRAFTED)
+                        .execution_options(synchronize_session=False)
+                    )
+                    skipped = not res.rowcount  # type: ignore[attr-defined]
+                if skipped:
+                    logger.info(
+                        f"バッチ: 受け取り済み/完了のため飛ばしました: "
+                        f"job={job_id} target={target.id}"
+                    )
                 else:
-                    target.status = InputTargetStatus.AI_DRAFTED
-                    if status == ExecutionStatus.PARTIAL:
+                    execution = InputExecution(
+                        questionnaire_id=job.questionnaire_id,
+                        patient_id=target.patient_id,
+                        subject_id=target.subject_id,
+                        executed_by_id=executed_by_id,
+                        batch_job_id=job_id,
+                        prefill_data=prefill_data,
+                        evidence=evidence,
+                        # バッチも本番実行なので実行時 program を固定保存する（版固定を全経路で成立）。
+                        program_snapshot=program_snapshot(plans, model),
+                        status=status,
+                        error_summary=error_summary,
+                    )
+                    db.add(execution)
+                    if status == ExecutionStatus.FAILED:
+                        job.failed += 1
+                    elif status == ExecutionStatus.PARTIAL:
                         job.partial += 1
                     else:
                         job.succeeded += 1

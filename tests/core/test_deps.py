@@ -13,9 +13,10 @@ from kawasemi.core.authz import user_can_access_patient
 from kawasemi.core.config import settings
 from kawasemi.core.deps import get_current_user, get_current_user_optional, require_roles
 from kawasemi.models.case_assignment import CaseAssignment
-from kawasemi.models.input_target import InputTarget
+from kawasemi.models.input_target import InputTargetStatus
 from kawasemi.models.role import Role, RoleType
 from kawasemi.models.user import User, UserRole
+from tests.lease_helpers import lease_patient, make_target
 
 
 def _user_with_roles(*role_names: str) -> User:
@@ -137,7 +138,7 @@ class TestRequireRoles:
 
 
 # =============================================================================
-# authz.user_can_access_patient: admin / InputTarget / CaseAssignment / 拒否
+# authz.user_can_access_patient: admin / 有効なリース / 期限切れ・完了・他者 / 拒否
 # =============================================================================
 
 
@@ -149,38 +150,48 @@ class TestUserCanAccessPatient:
         assert await user_can_access_patient(db_session, admin_user, "ANY-PATIENT") is False
 
     @pytest.mark.asyncio
-    async def test_own_input_target_allowed(self, db_session, collector_user: User) -> None:
+    async def test_own_valid_lease_allowed(self, db_session, collector_user: User) -> None:
         collector_user.active_role = RoleType.COLLECTOR
-        # dataset_id/questionnaire_id は親行を用意せずダミー参照（テストDBは FK 非強制）。
-        db_session.add(
-            InputTarget(
-                dataset_id=1,
-                questionnaire_id=1,
-                patient_id="P-IT",
-                started_by_id=collector_user.id,
-            )
-        )
-        await db_session.commit()
+        await lease_patient(db_session, collector_user.id, "P-IT")
         assert await user_can_access_patient(db_session, collector_user, "P-IT") is True
 
     @pytest.mark.asyncio
-    async def test_own_case_assignment_allowed(self, db_session, collector_user: User) -> None:
+    async def test_expired_lease_denied(self, db_session, collector_user: User) -> None:
+        collector_user.active_role = RoleType.COLLECTOR
+        await lease_patient(db_session, collector_user.id, "P-EXP", minutes=-1)
+        assert await user_can_access_patient(db_session, collector_user, "P-EXP") is False
+
+    @pytest.mark.asyncio
+    async def test_completed_target_denied(self, db_session, collector_user: User) -> None:
+        collector_user.active_role = RoleType.COLLECTOR
+        await lease_patient(
+            db_session, collector_user.id, "P-DONE", status=InputTargetStatus.COMPLETED
+        )
+        assert await user_can_access_patient(db_session, collector_user, "P-DONE") is False
+
+    @pytest.mark.asyncio
+    async def test_started_by_without_lease_denied(self, db_session, collector_user: User) -> None:
+        """旧仕様の「started_by が本人なら可」は認可にならない（期限の無い行は無効）。"""
+        collector_user.active_role = RoleType.COLLECTOR
+        await make_target(db_session, "P-OLD", holder_id=collector_user.id)
+        assert await user_can_access_patient(db_session, collector_user, "P-OLD") is False
+
+    @pytest.mark.asyncio
+    async def test_case_assignment_no_longer_authorizes(
+        self, db_session, collector_user: User
+    ) -> None:
+        """CaseAssignment は認可の根拠ではない（残っているのは表だけ）。"""
         collector_user.active_role = RoleType.COLLECTOR
         db_session.add(
             CaseAssignment(questionnaire_id=1, patient_id="P-CA", assigned_to_id=collector_user.id)
         )
         await db_session.commit()
-        assert await user_can_access_patient(db_session, collector_user, "P-CA") is True
+        assert await user_can_access_patient(db_session, collector_user, "P-CA") is False
 
     @pytest.mark.asyncio
-    async def test_other_users_assignment_denied(self, db_session, collector_user: User) -> None:
+    async def test_other_users_lease_denied(self, db_session, collector_user: User) -> None:
         collector_user.active_role = RoleType.COLLECTOR
-        db_session.add(
-            CaseAssignment(
-                questionnaire_id=1, patient_id="P-OTHER", assigned_to_id=collector_user.id + 999
-            )
-        )
-        await db_session.commit()
+        await lease_patient(db_session, collector_user.id + 999, "P-OTHER")
         assert await user_can_access_patient(db_session, collector_user, "P-OTHER") is False
 
     @pytest.mark.asyncio

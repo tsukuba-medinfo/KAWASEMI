@@ -264,7 +264,7 @@ async def designer_role(db_session: AsyncSession) -> Role:
 
 @pytest.fixture
 async def collector_role(db_session: AsyncSession) -> Role:
-    """収集者ロール（データセット・割り当て・自動収集の実行・手動入力・回答送信）"""
+    """収集者ロール（対象の受け取り・自動収集の実行・手動入力・回答送信）"""
     return await _make_role(db_session, RoleType.COLLECTOR)
 
 

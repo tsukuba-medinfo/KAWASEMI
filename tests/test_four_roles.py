@@ -67,11 +67,7 @@ _NOT_FOR_ADMIN = [
     "/ai-input/metrics/acquisition",
     "/valuesets",  # 様式の内容は設計者
     "/questionnaires/1/edit",
-    "/datasets",  # 収集
-    "/datasets/new",
-    "/datasets/1",
-    "/assignments",
-    "/input-targets",
+    "/input-targets",  # 収集（対象の受け取り）。データセットの登録・閲覧は管理者にも開く
     "/questionnaires/1/responses",  # 検証（回答＝患者データ）
     "/responses/1",
     "/responses/1/edit",
@@ -148,11 +144,17 @@ async def test_admin_still_runs_the_system(admin_client: AsyncClient, csrf_token
 
 
 @pytest.mark.asyncio
-async def test_admin_home_does_not_link_to_patient_data(admin_client: AsyncClient) -> None:
+async def test_admin_registers_the_target_list_but_never_sees_patient_data(
+    admin_client: AsyncClient,
+) -> None:
+    """管理者は対象患者リスト（Dataset = 患者IDの一覧）を登録・閲覧する。患者データは見ない。"""
+    assert (await admin_client.get("/datasets")).status_code == 200
+    assert (await admin_client.get("/datasets/new")).status_code == 200
     resp = await admin_client.get("/")
     assert resp.status_code == 200
     assert "/admin/users" in resp.text
-    assert "/datasets" not in resp.text, "管理者のホームからデータセット（患者データ）へ導線がある"
+    for patient_data in ("/api/patient", "/responses/", "/forms/", "/autofill"):
+        assert patient_data not in resp.text, f"管理者のホームに患者データへの導線: {patient_data}"
 
 
 # --------------------------------------------------------------------------- #
@@ -275,24 +277,21 @@ async def test_designer_cannot_submit_responses(
 
 
 @pytest.mark.asyncio
-async def test_collector_owns_datasets_assignments_and_batch(
+async def test_collector_views_datasets_and_receives_targets_but_does_not_register(
     collector_client: AsyncClient,
 ) -> None:
-    """管理者から収集者へ移したもの: データセット・割り当て（画面が開く）"""
-    for path in (
-        "/datasets",
-        "/datasets/new",
-        "/assignments",
-        "/assignments/new",
-        "/input-targets",
-    ):
+    """収集者: データセットは閲覧のみ（登録は管理者）、入力対象は受け取る。割り当て画面は無い。"""
+    for path in ("/datasets", "/input-targets"):
         assert (await collector_client.get(path)).status_code == 200, path
+    assert (await collector_client.get("/datasets/new")).status_code == 403
+    for path in ("/assignments", "/assignments/new", "/my-cases"):
+        assert (await collector_client.get(path)).status_code == 404, path
     # 設計の確定は持たない
     assert (await collector_client.get("/ai-input/dashboard")).status_code == 403
 
 
 @pytest.mark.asyncio
-async def test_reviewer_views_and_checks_but_does_not_input(
+async def test_reviewer_views_but_does_not_input_or_check(
     reviewer_client: AsyncClient, csrf_token: str
 ) -> None:
     for path in ("/questionnaires?mode=response", "/datasets", "/ai-input/metrics/acquisition"):

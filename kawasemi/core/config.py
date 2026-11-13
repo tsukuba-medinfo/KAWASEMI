@@ -20,6 +20,12 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    # 入力対象（InputTarget）の排他リースの長さ（分）。収集者が「次の患者を受け取る」で得た
+    # 担当は、操作のたびにこの長さへ延長され、無操作でこの時間が過ぎると失効する。
+    claim_lease_minutes: int = Field(
+        default=120, ge=1, description="入力対象の排他リースの長さ（分）"
+    )
+
     # アプリケーション基本設定
     app_name: str = Field(default="KAWASEMI", description="アプリケーション名")
     app_version: str = Field(default="0.1.0", description="アプリケーションバージョン")

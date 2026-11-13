@@ -113,7 +113,7 @@ class TestLockedNav:
             switchable_role_names=lambda: [RoleType.COLLECTOR],
         )
         items = nav_items(user)
-        assert [i["label"] for i in items] == ["データセット管理", "症例割り当て", "入力対象一覧"]
+        assert [i["label"] for i in items] == ["データセット管理", "入力対象一覧"]
         assert all(not i["locked"] for i in items)
 
     def test_multi_role_user_sees_reachable_items_locked(self):

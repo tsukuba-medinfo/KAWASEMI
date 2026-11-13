@@ -439,8 +439,8 @@ def test_date_items_prefill_iso_dates() -> None:
 
 
 async def _typed_questionnaire(db: AsyncSession, collector_id: int) -> int:
-    from kawasemi.models.case_assignment import CaseAssignment
     from kawasemi.models.questionnaire import Questionnaire
+    from tests.lease_helpers import lease_patient
 
     q = Questionnaire(
         fhir_id="q-463",
@@ -464,8 +464,7 @@ async def _typed_questionnaire(db: AsyncSession, collector_id: int) -> int:
                 questionnaire_id=q.id, link_id=lid, item_text=lid, program=sql, status="confirmed"
             )
         )
-    db.add(CaseAssignment(questionnaire_id=q.id, patient_id="PAT-1", assigned_to_id=collector_id))
-    await db.commit()
+    await lease_patient(db, collector_id, "PAT-1", questionnaire_id=q.id)
     return int(q.id)
 
 

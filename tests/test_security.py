@@ -649,7 +649,7 @@ class TestWebRouteAuthorization:
 
     @pytest.mark.asyncio
     async def test_api_patient_idor_blocked_for_unassigned(self, collector_client: AsyncClient):
-        """割り当て/入力対象を持たない collector は任意患者IDで 403（FHIR 到達前に遮断）"""
+        """有効なリースを持たない collector は任意患者IDで 403（FHIR 到達前に遮断）"""
         response = await collector_client.get("/api/patient/DEMO-9009")
         assert response.status_code == 403
         body = response.json()

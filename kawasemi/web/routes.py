@@ -22,8 +22,8 @@ from kawasemi.core.exceptions import (
     QuestionnaireResponseNotFoundException,
     ValueSetNotFoundException,
 )
+from kawasemi.core.lease import extend_lease, valid_lease_clause
 from kawasemi.core.logging_config import get_logger
-from kawasemi.models.case_assignment import AssignmentStatus, CaseAssignment
 from kawasemi.models.input_target import InputTarget, InputTargetStatus
 from kawasemi.models.questionnaire import Questionnaire
 from kawasemi.models.questionnaire_response import (
@@ -130,7 +130,7 @@ async def _user_can_access_response(
 ) -> bool:
     """収集者が対象の回答へアクセスしてよいか判定する。
 
-    「自分の提出（submitted_by_id）」または「担当患者（subject を InputTarget/CaseAssignment と
+    「自分の提出（submitted_by_id）」または「担当患者（subject を InputTarget の有効なリースと
     突合）」の回答に限定し、response_id 総当たりで他収集者担当の回答（プリフィル値＝PHI）を
     閲覧・改ざんできないようにする。管理者の全許可は無い（患者データを見ない）。
     書き込み(update_response)と読み取り(edit_response)で共用する。
@@ -162,12 +162,12 @@ async def index(
         return RedirectResponse(url="/login", status_code=303)
 
     # 役割別ホーム（ハード・スコープ: アクティブ役割でワークスペースへ振り分ける）。
-    #   収集者=担当症例 / 設計者=収集ダッシュボード / 閲覧・検証者=回答管理 / 管理者=メニュー
+    #   収集者=入力対象（次の患者の受け取り） / 設計者=収集ダッシュボード / 閲覧・検証者=回答管理 / 管理者=メニュー
     from kawasemi.models.role import RoleType
 
     active = current_user.active_role
     if active == RoleType.COLLECTOR:
-        return RedirectResponse(url="/my-cases", status_code=303)
+        return RedirectResponse(url="/input-targets", status_code=303)
     if active == RoleType.DESIGNER:
         return RedirectResponse(url="/ai-input/dashboard", status_code=303)
     if active == RoleType.REVIEWER:
@@ -1201,7 +1201,6 @@ async def show_form(
     current_user: RequireCollector,
     patient_id: str | None = Query(None, description="FHIRサーバから取得する患者ID"),
     encounter_id: str | None = Query(None, description="FHIRサーバから取得するEncounter ID"),
-    assignment_id: int | None = Query(None, description="症例割り当てID（旧仕様）"),
     input_target_id: int | None = Query(None, description="入力対象ID"),
     db: AsyncSession = Depends(get_db),
 ) -> HTMLResponse:
@@ -1225,14 +1224,15 @@ async def show_form(
 
     # 入力対象から患者情報を取得
     if input_target_id:
-        # 自分がロック/担当している入力対象に限定する（任意の input_target_id を URL に付けて
-        # 他者担当患者を引き出す横取りを防ぐ）。管理者の全件許可は無い
+        # 自分が**有効なリース**を持つ入力対象に限定する（任意の input_target_id を URL に付けて
+        # 他者担当患者を引き出す横取りを防ぐ。期限切れ・完了済みは対象外）。管理者の全件許可は無い
         it_stmt = select(InputTarget).where(
-            InputTarget.id == input_target_id, InputTarget.started_by_id == current_user.id
+            InputTarget.id == input_target_id, valid_lease_clause(current_user.id)
         )
         it_result = await db.execute(it_stmt)
         input_target = it_result.scalar_one_or_none()
         if input_target:
+            await extend_lease(db, input_target, current_user.id)
             assignment_info = {
                 "id": input_target.id,
                 "patient_id": input_target.patient_id,
@@ -1243,29 +1243,9 @@ async def show_form(
                 patient_id = input_target.patient_id
             prefill_data["subject"] = f"Patient/{input_target.patient_id}"
 
-    # 症例割り当てから患者情報を取得（旧仕様との互換）
-    elif assignment_id:
-        a_result = await db.execute(
-            select(CaseAssignment).where(
-                CaseAssignment.id == assignment_id,
-                CaseAssignment.assigned_to_id == current_user.id,
-            )
-        )
-        assignment = a_result.scalar_one_or_none()
-        if assignment:
-            assignment_info = {
-                "id": assignment.id,
-                "patient_id": assignment.patient_id,
-                "patient_name": assignment.patient_name,
-            }
-            # 割り当てのpatient_idを優先的に使用
-            if not patient_id:
-                patient_id = assignment.patient_id
-            prefill_data["subject"] = f"Patient/{assignment.patient_id}"
-
     if patient_id or encounter_id:
         # IDOR 防止: 直接指定された patient_id は担当患者に限定する。
-        # input_target / assignment 経由で解決された patient_id もこの関門を通す。
+        # input_target 経由で解決された patient_id もこの関門を通す。
         # FHIR へ問い合わせる前に 403 で弾き、担当外患者の PHI が描画されないようにする。
         if patient_id and not await _user_can_access_patient(db, current_user, patient_id):
             raise HTTPException(
@@ -1449,28 +1429,50 @@ async def submit_form(
     # メタデータの抽出
     subject = form_data.get("subject") or None
     author = form_data.get("author") or None
-    assignment_id_str = form_data.get("assignment_id") or None
     input_target_id_str = form_data.get("input_target_id") or None
 
-    # 責任境界: 確定保存は「自分に割り当てられた症例」に限定する。
+    # 責任境界: 確定保存は「自分が有効なリースを持つ入力対象（患者 × この様式）」に限定する。
     # autofill（試行/本番）には患者縛りを課さない代わり、記入責任を負うこの保存経路で
-    # CaseAssignment / InputTarget による患者アクセス制御を効かせる。
+    # 担当の検査を効かせる。患者だけでなく様式も一致させ（担当患者に対して別の様式の回答を
+    # 保存させない）、input_target_id が指定されたら、その対象でなければならない。
     # subject は "Patient/{id}" 形式の FHIR 参照なので裸の patient_id へ正規化する。
-    if subject:
-        subject_str = str(subject)
-        patient_ref = (
-            subject_str.split("/", 1)[1] if subject_str.startswith("Patient/") else subject_str
-        )
-        if not await _user_can_access_patient(db, current_user, patient_ref):
-            raise HTTPException(
-                status_code=403,
-                detail="この患者の回答を保存する権限がありません（割り当てを確認してください）",
+    subject_str = str(subject) if subject else ""
+    patient_ref = (
+        subject_str.split("/", 1)[1] if subject_str.startswith("Patient/") else subject_str
+    )
+    leased: InputTarget | None = None
+    if patient_ref:
+        leased = (
+            (
+                await db.execute(
+                    select(InputTarget).where(
+                        InputTarget.patient_id == patient_ref,
+                        InputTarget.questionnaire_id == questionnaire_id,
+                        valid_lease_clause(current_user.id),
+                    )
+                )
             )
+            .scalars()
+            .first()
+        )
+    wanted_id: int | None = None
+    if input_target_id_str:
+        try:
+            wanted_id = int(str(input_target_id_str))
+        except (ValueError, TypeError):
+            logger.warning(f"入力対象IDが不正です: {input_target_id_str!r}")
+            leased = None
+    if leased is None or (wanted_id is not None and wanted_id != leased.id):
+        raise HTTPException(
+            status_code=403,
+            detail="この患者・この様式の回答を保存する権限がありません"
+            "（「次の患者を受け取る」で受け取った対象のみ保存できます）",
+        )
 
     # 回答データの構築
     answers: dict[str, Any] = {}
     for key, value in form_data.items():
-        if key not in ["subject", "author", "assignment_id", "input_target_id"]:
+        if key not in ["subject", "author", "input_target_id"]:
             # チェックボックスの場合はbooleanに変換
             if value == "on":
                 answers[key] = True
@@ -1508,41 +1510,11 @@ async def submit_form(
 
     db.add(questionnaire_response)
 
-    # 入力対象のステータスを完了に更新
-    # 自分がロックした入力対象のみ完了にできる（他者対象の不正完了を防ぐ）
-    if input_target_id_str:
-        try:
-            it_id = int(str(input_target_id_str))
-        except (ValueError, TypeError):
-            logger.warning(f"入力対象IDが不正です: {input_target_id_str!r}")
-        else:
-            it_stmt = select(InputTarget).where(
-                InputTarget.id == it_id, InputTarget.started_by_id == current_user.id
-            )
-            it_result = await db.execute(it_stmt)
-            input_target = it_result.scalar_one_or_none()
-            if input_target and input_target.status != InputTargetStatus.COMPLETED:
-                input_target.status = InputTargetStatus.COMPLETED
-                input_target.completed_at = datetime.now(UTC)
-                logger.info(f"入力対象を完了しました: id={it_id}")
-
-    # 症例割り当てのステータスを完了に更新（旧仕様との互換）
-    elif assignment_id_str:
-        try:
-            assignment_id = int(str(assignment_id_str))
-        except (ValueError, TypeError):
-            logger.warning(f"症例割り当てIDが不正です: {assignment_id_str!r}")
-        else:
-            a_stmt = select(CaseAssignment).where(
-                CaseAssignment.id == assignment_id,
-                CaseAssignment.assigned_to_id == current_user.id,
-            )
-            a_result = await db.execute(a_stmt)
-            assignment = a_result.scalar_one_or_none()
-            if assignment and assignment.status != AssignmentStatus.COMPLETED:
-                assignment.status = AssignmentStatus.COMPLETED
-                assignment.completed_at = datetime.now(UTC)
-                logger.info(f"症例割り当てを完了しました: id={assignment_id}")
+    # 入力対象を完了にする（上で検査した、自分が有効なリースを持つ対象）
+    if leased.status != InputTargetStatus.COMPLETED:
+        leased.status = InputTargetStatus.COMPLETED
+        leased.completed_at = datetime.now(UTC)
+        logger.info(f"入力対象を完了しました: id={leased.id}")
 
     await db.commit()
     await db.refresh(questionnaire_response)

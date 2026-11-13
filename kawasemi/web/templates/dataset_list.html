@@ -7,9 +7,12 @@
     <div class="page-head">
         <h2>データセット管理</h2>
         <div class="page-head__actions">
+            {% if current_user.active_role == 'admin' %}
             <a href="{{ base_path() }}/datasets/new" class="btn btn--sm btn--primary">新規登録</a>
+            {% endif %}
         </div>
     </div>
+    <p class="help-text">データセットは調査の対象患者リストです。登録・削除は管理者が行い、収集者は「入力対象一覧」で次の患者を受け取ります。</p>
 
     {% if datasets %}
     <div class="table-wrap">
@@ -52,10 +55,12 @@
                     <td>
                         <div class="row-actions">
                             <a href="{{ base_path() }}/datasets/{{ ds.id }}">詳細</a>
+                            {% if current_user.active_role == 'admin' %}
                             <form action="{{ base_path() }}/datasets/{{ ds.id }}/delete" method="post" style="margin: 0;"
                                   onsubmit="return confirm('データセット「{{ ds.name }}」を削除しますか？\n入力対象も全て削除されます。');">
                                 <button type="submit" class="btn btn--sm btn--danger">削除</button>
                             </form>
+                            {% endif %}
                         </div>
                     </td>
                 </tr>
@@ -66,7 +71,9 @@
     {% else %}
     <div class="empty-state">
         <p>データセットがありません。</p>
+        {% if current_user.active_role == 'admin' %}
         <a href="{{ base_path() }}/datasets/new" class="btn btn--sm btn--primary">新規登録する</a>
+        {% endif %}
     </div>
     {% endif %}
 </div>
