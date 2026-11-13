@@ -14,12 +14,14 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+from fastapi import HTTPException
 from sqlalchemy import ColumnElement, and_, case, exists, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, selectinload
 
 from kawasemi.core.config import settings
 from kawasemi.models.input_target import InputTarget, InputTargetStatus
+from kawasemi.models.user import User
 
 # 取り合いに負けたときに別の候補で取り直す回数
 _CLAIM_RETRIES = 5
@@ -234,3 +236,61 @@ async def _converge_to_one_lease(db: AsyncSession, user_id: int, claimed_id: int
             )
         ).scalar_one()
     return keep
+
+
+def patient_ref_of(subject: str | None) -> str:
+    """`Patient/{id}` 形式の FHIR 参照から裸の patient_id を取り出す（それ以外はそのまま）。"""
+    text = str(subject) if subject else ""
+    return text.split("/", 1)[1] if text.startswith("Patient/") else text
+
+
+async def require_leased_target(
+    db: AsyncSession,
+    user: User,
+    questionnaire_id: int,
+    subject: str | None,
+    input_target_id: int | str | None = None,
+) -> InputTarget:
+    """確定保存の責任境界: 自分が有効なリースを持つ入力対象（患者 × この様式）を返す。
+
+    Web の保存（`submit_form`）と REST の作成（`POST /api/v100/questionnaire-responses/`）で
+    同じ検査を使う。患者だけでなく様式も一致させ、`input_target_id` が指定されたら
+    その対象でなければならない。subject が無い・リースが無い・期限切れ・他人のリース・
+    完了済みは、すべて 403。
+    """
+    patient_ref = patient_ref_of(subject)
+    leased: InputTarget | None = None
+    if patient_ref:
+        leased = (
+            (
+                await db.execute(
+                    select(InputTarget).where(
+                        InputTarget.patient_id == patient_ref,
+                        InputTarget.questionnaire_id == questionnaire_id,
+                        valid_lease_clause(user.id),
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+    wanted_id: int | None = None
+    if input_target_id not in (None, ""):
+        try:
+            wanted_id = int(str(input_target_id))
+        except (ValueError, TypeError):
+            leased = None
+    if leased is None or (wanted_id is not None and wanted_id != leased.id):
+        raise HTTPException(
+            status_code=403,
+            detail="この患者・この様式の回答を保存する権限がありません"
+            "（「次の患者を受け取る」で受け取った対象のみ保存できます）",
+        )
+    return leased
+
+
+def mark_completed(target: InputTarget) -> None:
+    """保存が済んだ入力対象を完了にする（完了済みなら何もしない）。"""
+    if target.status != InputTargetStatus.COMPLETED:
+        target.status = InputTargetStatus.COMPLETED
+        target.completed_at = utcnow()
