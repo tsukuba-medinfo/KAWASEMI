@@ -476,14 +476,17 @@ async def test_every_item_gets_its_own_confirm_control(
     q = await _questionnaire(db_session, "q-loc-confirm-control")
     resp = await location_saver.get(f"/ai-input/questionnaires/{q.id}/source-survey/system")
     assert resp.status_code == 200
-    # 問診票の2項目それぞれに、その link_id を渡す確認ボタンがある
-    assert "confirmItem(this, 'lk1')" in resp.text
-    assert "confirmItem(this, 'lk2')" in resp.text
+    # 問診票の2項目それぞれのカード（data-link-id）に確認ボタンがある。link_id は
+    # インライン JS に埋め込まず、クリック時にカードの data-link-id から読む（XSS 対策）。
+    assert resp.text.count('data-item-act="confirm"') == 2
+    assert 'data-link-id="lk1"' in resp.text
+    assert 'data-link-id="lk2"' in resp.text
+    assert "confirmItem(this, '" not in resp.text
     # 確認は**その項目の現在の選択を添えて**送る（`collectItems` が組み立てた形）。
     # 選択を送らないと `candidates` が空になり、サーバ側は draft へ落とす。
     #
     # **この配線は静的 JS 側にある**。ページ本文には
-    # `onclick="confirmItem(...)"` だけが載る。構文エラーは CI の「JS 構文チェック」が
+    # `data-item-act="confirm"` のボタンだけが載る。構文エラーは CI の「JS 構文チェック」が
     # 落とすが、配線が生きているかは文字列でしか見られない。
     static_js = (
         pathlib.Path(__file__).resolve().parents[2]
@@ -495,6 +498,7 @@ async def test_every_item_gets_its_own_confirm_control(
     ).read_text(encoding="utf-8")
     assert "collectItems().find(i => i.link_id === linkId)" in static_js
     assert "system?confirm=true" in static_js
+    assert "dataset.itemAct" in static_js  # クリック配線（カードの data-link-id から読む）
 
 
 # --------------------------------------------------------------------------- #
