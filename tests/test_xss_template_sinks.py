@@ -39,12 +39,11 @@ def _template_files() -> list[Path]:
 # ---------------------------------------------------------------- (1) 共通ヘルパー
 
 
-def test_the_shared_escape_helper_covers_all_five_characters() -> None:
-    """`kwEsc` は & < > " ' を全て実体参照にする（属性値にも安全）。"""
-    src = (_JS / "escape.js").read_text(encoding="utf-8")
-    assert "function kwEsc" in src
-    for ch, ent in (("&", "&amp;"), ("<", "&lt;"), (">", "&gt;"), ('"', "&quot;"), ("'", "&#39;")):
-        assert ent in src, f"{ch!r} を {ent} にしていない"
+def test_the_shared_escape_helper_exists() -> None:
+    """`kwEsc` の定義があること。**振る舞い**（5文字の変換・null・属性を抜けないこと）は
+    jsdom で実際に動かす `tests/js/xss_handlers.test.js` が見る（`test_js_handlers.py`）。
+    ここで文字列の部分一致を見ても、変換の漏れは検出できない。"""
+    assert "function kwEsc" in (_JS / "escape.js").read_text(encoding="utf-8")
 
 
 def test_base_template_loads_the_escape_helper() -> None:
@@ -214,7 +213,8 @@ async def test_plan_and_runbook_pages_embed_data_as_inert_json(
 ) -> None:
     """F5/F6/F24/F26: 手順・プランの画面データは `tojson`（`<` `>` `'` を \\u エスケープ）で入る。
 
-    クライアントで組み立てる HTML 側のエスケープ（`esc()` → `kwEsc`）は静的検査で守る。
+    クライアントで組み立てる HTML 側のエスケープ（`esc()` → `kwEsc`）はここでは見ない。
+    静的検査（`textContent→innerHTML` 型の禁止）と jsdom の振る舞いテストで守る。
     """
     q = await _questionnaire(db_session)
     await db_session.commit()
@@ -222,4 +222,3 @@ async def test_plan_and_runbook_pages_embed_data_as_inert_json(
         resp = await designer_client.get(f"/ai-input/questionnaires/{q.id}/{page}")
         assert resp.status_code == 200, page
         assert "<img src=x onerror=alert(1)>" not in resp.text, page
-        assert "kwEsc(s)" in resp.text, page

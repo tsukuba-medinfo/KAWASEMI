@@ -82,13 +82,17 @@
 {% block extra_js %}
 <script>
 // データセット名は管理者が入力した文字列なので、インライン JS には埋め込まず
-// data 属性から読む。base.html の送信ハンドラは defaultPrevented を尊重する。
+// data 属性から読む。
+// **キャプチャ段階（第3引数 true）で登録する。** base.html の送信ハンドラ（document の
+// バブリング段階）は preventDefault して fetch 送信するため、こちらがバブリングだと
+// 先に fetch が走り、confirm をキャンセルしても削除される。キャプチャなら base より先に
+// 走り、キャンセル時の preventDefault を base が `defaultPrevented` として尊重する。
 document.addEventListener('submit', function (e) {
   const name = e.target.dataset ? e.target.dataset.confirmName : undefined;
   if (name === undefined) return;
   if (!confirm('データセット「' + name + '」を削除しますか？\n入力対象も全て削除されます。')) {
     e.preventDefault();
   }
-});
+}, true);
 </script>
 {% endblock %}
