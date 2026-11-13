@@ -125,7 +125,7 @@ function validateJson() {
         }
     } catch (e) {
         textarea.classList.add('json-error');
-        statusDiv.innerHTML = '<div class="validation-status validation-invalid">無効なJSON形式: ' + e.message + '</div>';
+        statusDiv.innerHTML = '<div class="validation-status validation-invalid">無効なJSON形式: ' + kwEsc(e.message) + '</div>';
         submitBtn.disabled = true;
     }
 }

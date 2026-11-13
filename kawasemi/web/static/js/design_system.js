@@ -114,9 +114,7 @@ function toSaved(c) {
 }
 
 function escapeHtml(str) {
-  return String(str == null ? '' : str)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+  return kwEsc(str);
 }
 
 function renderCard(card) {
@@ -352,6 +350,10 @@ document.getElementById('items')?.addEventListener('input', e => {
 document.getElementById('items')?.addEventListener('click', e => {
   const card = e.target.closest('.item-card');
   if (!card) return;
+  // linkId は設計者が決める文字列。インライン JS に埋め込まず data-link-id から読む。
+  const itemAct = e.target.dataset ? e.target.dataset.itemAct : null;
+  if (itemAct === 'confirm') { confirmItem(e.target, card.dataset.linkId); return; }
+  if (itemAct === 'redraft') { aiDraftItem(e.target, card.dataset.linkId); return; }
   if (e.target.matches('.more-btn')) {
     state[card.dataset.linkId].expanded = e.target.dataset.act === 'expand';
     renderCard(card);

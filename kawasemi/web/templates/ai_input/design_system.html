@@ -55,9 +55,9 @@
           <span class="item-flag"></span>
           {# 確認は**項目単位**。一括保存しか無いと confirmed_at が全項目で
              揃い、1項目あたりの工数が後から復元できない #}
-          <button type="button" class="btn btn--primary btn--sm" data-role="confirm" onclick="confirmItem(this, '{{ field.link_id }}')">この項目を確認</button>
+          <button type="button" class="btn btn--primary btn--sm" data-role="confirm" data-item-act="confirm">この項目を確認</button>
           {% if enable_ai_drafting %}
-          <button type="button" class="btn btn--ai btn--sm" onclick="aiDraftItem(this, '{{ field.link_id }}')">この項目を引き直す</button>
+          <button type="button" class="btn btn--ai btn--sm" data-item-act="redraft">この項目を引き直す</button>
           {% endif %}
         </span>
       </div>
