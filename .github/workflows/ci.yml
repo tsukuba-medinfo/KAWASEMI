@@ -184,3 +184,12 @@ jobs:
         env:
           KAWASEMI_TEST_POSTGRES_URL: postgresql+asyncpg://kawasemi:kawasemi@localhost:5432/kawasemi
         run: uv run pytest tests/ai_input/test_plan_concurrency_postgres.py -v --tb=short -rs
+
+      # セッションの失効（パスワード再設定・ログアウト）と、リフレッシュ・ログインの同時実行。
+      # users 行 → refresh_tokens 行のロック順序と FOR UPDATE の効きは、PostgreSQL でしか
+      # 確かめられない（逆順だと、再設定のあとにリフレッシュトークンが生き残る／デッドロックする）。
+      # このテストも全テーブルを drop して作り直すので、別の pytest 起動で回す。
+      - name: セッション失効の同時実行（PostgreSQL）
+        env:
+          KAWASEMI_TEST_POSTGRES_URL: postgresql+asyncpg://kawasemi:kawasemi@localhost:5432/kawasemi
+        run: uv run pytest tests/test_session_revocation_postgres.py -v --tb=short -rs

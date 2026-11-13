@@ -329,3 +329,11 @@ async def test_oversized_username_is_handled_and_stored_small(
     keys = list(login_throttle._entries)
     assert keys and all(len(k[0]) == 64 and len(k[1]) <= 64 for k in keys)
     assert login_throttle.is_blocked(throttle_key(big, "127.0.0.1"))
+
+
+@pytest.mark.asyncio
+async def test_username_with_a_nul_byte_is_a_plain_failure(client: AsyncClient) -> None:
+    """NUL バイトを含むユーザー名（PostgreSQL の text に入らない）は、500 にならず他の失敗と同じ。"""
+    resp = await _attempt_login(client, "admin\x00test", "x")
+    assert resp.status_code == 200
+    assert _GENERIC in resp.text

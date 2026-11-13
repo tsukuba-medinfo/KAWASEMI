@@ -102,7 +102,15 @@ async def _issue_session_refresh_token(user: User, db: AsyncSession) -> str | No
     読み直し、変わっていれば今発行した分も含めて失効して None を返す。
     """
     version = user.token_version
+    # users 行を**先に**ロックして読み直す（PostgreSQL の FOR UPDATE。SQLite では無視される）。
+    # 再設定・ログアウト（`core/sessions.py`）と同じ順（users → refresh_tokens）なので、
+    # どちらかが先にコミットするまでもう一方は待ち、デッドロックにならない。ロックを取った
+    # 時点で世代が変わっていれば、トークンを発行せずに断る
+    await db.refresh(user, ["token_version", "is_active"], with_for_update=True)
+    if user.token_version != version or not user.is_active:
+        return None
     token = await _issue_refresh_token(user.id, db)
+    # 発行のあとにもう一度確かめる（ロックが効かない SQLite で、発行の最中に再設定が入った場合）
     await db.refresh(user, ["token_version", "is_active"])
     if user.token_version != version or not user.is_active:
         await db.execute(
@@ -170,7 +178,7 @@ async def login(
         return resp
 
     # 失敗時の応答は**常にこの1種類**。ユーザー不在・非アクティブ・ブロック中・パスワード違い
-    # のどれでも同じ文面・同じ処理（bcrypt を1回）にして、応答から有効なユーザー名や
+    # のどれでも同じ文面・ほぼ同じ処理（どれも bcrypt を1回）にして、応答から有効なユーザー名や
     # ブロックの有無が分からないようにする（ユーザー名の列挙・締め出しの確認を防ぐ）。
     failed_msg = "ユーザー名またはパスワードが正しくありません"
 
@@ -178,13 +186,18 @@ async def login(
     throttle_key = make_throttle_key(username, get_remote_address(request))
     blocked = login_throttle.is_blocked(throttle_key)
 
-    # ユーザーを検索（is_active では絞らず取得する）
-    result = await db.execute(
-        select(User)
-        .where(User.username == username)
-        .options(selectinload(User.user_roles).selectinload(UserRole.role))
-    )
-    user = result.scalar_one_or_none()
+    # ユーザーを検索（is_active では絞らず取得する）。NUL バイトを含む名前は PostgreSQL の
+    # text に入らず、クエリが例外（500）になる。実在し得ない名前なので、クエリせず「不在」と
+    # 同じに扱う（応答は他の失敗と同じ）
+    if "\x00" in username:
+        user = None
+    else:
+        result = await db.execute(
+            select(User)
+            .where(User.username == username)
+            .options(selectinload(User.user_roles).selectinload(UserRole.role))
+        )
+        user = result.scalar_one_or_none()
 
     # 旧方式のアカウントロック（locked_until）が残っている行: 期限切れなら自動解除（監査に記録）。
     # 期限内のものは下で「ブロック中」と同じ扱いにする（応答では区別しない）。
