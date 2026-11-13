@@ -76,6 +76,31 @@ kawasemi-indexer eval --gold site/eval/gold.jsonl --index-dir var/resource_index
 
 生成された `var/resource_index/` 一式を KAWASEMI 本体のクエリ側へ授受する。
 
+### 索引診断 WebUI / JSON API（`serve`、要 `webui` extra）
+
+```bash
+kawasemi-indexer serve --index-dir var/resource_index
+#   索引診断 WebUI を起動: http://127.0.0.1:8000/
+#   ブラウザはこの URL を開く（トークンは今回だけ有効）: http://127.0.0.1:8000/#token=...
+```
+
+索引にはDBの構造（表・列・コード辞書・参照ファイルの抜粋）が入っているので、次を必須にしている。
+
+- **Bearer トークン**: `/api/*` は `Authorization: Bearer <token>` を要する。トークンは起動のたびに生成して
+  表示する。固定したいときは `--token-file <ファイル>`（本人だけが読める権限（0600）で、16文字以上）か
+  環境変数 `INDEXER_SERVE_TOKEN` で渡す。ブラウザには `http://127.0.0.1:8000/#token=<トークン>` を
+  開く（`#` 以降はサーバへ送られず、読み込み後に URL から消える）。
+- **Host の許可一覧**: `localhost` / `127.0.0.1` / `[::1]` だけを通す（DNS rebinding の対策。攻撃者の
+  ドメインがループバックを指しても、その名前は Host で弾かれる）。ほかの名前で届けたいときは
+  `--allowed-host <名前>`（繰り返し可）。`--host` に名前や個別の IP を渡したときはそれも通す。
+- **同一オリジンだけ**: `Origin` が Host と違う要求、`Sec-Fetch-Site` が same-origin / none 以外の要求は
+  403。CORS のヘッダは返さない。
+- `/docs`・`/openapi.json` は出さない。
+
+`--host` の既定は `127.0.0.1`。ループバック以外（`0.0.0.0` など）に bind すると警告を出す。TLS は無いので、
+信頼できる経路（SSH のポート転送など）でだけ使う。トークン無しで起動する `--no-auth` は
+ループバックの bind でだけ使える（ローカルの開発用。Host と Origin の検査は残る）。
+
 ### 施設の索引規則（`site/indexer_rules.yaml`）
 
 施設の表名・接続名に依る判断はコードに持たず、`<SITE_DIR>/indexer_rules.yaml`

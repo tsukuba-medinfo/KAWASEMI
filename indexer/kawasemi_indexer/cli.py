@@ -13,7 +13,7 @@
   search          索引の点検（NL → 候補ランキング表示。字面＋embedding ハイブリッド）
   eval            ゴールドセットで検索精度を測る（recall@k / MRR。モード別比較）
   debug           対話的な索引診断コンソール（臨床的コンテキスト → データの場所）
-  serve           索引診断 WebUI/JSON API をローカル起動（debug の Web 版・要 webui extra）
+  serve           索引診断 WebUI/JSON API をローカル起動（debug の Web 版・要 webui extra。Bearer トークン必須）
 
 search は「ビルドした索引の点検」用の最小実装（store＋embedder）。本番 WebUI 側の
 BM25 フォールバックや location 導出（derive）は indexer の責務外なので持たない。
@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import secrets
 import sys
+from pathlib import Path
 
 from kawasemi_indexer import __version__
 from kawasemi_indexer.config import settings
@@ -495,6 +497,30 @@ def cmd_debug(args: argparse.Namespace) -> int:
     return run(session)
 
 
+def _serve_token(token_file: str | None) -> str:
+    """serve の Bearer トークンを決める。優先順位: --token-file → 設定（INDEXER_SERVE_TOKEN）→ 空。
+
+    ファイルは本人しか読めないこと（0600 相当）を要し、そうでなければ拒否する。
+    空を返したときは、呼び出し側が起動のたびに生成する。
+    """
+    if token_file:
+        path = Path(token_file)
+        if not path.is_file():
+            raise ValueError(f"--token-file が読めません: {token_file}")
+        if path.stat().st_mode & 0o077:
+            raise ValueError(
+                f"--token-file は本人以外が読める権限です（chmod 600 してください）: {token_file}"
+            )
+        token = path.read_text(encoding="utf-8").strip()
+        if len(token) < 16:
+            raise ValueError("--token-file のトークンが短すぎます（16文字以上）")
+        return token
+    token = settings.indexer_serve_token.strip()
+    if token and len(token) < 16:
+        raise ValueError("INDEXER_SERVE_TOKEN が短すぎます（16文字以上）")
+    return token
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     """ローカル索引診断 WebUI/JSON API を起動する（embedding 必須）。"""
     from kawasemi_indexer.store import get_store
@@ -512,17 +538,51 @@ def cmd_serve(args: argparse.Namespace) -> int:
     try:
         import uvicorn
 
-        from kawasemi_indexer.webserver import create_app
+        from kawasemi_indexer.webserver import create_app, is_loopback_bind
     except ImportError:
         print(
             "エラー: WebUI 依存が未導入です。次でインストールしてください:\n  uv sync --extra webui"
         )
         return 1
 
-    app = create_app(index_dir=args.index_dir, model=model)
-    print(
-        f"索引診断 WebUI を起動: http://{args.host}:{args.port}/ （Ctrl-C で停止 / API は /docs）"
+    loopback = is_loopback_bind(args.host)
+    if args.no_auth and not loopback:
+        print(
+            "エラー: --no-auth はループバック（127.0.0.1 / ::1 / localhost）への bind でだけ使えます。"
+        )
+        return 1
+    token: str | None = None
+    token_given = False
+    if not args.no_auth:
+        try:
+            token = _serve_token(args.token_file)
+        except ValueError as e:
+            print(f"エラー: {e}")
+            return 1
+        token_given = bool(token)
+        token = token or secrets.token_urlsafe(32)
+    if not loopback:
+        print(
+            f"警告: {args.host} はループバックではありません。ネットワークから届きます。"
+            " Host は localhost 系と --allowed-host で指定した名前だけを通し、"
+            "/api/* は Bearer トークンを要します（TLS は無いので、信頼できる経路でだけ使ってください）。"
+        )
+    app = create_app(
+        index_dir=args.index_dir,
+        model=model,
+        token=token,
+        insecure_no_auth=args.no_auth,
+        allowed_hosts=[*args.allowed_host, args.host],
     )
+    url = f"http://{args.host}:{args.port}/"
+    print(f"索引診断 WebUI を起動: {url} （Ctrl-C で停止）")
+    if args.no_auth:
+        print("  認証なし（--no-auth）。ループバックの bind でのみ有効です。")
+    elif token_given:
+        print("  /api/* は Bearer トークンが必要です（指定されたトークン）。")
+        print(f"  ブラウザは {url}#token=<トークン> を開く。")
+    else:
+        print(f"  ブラウザはこの URL を開く（トークンは今回だけ有効）: {url}#token={token}")
     uvicorn.run(app, host=args.host, port=args.port)
     return 0
 
@@ -731,6 +791,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_serve.add_argument("--index-dir", default=settings.resource_index_dir)
     p_serve.add_argument("--host", default="127.0.0.1", help="バインドアドレス（既定ローカル限定）")
     p_serve.add_argument("--port", type=int, default=8000)
+    p_serve.add_argument(
+        "--allowed-host",
+        action="append",
+        default=[],
+        help="Host ヘッダとして足して許す名前（繰り返し可）。localhost 系と bind アドレスは常に許す",
+    )
+    p_serve.add_argument(
+        "--token-file",
+        default=None,
+        help="Bearer トークンを書いたファイル（0600）。無指定なら INDEXER_SERVE_TOKEN、"
+        "それも無ければ起動のたびに生成して表示する",
+    )
+    p_serve.add_argument(
+        "--no-auth",
+        action="store_true",
+        help="トークン認証を外す（ループバック bind のときだけ許す。ローカルの開発用）",
+    )
     p_serve.add_argument("--model", default=None, help="embedding モデル名（無指定で設定値）")
     p_serve.set_defaults(func=cmd_serve)
 
