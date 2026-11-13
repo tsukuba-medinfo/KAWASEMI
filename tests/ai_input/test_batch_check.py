@@ -472,3 +472,75 @@ async def test_check_flag_sets_needs_attention(
         assert refreshed.status == InputTargetStatus.AI_DRAFTED
         assert refreshed.started_by_id is None
         assert refreshed.lease_expires_at is None
+
+
+@pytest.mark.asyncio
+async def test_run_batch_job_does_not_revert_targets_claimed_or_completed_meanwhile(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """実行中に収集者が受け取った/完了した対象を、バッチが ai_drafted へ巻き戻さない。
+
+    飛ばした対象には実行記録を作らず、成功件数にも数えない（processed には数える）。
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import update
+
+    class _Racing(_FakeInterpreter):
+        async def execute(self, plans, patient_id, db, *a, **kw):
+            result = await super().execute(plans, patient_id, db, *a, **kw)
+            async with TestSessionLocal() as other:
+                if patient_id == "p-002":  # 処理中に収集者が受け取った
+                    values = {
+                        "status": InputTargetStatus.IN_PROGRESS,
+                        "started_by_id": 7,
+                        "lease_expires_at": datetime.now(UTC) + timedelta(minutes=30),
+                    }
+                elif patient_id == "p-003":  # 処理中に完了された
+                    values = {"status": InputTargetStatus.COMPLETED}
+                else:
+                    return result
+                await other.execute(
+                    update(InputTarget).where(InputTarget.patient_id == patient_id).values(**values)
+                )
+                await other.commit()
+            return result
+
+    monkeypatch.setattr(batch_mod, "DSLInterpreter", _Racing)
+    monkeypatch.setattr(batch_mod, "AsyncSessionLocal", TestSessionLocal)
+    q = await _make_questionnaire(db_session)
+    await _add_confirmed_plans(db_session, q.id)
+    ds = await _make_dataset_with_targets(db_session, q.id, ["p-001", "p-002", "p-003"])
+    job = BatchJob(dataset_id=ds.id, questionnaire_id=q.id, status=BatchJobStatus.RUNNING, total=3)
+    db_session.add(job)
+    await db_session.commit()
+    job_id = job.id
+
+    await batch_mod.run_batch_job(job_id)
+
+    async with TestSessionLocal() as verify:
+        rows = (
+            (await verify.execute(select(InputTarget).where(InputTarget.dataset_id == ds.id)))
+            .scalars()
+            .all()
+        )
+        by = {t.patient_id: t for t in rows}
+        assert by["p-001"].status == InputTargetStatus.AI_DRAFTED
+        assert by["p-002"].status == InputTargetStatus.IN_PROGRESS
+        assert by["p-002"].started_by_id == 7
+        assert by["p-003"].status == InputTargetStatus.COMPLETED
+        execs = (
+            (
+                await verify.execute(
+                    select(InputExecution).where(InputExecution.batch_job_id == job_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert [e.patient_id for e in execs] == ["p-001"]
+        refreshed = (
+            await verify.execute(select(BatchJob).where(BatchJob.id == job_id))
+        ).scalar_one()
+        assert refreshed.status == BatchJobStatus.COMPLETED
+        assert refreshed.processed == 3 and refreshed.succeeded == 1
