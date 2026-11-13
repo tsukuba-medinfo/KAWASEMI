@@ -109,6 +109,7 @@ KAWASEMI/
 │   │   ├── database.py     # SQLAlchemy 非同期エンジン・セッション
 │   │   ├── deps.py         # FastAPI 依存性注入（認証・DB セッション）
 │   │   ├── exceptions.py   # カスタム例外クラス
+│   │   ├── lease.py        # 入力対象の先着自動割り当てと排他リース
 │   │   └── logging_config.py  # JSON / テキストログ設定
 │   ├── models/             # SQLAlchemy ORM モデル
 │   │   ├── base.py                 # DeclarativeBase・TimestampMixin
@@ -117,7 +118,7 @@ KAWASEMI/
 │   │   ├── validation_log.py       # バリデーション結果ログ
 │   │   ├── user.py                 # ユーザー・ユーザーロール
 │   │   ├── role.py                 # ロール定義
-│   │   ├── case_assignment.py      # 症例割り当て
+│   │   ├── case_assignment.py      # 症例割り当て（旧機能。認可には使わない）
 │   │   ├── subject.py              # 被験者（Subject＝Hub）
 │   │   ├── dataset.py              # データセット
 │   │   ├── input_target.py         # 入力対象
@@ -132,7 +133,6 @@ KAWASEMI/
 │   ├── web/
 │   │   ├── routes.py               # Web UI ルーター（Questionnaire・フォーム）
 │   │   ├── admin_routes.py         # 管理者ルーター（ユーザー管理）
-│   │   ├── assignment_routes.py    # 症例割り当てルーター
 │   │   ├── auth_routes.py          # 認証ルーター（ログイン・ログアウト）
 │   │   ├── dataset_routes.py       # データセット・入力対象ルーター
 │   │   ├── form_generator.py       # Questionnaire → HTML フォーム変換エンジン
@@ -442,6 +442,7 @@ AI 機能フラグと Ollama 呼び出しの設定です。正本は `kawasemi/c
 |---|---|---|
 | `ENABLE_AI_DRAFTING` | `false` | 候補探索AI（設計時）: データ所在AI案・手順書生成・取得プラン作成など、人間レビュー前提の設計ドラフト生成を有効化 |
 | `ENABLE_AI_EXTRACTION` | `false` | 自動構造化AI（実行時）: `llm_extract` / `llm_judge` op による患者データへの LLM 適用を有効化（確認書様式の分岐キー）|
+| `CLAIM_LEASE_MINUTES` | `120` | 収集者が「次の患者を受け取る」で得た担当（排他リース）の長さ（分）。開く・保存・autofill のたびに延長し、無操作でこの時間が過ぎると失効して他の収集者へ回る |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama サーバ URL |
 | `EMBEDDING_BASE_URL` | （空）| embedding（`EMBEDDING_MODEL`）だけを別の Ollama へ向ける URL。空なら `OLLAMA_BASE_URL` を使う。LLM・Vision の接続先は変わらない。**索引を作ったサーバと bge-m3 の digest（`ollama list`）を揃えること**——build_info はモデル名しか照合しないので、digest が違っても検索は止まらず黙って劣化する |
 | `OLLAMA_MODEL` | `qwen3.8:27b` | AI 機能に使用する Ollama モデル名 |

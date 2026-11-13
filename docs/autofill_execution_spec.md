@@ -83,7 +83,7 @@ prefill されない。**意図どおりである**——この様式の Questio
 
 - autofill には患者（症例）スコープの縛りを **課さない**（電子カルテ閲覧権限は関係者共通という前提）。
 - 記入責任と症例スコープは **確定保存**（`POST /forms/{id}/submit`）に置く。submit は `collector` のみで、
-  `_user_can_access_patient` により「自分に割り当てられた症例」に限定する（admin の全許可は無い）。
+  `_user_can_access_patient` により「自分が有効なリース（先着の自動割り当て）を持つ症例」に限定する（admin の全許可は無い）。
 - すなわち「設計の確定で担保される自動処理（autofill）」と「人が記入責任を負う保存（submit）」を分離する。
 
 ## 関連
