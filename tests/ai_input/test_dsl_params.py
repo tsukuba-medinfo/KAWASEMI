@@ -652,8 +652,8 @@ async def test_file_path_param(
 ) -> None:
     """前段 step で得た区分値をパスの一部として差し込める"""
     root = tmp_path / "root"
-    (root / "cardio").mkdir(parents=True)
-    (root / "cardio" / "note.txt").write_text("心機能は正常", encoding="utf-8")
+    (root / "P1" / "cardio").mkdir(parents=True)
+    (root / "P1" / "cardio" / "note.txt").write_text("心機能は正常", encoding="utf-8")
     _use_root(monkeypatch, root)
 
     await db_session.execute(text("CREATE TABLE depts (patient_id TEXT, d TEXT)"))
@@ -672,7 +672,7 @@ async def test_file_path_param(
                 "op": "file_extract",
                 "id": "doc",
                 "connection_id": "fs",
-                "path_pattern": "{{dept}}/note.txt",
+                "path_pattern": "{{patient_id}}/{{dept}}/note.txt",
             },
         ],
         "return": "$doc",
@@ -709,7 +709,7 @@ async def test_file_path_param_traversal_blocked(
                 "op": "file_extract",
                 "id": "doc",
                 "connection_id": "fs",
-                "path_pattern": "{{dept}}",
+                "path_pattern": "{{patient_id}}/{{dept}}",
             },
         ],
         "return": "$doc",
@@ -741,7 +741,7 @@ async def test_file_path_root_containment_kept(
                 "op": "file_extract",
                 "id": "doc",
                 "connection_id": "fs",
-                "path_pattern": "../secret.txt",
+                "path_pattern": "{{patient_id}}/../secret.txt",
             }
         ],
         "return": "$doc",

@@ -164,7 +164,48 @@ READONLY_DATABASE_URL=postgresql+asyncpg://kawasemi_ro:...@postgres:5432/kawasem
   設定してください。この経路では、実行のたびにアプリの接続プールから**2本目の接続**を
   借ります（リクエストのセッションが持つ1本とは別）。プールの大きさを見積もるときに数えてください。
 - どちらの場合も、未設定であることを起動時のログと `kawasemi check_schema` が警告します。
-- SQLite では `PRAGMA query_only` で閉じるので、この設定は不要です（設定しても使いません）。
+- SQLite では `PRAGMA query_only`（書き込み）と接続の authorizer（アプリ自身の表の読み取り）で
+  閉じるので、この設定は不要です（設定しても使いません）。authorizer は `users` などアプリ自身の表
+  （`Base.metadata` の全表）と SQLite のスキーマ表を読む文を、DB が準備の時点で拒否します。
+  SQLite で `sql_extract` が読めるのは、アプリの表ではない臨床データの表だけです。
+- PostgreSQL では上のロールの権限が境界ですが、`sql_extract` は実行の前に `EXPLAIN (VERBOSE, FORMAT JSON)` で
+  **計画に出る実表**を調べ、アプリ自身の表・`pg_catalog`・`information_schema` を読む文を
+  実行しません（ビューは基表まで展開されます）。`pg_stat_activity`・`pg_settings`・`pg_locks` のような
+  カタログの関数で作るビューや、`pg_get_viewdef(...)`・`pg_relation_size(...)` のような `pg_*` 関数の呼び出しも、
+  計画の関数ノード（名前が `pg_` で始まるもの）と出力式で見つけて実行しません。`generate_series`・`unnest`・
+  `jsonb_array_elements` のような組み込みの集合を返す関数は拒否しません。計画の文字列の走査はリテラルの中身も
+  見るので、`'pg_x('` を含む定数は誤って拒否します（安全側）。これは追加の層で、ロールの権限の代わりではありません。
+  **名前が `pg_` で始まらないカタログ関数は拒否しません**: `current_setting`・`version()`・`has_table_privilege`・`to_regclass`・`set_config`・`inet_server_addr`・`txid_current` のような、名前が `pg_` で始まらないカタログ関数は拒否しません（設定の開示などは防げません。境界はロールの権限です）。
+  **表を読む関数**（`query_to_xml`・`table_to_xml`・`database_to_xml` は `pg_catalog` の組み込み関数で、
+  ユーザー定義ではありません。`dblink` は拡張です）は計画に実表として出ないので、この検査では捕まえません。
+  これらは SELECT 限定の検査の禁止語の一覧（補助の層）に頼ります。拒否は**名前**で決まります: `users`・`roles`・`datasets`・`subjects` など
+  アプリの表と同じ名前の表は、どのスキーマにあっても読めません（臨床データの表にそれらの名前を付けないでください）。そちらは SELECT 限定の検査の禁止語の一覧
+  （補助の層）と、上のロールの権限（境界）に頼ります。PostgreSQL・SQLite 以外の DB は表を検査
+  できないので、プログラム SQL を実行しません。
+- **SQL の患者の範囲は、アプリでは保証していません（F7 の SQL 部分は閉じていません）。**
+  `sql_extract` と `external_db_extract` の SQL は、`:patient_id` で絞る形を要求しません。
+  設計者が保存した SQL が `WHERE` を省けば、認可を通った1人の実行でも、読める表の全患者の行を
+  返します。SQL の構造を読んで絞り込みを保証する方法は、結合・導出表・定数の作り方でいくつも
+  すり抜けられるため採っていません。SQL の境界は DB 側にあります。
+  - (a) **読める表を絞る**（上の F8/F9）。アプリ自身の表（認証・回答・実行記録）は読めません。
+    臨床データの表は、読める範囲を `READONLY_DATABASE_URL` のロールの `GRANT` で必要な表だけにしてください
+  - (b) **行レベルセキュリティ**（PostgreSQL の RLS を、トランザクションごとの患者設定
+    〔`set_config('app.patient_id', ..., true)` など〕で絞る）が、今後の対応です。実装するまでは、
+    設計者ロールに実患者データの実行権限を持たせない運用（試行は `TRIAL_RUN_PATIENT_IDS` の患者だけ）で補ってください
+- **ファイルと FHIR の患者の範囲は、アプリが確かめます。** 次の形でなければ実行しません（`path_not_permitted`）。
+  - ファイル: `path_pattern` のパス区間の1つが `{{patient_id}}`（`{{patient_id}}.txt` は可、
+    `{{a}}{{patient_id}}` は不可）
+  - FHIR: `patient=` / `subject=`（小文字のとおり）の値が `{{patient_id}}`、または `/Patient/{{patient_id}}`
+    で始まるパス。符号化した `.` `/`（`%2e` など）、`..` の区間、`_include` / `_revinclude` /
+    `_has` / `_filter` / `_query` を含むクエリ、`#`・空白・制御文字（`#` 以降は HTTP クライアントが送らず、
+    絞りの無い要求になる）、パスの `%`、検索パラメータ名の `%` や空白（符号化・
+    前後の空白で別の名前にする形）を含むクエリは実行しません
+  - 患者キーに使えるのは組み込みの `{{patient_id}}` だけです（前段 step の出力から決まる
+    パラメータは患者キーの代わりになりません）。`csv_extract` は従来どおり、実行時に key_column の等値を強制します
+  - パラメータの値の中の `;` や `%` は拒否しません（サーバーはパラメータの区切りとして扱いません）
+  - プランに書かれた `unit_id` は、どの op でも免除の根拠にしません
+  - **挙動の変更:** 患者キーを使わないパス・FHIR クエリ（全患者共通のファイル、`patient=` の無い検索など）は
+    実行されなくなります
 
 ### 外部DBの接続アカウント（connections.yaml）
 

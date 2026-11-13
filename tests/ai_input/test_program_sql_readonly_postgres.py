@@ -35,7 +35,11 @@ from kawasemi.ai_input.executor import DSLInterpreter
 from kawasemi.ai_input.models import InputPlan
 from kawasemi.core import readonly_db
 from kawasemi.core.config import settings
-from kawasemi.core.readonly_db import readonly_program_sql
+from kawasemi.core.readonly_db import (
+    ProgramSqlDeniedError,
+    assert_relations_permitted,
+    readonly_program_sql,
+)
 
 PG_URL = os.environ.get("KAWASEMI_TEST_POSTGRES_URL", "")
 
@@ -499,3 +503,86 @@ async def test_a_keyword_right_after_a_dollar_quote_is_not_hidden(
     assert "q" not in prefill, prefill
     assert evidence["q"]["trace"] == []
     assert "SELECT" in evidence["q"]["error"], evidence
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT relname FROM pg_catalog.pg_class",
+        "SELECT table_name FROM information_schema.tables",
+        "SELECT usename FROM pg_user",  # ビュー。計画では基表（pg_shadow / pg_authid）まで展開される
+        # 関数で作るビュー。結合の省略で `Relation Name` が消え、`Function Scan` だけが残る
+        "SELECT query FROM pg_stat_activity",
+        "SELECT name, setting FROM pg_settings",
+        "SELECT pid FROM pg_locks",
+        "SELECT line_number FROM pg_hba_file_rules",
+        "SELECT name FROM pg_file_settings",
+        # 出力式のカタログ関数
+        "SELECT pg_get_viewdef('pg_user'::regclass)",
+        "SELECT pg_relation_size('pg_class')",
+        "SELECT name FROM pg_timezone_names",
+        "SELECT pg_read_file('/etc/hostname')",
+        "SELECT ssl FROM pg_stat_ssl",
+        "SELECT * FROM pg_ls_dir('.')",
+    ],
+    ids=[
+        "pg_catalog",
+        "information_schema",
+        "view_over_catalog",
+        "pg_stat_activity",
+        "pg_settings",
+        "pg_locks",
+        "pg_hba_file_rules",
+        "pg_file_settings",
+        "viewdef",
+        "relation_size",
+        "pg_timezone_names",
+        "pg_read_file",
+        "pg_stat_ssl",
+        "pg_ls_dir",
+    ],
+)
+async def test_the_plan_check_refuses_catalog_relations(
+    app_session: AsyncSession, sql: str
+) -> None:
+    """F9: 実表を計画から調べる。読み取り専用トランザクションが止めない読み取りを塞ぐ。"""
+    async with readonly_program_sql(app_session) as reader:
+        with pytest.raises(ProgramSqlDeniedError):
+            await assert_relations_permitted(reader, sql)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT x FROM generate_series(1, 3) AS x",
+        "SELECT unnest(ARRAY[1, 2])",
+        "SELECT jsonb_array_elements('[1, 2]'::jsonb)",
+        "SELECT regexp_split_to_table('a b', ' ')",
+        "SELECT * FROM ts_stat('SELECT to_tsvector(''a b'')')",
+    ],
+    ids=["generate_series", "unnest", "jsonb_array_elements", "regexp_split_to_table", "ts_stat"],
+)
+async def test_the_plan_check_permits_builtin_set_returning_functions(
+    app_session: AsyncSession, sql: str
+) -> None:
+    """`pg_catalog` の組み込みの集合を返す関数は、正当な SQL が使うので拒否しない。"""
+    async with readonly_program_sql(app_session) as reader:
+        await assert_relations_permitted(reader, sql)
+
+
+@pytest.mark.asyncio
+async def test_the_plan_check_permits_clinical_tables_and_limits_allowed_ones(
+    app_session: AsyncSession,
+) -> None:
+    sql = f"SELECT v FROM {TABLE} WHERE patient_id = :patient_id"
+    async with readonly_program_sql(app_session) as reader:
+        await assert_relations_permitted(reader, sql, {"patient_id": "P1"})
+        await assert_relations_permitted(
+            reader, sql, {"patient_id": "P1"}, allowed_tables=[f"public.{TABLE}"]
+        )
+        with pytest.raises(ProgramSqlDeniedError):
+            await assert_relations_permitted(
+                reader, sql, {"patient_id": "P1"}, allowed_tables=["other_table"]
+            )

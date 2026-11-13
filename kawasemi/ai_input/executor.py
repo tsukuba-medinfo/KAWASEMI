@@ -25,6 +25,7 @@ from typing import Any
 
 import ollama
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 
 from kawasemi.ai_input.db_retry import RetriesExhausted, with_retry
@@ -41,6 +42,7 @@ from kawasemi.ai_input.dsl import (
     safe_arith,
     validate_program,
 )
+from kawasemi.ai_input.fetch_scope import fhir_query_scopes_patient, path_scopes_patient
 from kawasemi.ai_input.key_resolver import (
     FhirIdentifierResolver,
     ResolveContext,
@@ -55,7 +57,13 @@ from kawasemi.ai_input.resource_index.connections import get_registry
 from kawasemi.core.config import settings
 from kawasemi.core.exceptions import FHIRServerException
 from kawasemi.core.logging_config import get_logger
-from kawasemi.core.readonly_db import ReadOnlySessionUnavailableError, readonly_program_sql
+from kawasemi.core.readonly_db import (
+    ProgramSqlDeniedError,
+    ReadOnlySessionUnavailableError,
+    assert_relations_permitted,
+    is_authorizer_denial,
+    readonly_program_sql,
+)
 from kawasemi.utils.fhir_client import FHIRClient
 
 logger = get_logger(__name__)
@@ -795,6 +803,40 @@ def apply_transform(value: Any, rule: dict[str, Any] | None) -> Any:
     return value
 
 
+# ---------------------------------------------------------------------------
+# 取得 step の患者の範囲（F7 のうち、SQL を解釈せずに確かめられる部分）
+# ---------------------------------------------------------------------------
+#
+# 認可（`user_can_access_patient` / `trial_run_patient_ids`）が確かめるのは、要求に書かれた
+# **1人の患者**だけである。step が実際に何を読むかは、設計者が保存したプログラムが決める。
+#
+# - `file_extract`: `path_pattern` のパス区間の1つが `{{patient_id}}`
+# - `fhir_extract`: `patient=` / `subject=` の値が `{{patient_id}}`、または `/Patient/{{patient_id}}`
+# - `csv_extract`: 実行時に key_column の等値を強制する（既存）
+#
+# **SQL（`sql_extract` / `external_db_extract`）は、アプリでは患者に絞らない。** SQL の構造を
+# 読んで絞り込みを保証する方法は、結合・導出表・定数の作り方でいくつもすり抜けられ、
+# 検査を重ねても閉じ切れなかったので採らない。SQL の境界は DB 側で、読める表の制限
+# （`kawasemi.core.readonly_db`。F8/F9）と、行レベルセキュリティ（PostgreSQL の RLS を
+# トランザクションごとの患者設定で絞る。今後の対応）に置く（docs/DEPLOYMENT.md）。
+# プランに書かれた `unit_id` は、どの op でも免除の根拠にしない。
+
+
+def _scope_refusal(base: dict[str, Any], what: str) -> tuple[None, dict[str, Any]]:
+    message = (
+        f"{what}が患者で絞られていないため実行しません。"
+        "認可を通った1人の患者に取得を限れないためです"
+        "（パスは `{{patient_id}}` の区間、FHIR は `patient={{patient_id}}` が要ります）"
+    )
+    logger.warning(f"患者の範囲の検査で step を拒否: {message}")
+    return None, {
+        **base,
+        "output": None,
+        "error": message,
+        "failure_code": FailureCode.PATH_NOT_PERMITTED,
+    }
+
+
 class DSLInterpreter:
     """ステップ4: InputPlan.program を実行してフォームを補完する安全インタプリタ"""
 
@@ -1514,10 +1556,14 @@ class DSLInterpreter:
         # **読み取り専用の関門を通す**。文字列検査（`is_select_only_sql`）は
         # 多層防御の1枚で、保証の根拠はこちら側にある。SQLite 以外では `db` ではなく
         # 読み取り専用トランザクションの別接続が貸し出される（`kawasemi.core.readonly_db`）。
+        # 関門は読める表も絞る（アプリ自身の表は読ませない。F8/F9）。
         try:
             async with readonly_program_sql(db) as reader:
+                await assert_relations_permitted(reader, rendered, binds)
                 result = await reader.execute(text(rendered), binds)
                 rows = result.fetchall()
+        except ProgramSqlDeniedError as e:
+            return self._sql_denied(base, rendered, binds, patient_id, e)
         except ReadOnlySessionUnavailableError as e:
             # フェイルクローズ。**読めないことを失敗として記録する**（黙って読み書きで実行しない）
             logger.error(f"プログラム SQL を実行しませんでした: {_exc_msg(e)}")
@@ -1527,6 +1573,17 @@ class DSLInterpreter:
                 "error": _exc_msg(e),
                 "failure_code": FailureCode.SOURCE_UNAVAILABLE,
             }
+        except DBAPIError as e:
+            if not is_authorizer_denial(e):
+                raise
+            # SQLite の authorizer が、読ませない表を読む文を準備の時点で拒否した
+            return self._sql_denied(
+                base,
+                rendered,
+                binds,
+                patient_id,
+                ProgramSqlDeniedError("このSQLは読むことを許されていない表に触れます"),
+            )
         if step.get("multi"):
             output: Any = [r[0] for r in rows]
         else:
@@ -1543,6 +1600,24 @@ class DSLInterpreter:
             # クエリ自体は成功（表・カラムは実在）だが当該患者の行が無い
             entry["failure_code"] = FailureCode.NOT_FOUND_FOR_PATIENT
         return output, entry
+
+    @staticmethod
+    def _sql_denied(
+        base: dict[str, Any],
+        rendered: str,
+        binds: dict[str, Any],
+        patient_id: str,
+        error: ProgramSqlDeniedError,
+    ) -> tuple[None, dict[str, Any]]:
+        logger.warning(f"プログラム SQL を拒否しました: {_exc_msg(error)}")
+        return None, {
+            **base,
+            "inputs": _sql_inputs(binds, patient_id),
+            "sql": rendered,
+            "output": None,
+            "error": _exc_msg(error),
+            "failure_code": FailureCode.PATH_NOT_PERMITTED,
+        }
 
     async def _op_external_db(
         self,
@@ -1665,7 +1740,11 @@ class DSLInterpreter:
                 "failure_code": FailureCode.UNCLASSIFIED,
             }
 
+        # 患者の範囲（F7）: パスに患者キーが無いと、認可を通った1人以外のファイルを読める
         binder = binder if binder is not None else _EMPTY_BINDER
+        if not path_scopes_patient(pattern):
+            return _scope_refusal(base, "path_pattern")
+
         try:
             # パストラバーサル防止1層目: 差し込む値そのものに区切り文字・
             # 上位参照を許さない（patient_id の ../ や絶対パスをここで弾く）。
@@ -2066,6 +2145,11 @@ class DSLInterpreter:
                 "failure_code": FailureCode.UNCLASSIFIED,
             }
 
+        # 患者の範囲（F7）: クエリに患者キーが無いと、認可を通った1人以外の資源を読める
+        binder = binder if binder is not None else _EMPTY_BINDER
+        if not fhir_query_scopes_patient(template):
+            return _scope_refusal(base, "fhir_query")
+
         # FHIRクエリインジェクション防止: 埋め込む値すべてを FHIR 論理ID／
         # コード形式に制限し URL エンコードしてから埋め込む（&/?/空白等でのクエリ改変・
         # 別リソース列挙を遮断）。patient_id は失敗理由を区別したいので先に検査する。
@@ -2076,7 +2160,6 @@ class DSLInterpreter:
                 "error": "patient_id の形式が不正です",
                 "failure_code": FailureCode.KEY_RESOLUTION_FAILED,
             }
-        binder = binder if binder is not None else _EMPTY_BINDER
         try:
             query_path = binder.render_query(template, context or {}, patient_id)
         except ParamError as e:
