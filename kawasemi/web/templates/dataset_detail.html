@@ -210,8 +210,8 @@
         done.className = 'run-status ' + cls;
         done.style.display = 'block';
         done.innerHTML =
-          headline + '：成功 ' + j.succeeded + ' / 一部 ' + j.partial + ' / 失敗 ' + j.failed +
-          ' 　<a class="btn btn--sm btn--secondary" href="' + window.location.href + '">結果を表示</a>';
+          kwEsc(headline) + '：成功 ' + kwEsc(j.succeeded) + ' / 一部 ' + kwEsc(j.partial) + ' / 失敗 ' + kwEsc(j.failed) +
+          ' 　<a class="btn btn--sm btn--secondary" href="' + kwEsc(window.location.href) + '">結果を表示</a>';
       }
       // 件数・チェック導線を反映するため、完了を見せたうえで自動更新する
       setTimeout(() => window.location.reload(), 2500);
@@ -228,8 +228,8 @@
         if (text && !j.finished) {
           text.innerHTML =
             '<span class="spinner spinner--sm"></span>' +
-            `${j.status_label}: ${j.processed}/${total} ` +
-            `(成功 ${j.succeeded} / 一部 ${j.partial} / 失敗 ${j.failed})`;
+            `${kwEsc(j.status_label)}: ${kwEsc(j.processed)}/${kwEsc(total)} ` +
+            `(成功 ${kwEsc(j.succeeded)} / 一部 ${kwEsc(j.partial)} / 失敗 ${kwEsc(j.failed)})`;
         }
         if (j.finished) finish(j);
       } catch (e) { /* 一時的な失敗は無視して次回ポーリング */ }

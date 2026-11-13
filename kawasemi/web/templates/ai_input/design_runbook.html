@@ -71,7 +71,9 @@ function canonSteps(steps) {
   ]));
 }
 
-function esc(s) { const d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
+// 共有の kwEsc（& < > " ' を全て実体参照にする）。textContent→innerHTML 方式は引用符を
+// エスケープしないので、属性値（value="…" / title="…"）に入れると属性を抜けられる。
+function esc(s) { return kwEsc(s); }
 function setStatus(msg, ok) { const el = document.getElementById('status'); el.textContent = msg; el.className = ok ? 'ok' : 'err'; }
 
 function renderShell() {

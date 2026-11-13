@@ -63,11 +63,13 @@ let cur = 0;
 ITEMS.forEach(it => { it.saved = canon(programOf(it)); });
 let graphSeq = 0;
 
-if (window.mermaid) mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+if (window.mermaid) mermaid.initialize({ startOnLoad: false, theme: 'neutral', securityLevel: 'strict' });
 
 const META_KEYS = new Set(['op', 'id', 'needs_input', 'reasoning']);
 
-function esc(s) { const d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
+// 共有の kwEsc（& < > " ' を全て実体参照にする）。textContent→innerHTML 方式は引用符を
+// エスケープしないので、属性値（value="…" / title="…"）に入れると属性を抜けられる。
+function esc(s) { return kwEsc(s); }
 function setStatus(msg, ok) { const el = document.getElementById('status'); el.textContent = msg; el.className = ok ? 'ok' : 'err'; }
 
 // キー順と null に依らない比較用の文字列（サーバの正準比較と同じ向き）

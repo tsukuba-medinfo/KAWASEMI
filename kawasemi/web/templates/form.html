@@ -294,16 +294,16 @@ async function lookupPatient() {
     resultDiv.innerHTML = '<p>取得中...</p>';
 
     try {
-        const response = await fetch(`{{ base_path() }}/api/patient/${patientId}`);
+        const response = await fetch(`{{ base_path() }}/api/patient/${encodeURIComponent(patientId)}`);
         const data = await response.json();
 
         if (data.success) {
             const patient = data.data;
             resultDiv.innerHTML = `
                 <div class="info-box patient-info">
-                    <p><strong>氏名:</strong> ${patient.name || '未設定'}</p>
-                    <p><strong>性別:</strong> ${patient.gender_display || '未設定'}</p>
-                    <p><strong>生年月日:</strong> ${patient.birth_date || '未設定'}</p>
+                    <p><strong>氏名:</strong> ${kwEsc(patient.name || '未設定')}</p>
+                    <p><strong>性別:</strong> ${kwEsc(patient.gender_display || '未設定')}</p>
+                    <p><strong>生年月日:</strong> ${kwEsc(patient.birth_date || '未設定')}</p>
                 </div>
             `;
 
@@ -324,7 +324,7 @@ async function lookupPatient() {
             // subjectフィールドを正規化
             subjectInput.value = `Patient/${patientId}`;
         } else {
-            resultDiv.innerHTML = `<p class="error">${data.error}</p>`;
+            resultDiv.innerHTML = `<p class="error">${kwEsc(data.error)}</p>`;
         }
     } catch (error) {
         resultDiv.innerHTML = '<p class="error">患者情報の取得に失敗しました</p>';

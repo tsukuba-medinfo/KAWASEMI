@@ -77,6 +77,7 @@ jobs:
           npm ci
           uv run python scripts/emit_mermaid_fixtures.py "${RUNNER_TEMP}/mermaid"
           node scripts/check_mermaid.js "${RUNNER_TEMP}/mermaid"
+          node tests/js/xss_handlers.test.js
 
   test:
     name: テスト

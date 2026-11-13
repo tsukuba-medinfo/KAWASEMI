@@ -51,7 +51,7 @@
         <label class="field-label{% if field.required %} required{% endif %}" for="field-{{ field.link_id }}">
           {{ field.text or field.link_id }}
           {% if plan %}
-          <span class="ai-badge" onclick="highlightEvidence('{{ field.link_id }}')" title="AI補完対象 - クリックで根拠を表示">AI</span>
+          <span class="ai-badge" data-link-id="{{ field.link_id }}" title="AI補完対象 - クリックで根拠を表示">AI</span>
           {% else %}
           <span class="manual-badge" title="手動入力">手動</span>
           {% endif %}
@@ -109,6 +109,15 @@ const OP_LABELS = {{ op_labels | tojson }};
 let currentEvidence = {};
 let lastExecutionId = null;
 
+// linkId は設計者が決める文字列なので、インライン JS 文字列には埋め込まず
+// data-link-id から読む（HTML のエスケープは JS 文字列の中では効かないため）。
+document.addEventListener('click', (e) => {
+  const badge = e.target.closest('.ai-badge[data-link-id]');
+  if (badge) { highlightEvidence(badge.dataset.linkId); return; }
+  const card = e.target.closest('.evidence-item[data-link-id]');
+  if (card) toggleEvidence(card.dataset.linkId);
+});
+
 async function runAutofill() {
   const patientId = document.getElementById('patient-id-input').value.trim();
   const model = document.getElementById('llm-model-input')?.value?.trim() || null;
@@ -139,7 +148,7 @@ async function runAutofill() {
 
   const reportLinkHtml = (execId) =>
     execId
-      ? ` <a href="{{ base_path() }}/ai-input/questionnaires/${QUESTIONNAIRE_ID}/autofill/executions/${execId}/validation" target="_blank">データ収集手続確認書を開く →</a>`
+      ? ` <a href="{{ base_path() }}/ai-input/questionnaires/${QUESTIONNAIRE_ID}/autofill/executions/${encodeURIComponent(execId)}/validation" target="_blank">データ収集手続確認書を開く →</a>`
       : '';
 
   function handleEvent(ev) {
@@ -147,13 +156,13 @@ async function runAutofill() {
       case 'start':
         total = ev.total;
         statusEl.className = 'status-loading';
-        statusEl.innerHTML = `<span class="spinner"></span>実行開始（全 ${total} 項目）…`;
+        statusEl.innerHTML = `<span class="spinner"></span>実行開始（全 ${escHtml(total)} 項目）…`;
         break;
       case 'item_start':
         statusEl.className = 'status-loading';
         statusEl.innerHTML =
-          `<span class="spinner"></span>${filled} / ${total} 完了 ・ ` +
-          `実行中: <b>${escHtml(ev.item_text || ev.link_id)}</b> (${ev.index + 1}/${ev.total})`;
+          `<span class="spinner"></span>${escHtml(filled)} / ${escHtml(total)} 完了 ・ ` +
+          `実行中: <b>${escHtml(ev.item_text || ev.link_id)}</b> (${escHtml(ev.index + 1)}/${escHtml(ev.total)})`;
         upsertEvidenceCard(ev.link_id, ev.item_text, null, true);
         break;
       case 'item': {
@@ -164,7 +173,7 @@ async function runAutofill() {
         const hasValue = ev.value !== null && ev.value !== undefined && ev.value !== '';
         if (hasValue) { applyOneField(ev.link_id, ev.value); filled++; }
         upsertEvidenceCard(ev.link_id, ev.item_text, ed, false);
-        statusEl.innerHTML = `<span class="spinner"></span>${filled} / ${total} 完了 …`;
+        statusEl.innerHTML = `<span class="spinner"></span>${escHtml(filled)} / ${escHtml(total)} 完了 …`;
         break;
       }
       case 'done': {
@@ -172,13 +181,13 @@ async function runAutofill() {
         const link = reportLinkHtml(ev.execution_id);
         if (ev.status === 'success') {
           statusEl.className = 'status-ok';
-          statusEl.innerHTML = `✓ ${ev.filled}件の項目を自動入力しました (実行ID: ${ev.execution_id}, model: ${ev.model || 'default'})${link}`;
+          statusEl.innerHTML = `✓ ${escHtml(ev.filled)}件の項目を自動入力しました (実行ID: ${escHtml(ev.execution_id)}, model: ${escHtml(ev.model || 'default')})${link}`;
         } else if (ev.status === 'partial') {
           statusEl.className = 'status-partial';
-          statusEl.innerHTML = `⚠ ${ev.filled} / ${ev.total}件を補完（一部取得できない項目があります）(実行ID: ${ev.execution_id}, model: ${ev.model || 'default'})${link}`;
+          statusEl.innerHTML = `⚠ ${escHtml(ev.filled)} / ${escHtml(ev.total)}件を補完（一部取得できない項目があります）(実行ID: ${escHtml(ev.execution_id)}, model: ${escHtml(ev.model || 'default')})${link}`;
         } else {
           statusEl.className = 'status-err';
-          statusEl.innerHTML = `エラーが発生しました (実行ID: ${ev.execution_id})`;
+          statusEl.innerHTML = `エラーが発生しました (実行ID: ${escHtml(ev.execution_id)})`;
         }
         break;
       }
@@ -268,7 +277,7 @@ function upsertEvidenceCard(linkId, itemText, ev, pending) {
     card = document.createElement('div');
     card.className = 'evidence-item';
     card.id = `ev-${linkId}`;
-    card.setAttribute('onclick', `toggleEvidence('${linkId}')`);
+    card.dataset.linkId = linkId;
     container.appendChild(card);
   }
   const title = escHtml(itemText || linkId);
@@ -290,13 +299,13 @@ function upsertEvidenceCard(linkId, itemText, ev, pending) {
     : `<span class="source-local_db" style="font-size:0.75rem;">= ${escHtml(fmt(value))}</span>`;
 
   const traceHtml = trace.map((t, i) => {
-    const opLabel = OP_LABELS[t.op] || t.op;
+    const opLabel = escHtml(OP_LABELS[t.op] || t.op);
     // guard が偽で実行されなかった step は「失敗」ではなく設計どおりの未実行。
     // エラー（⚠）や空の結果と混同されないよう専用表記にする。
     const out = t.skipped
       ? '⏭ 未実行（guard 偽）'
       : (t.error ? `⚠ ${escHtml(t.error)}` : escHtml(fmt(t.output)));
-    const taken = t.taken ? `（${t.taken}）` : '';
+    const taken = t.taken ? `（${escHtml(t.taken)}）` : '';
     const llm = t.llm
       ? `<div class="evidence-row"><span class="evidence-label">LLM (${escHtml(t.llm.model)})</span>
            <code class="evidence-value">${escHtml((t.llm.prompt || '').substring(0, 280))}</code></div>`
@@ -324,7 +333,7 @@ function upsertEvidenceCard(linkId, itemText, ev, pending) {
       <span>${title}</span>
       ${headRight}
     </div>
-    <div class="evidence-body" id="ev-body-${linkId}">
+    <div class="evidence-body" id="ev-body-${escHtml(linkId)}">
       ${ev && ev.error ? `<div class="evidence-row"><span class="evidence-label">エラー</span>
         <code class="evidence-value">${escHtml(ev.error)}</code></div>` : ''}
       ${traceHtml}
@@ -362,13 +371,10 @@ function fmt(v) {
   return String(v);
 }
 
+// null/undefined は「—」表示（共有の kwEsc は空文字にする）。
 function escHtml(str) {
   if (str === null || str === undefined) return '—';
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+  return kwEsc(str);
 }
 </script>
 {% endblock %}

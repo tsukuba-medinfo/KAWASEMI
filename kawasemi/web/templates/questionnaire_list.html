@@ -69,7 +69,7 @@
                             <a href="{{ base_path() }}/questionnaires/{{ q.id }}/edit">編集</a>
                             {% endif %}
                             {% if current_user.active_role == 'admin' %}
-                            <a href="#" class="is-danger" onclick="confirmDelete({{ q.id }}, '{{ q.title | e }}')">削除</a>
+                            <a href="#" class="is-danger" data-delete-id="{{ q.id }}" data-delete-title="{{ q.title }}">削除</a>
                             {% endif %}
                             {% endif %}
                         </div>
@@ -118,6 +118,14 @@ function filterByStatus() {
     const mode = currentUrl.searchParams.get('mode');
     window.location.href = currentUrl.toString();
 }
+
+// タイトルは設計者が決める文字列。インライン JS に埋め込まず data 属性から読む。
+document.addEventListener('click', function(e) {
+    const link = e.target.closest('a[data-delete-id]');
+    if (!link) return;
+    e.preventDefault();
+    confirmDelete(link.dataset.deleteId, link.dataset.deleteTitle);
+});
 
 function confirmDelete(id, title) {
     document.getElementById('deleteMessage').textContent = `「${title || 'タイトルなし'}」を削除してもよろしいですか？`;
