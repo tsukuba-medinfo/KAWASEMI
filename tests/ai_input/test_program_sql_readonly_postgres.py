@@ -521,6 +521,10 @@ async def test_a_keyword_right_after_a_dollar_quote_is_not_hidden(
         # 出力式のカタログ関数
         "SELECT pg_get_viewdef('pg_user'::regclass)",
         "SELECT pg_relation_size('pg_class')",
+        "SELECT name FROM pg_timezone_names",
+        "SELECT pg_read_file('/etc/hostname')",
+        "SELECT ssl FROM pg_stat_ssl",
+        "SELECT * FROM pg_ls_dir('.')",
     ],
     ids=[
         "pg_catalog",
@@ -533,6 +537,10 @@ async def test_a_keyword_right_after_a_dollar_quote_is_not_hidden(
         "pg_file_settings",
         "viewdef",
         "relation_size",
+        "pg_timezone_names",
+        "pg_read_file",
+        "pg_stat_ssl",
+        "pg_ls_dir",
     ],
 )
 async def test_the_plan_check_refuses_catalog_relations(
@@ -542,6 +550,26 @@ async def test_the_plan_check_refuses_catalog_relations(
     async with readonly_program_sql(app_session) as reader:
         with pytest.raises(ProgramSqlDeniedError):
             await assert_relations_permitted(reader, sql)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT x FROM generate_series(1, 3) AS x",
+        "SELECT unnest(ARRAY[1, 2])",
+        "SELECT jsonb_array_elements('[1, 2]'::jsonb)",
+        "SELECT regexp_split_to_table('a b', ' ')",
+        "SELECT * FROM ts_stat('SELECT to_tsvector(''a b'')')",
+    ],
+    ids=["generate_series", "unnest", "jsonb_array_elements", "regexp_split_to_table", "ts_stat"],
+)
+async def test_the_plan_check_permits_builtin_set_returning_functions(
+    app_session: AsyncSession, sql: str
+) -> None:
+    """`pg_catalog` の組み込みの集合を返す関数は、正当な SQL が使うので拒否しない。"""
+    async with readonly_program_sql(app_session) as reader:
+        await assert_relations_permitted(reader, sql)
 
 
 @pytest.mark.asyncio

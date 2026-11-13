@@ -556,7 +556,7 @@ LLM op の入力が使えるかの判定（§8.4）は、これに加えて空�
   別の接続にするのは、同じトランザクションを読み取り専用にすると後続の evidence の保存まで止まるためである。
   PostgreSQL では加えて、トランザクションの先頭で `statement_timeout` を `SET LOCAL` 相当で掛け（`READONLY_STATEMENT_TIMEOUT_SECONDS`、既定 60 秒、0 で無効）、ロールバックの後で `pg_advisory_unlock_all()` を呼ぶ。後始末に失敗した接続はプールへ返さずに破棄する。
   統計プロファイルの自アプリ DB の集計も同じ経路を通る。
-- **読める表**: アプリ自身の表（`Base.metadata` の全表と `alembic_version`）、SQLite のスキーマ表と `pragma_*`、PostgreSQL の `pg_catalog` と `information_schema` は読めない。SQLite は接続の authorizer が文の準備時に、PostgreSQL は `EXPLAIN (VERBOSE, FORMAT JSON)` の計画に出る実表を実行の前に調べる（`pg_catalog` / `information_schema` の関数ノードと `pg_*` 関数の呼び出しも拒否する。ユーザー定義や拡張の関数が表を読む形は計画に出ないので、この検査の対象外で、SELECT 限定の検査の禁止語とロールの権限に頼る。拒否は名前で決まり、アプリの表と同じ名前の表はどのスキーマにあっても読めない）。PostgreSQL と SQLite 以外の方言は表を検査できないので実行しない。拒否は `path_not_permitted`。
+- **読める表**: アプリ自身の表（`Base.metadata` の全表と `alembic_version`）、SQLite のスキーマ表と `pragma_*`、PostgreSQL の `pg_catalog` と `information_schema` は読めない。SQLite は接続の authorizer が文の準備時に、PostgreSQL は `EXPLAIN (VERBOSE, FORMAT JSON)` の計画に出る実表を実行の前に調べる（名前が `pg_` で始まる関数ノードと `pg_*` 関数の呼び出しも拒否する。`generate_series` などの組み込みの集合を返す関数は拒否しない。名前が `pg_` で始まらないカタログ関数（`current_setting`、`version()`、`has_table_privilege`、`to_regclass`、`set_config`、`inet_server_addr`、`txid_current` など）は拒否せず、境界はロールの権限である。表を読む関数（`query_to_xml` / `table_to_xml` / `database_to_xml` は `pg_catalog` の組み込み関数、`dblink` は拡張）は計画に出ないので、この検査の対象外で、SELECT 限定の検査の禁止語に頼る。拒否は名前で決まり、アプリの表と同じ名前の表はどのスキーマにあっても読めない）。PostgreSQL と SQLite 以外の方言は表を検査できないので実行しない。拒否は `path_not_permitted`。
 - **患者の範囲**: SQL は、アプリでは患者に絞らない。`:patient_id` で絞る形を要求せず、設計者が書いた SQL が `WHERE` を省けば、読める表の全患者の行を返しうる。SQL の構造を読んで絞り込みを保証することはしない（すり抜けを閉じ切れない）。境界は DB 側で、上の「読める表」の制限と、行レベルセキュリティ（PostgreSQL の RLS をトランザクションごとの患者設定で絞る。今後の対応）に置く（`docs/DEPLOYMENT.md`）。プランに書かれた `unit_id` は、どの op でも免除の根拠にしない。
 - **バインド**: SQL に現れる `:name` は params か組み込みパラメータで解決する。`:patient_id` は SQL に書かれていなくても常に渡される。
 - **患者キー**: `key_type` が無ければ登録番号（anchor）をそのまま `:patient_id` にバインドする（§7）。
@@ -568,7 +568,7 @@ LLM op の入力が使えるかの判定（§8.4）は、これに加えて空�
 
 FHIR サーバから取得する。
 
-- **患者の範囲**: `fhir_query` の検索パラメータ `patient` / `subject`（名前は大文字小文字のとおり）の値がちょうど `{{patient_id}}`（組み込みのみ。前段 step の出力が値のパラメータは患者キーの代わりにならない）であるか、パスが `/Patient/{{patient_id}}` で始まること。パスの `%`、`..` の区間、検索パラメータ名の `%` や空白、`_include` / `_revinclude` / `_has` / `_filter` / `_query` を含むクエリは満たさない（名前・値の前後の空白は落とさない）。満たさなければ FHIR サーバへ出さず `path_not_permitted` にする。`unit_id` による免除はない。
+- **患者の範囲**: `fhir_query` の検索パラメータ `patient` / `subject`（名前は大文字小文字のとおり）の値がちょうど `{{patient_id}}`（組み込みのみ。前段 step の出力が値のパラメータは患者キーの代わりにならない）であるか、パスが `/Patient/{{patient_id}}` で始まること。`#`、空白、制御文字、パスの `%`、`..` の区間、検索パラメータ名の `%` や空白、`_include` / `_revinclude` / `_has` / `_filter` / `_query` を含むクエリは満たさない（名前・値の前後の空白は落とさない）。満たさなければ FHIR サーバへ出さず `path_not_permitted` にする。`unit_id` による免除はない。
 
 - **意味**: `fhir_query` の `{{name}}` を展開し（§6.3）、FHIR クライアントのベース URL に連結して GET する。応答が Bundle なら各 entry の resource を、そうでなければ応答そのものを1件として扱う。`fhir_path` があれば各 resource に当て、無ければ resource 全体を値とする。`multi` で先頭1件かリストかを選ぶ。
 - **キャッシュ**: 展開後のクエリ文字列が同じなら、1回の実行（1被験者分の全プラン）の中で応答を使い回す。

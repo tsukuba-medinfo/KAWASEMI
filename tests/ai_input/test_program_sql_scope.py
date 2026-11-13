@@ -267,7 +267,11 @@ CATALOG_PLANS = {
     "pg_locks": _function_scan("pg_catalog", "pg_lock_status"),
     "pg_hba_file_rules": _function_scan("pg_catalog", "pg_hba_file_rules"),
     "pg_file_settings": _function_scan("pg_catalog", "pg_show_all_file_settings"),
-    "catalog_schema_function": _function_scan("pg_catalog", "some_function"),
+    "pg_ls_dir": _function_scan("pg_catalog", "pg_ls_dir"),
+    "pg_read_file": [{"Plan": {"Node Type": "Result", "Output": ["pg_read_file('x'::text)"]}}],
+    "pg_stat_ssl": _function_scan("pg_catalog", "pg_stat_get_activity"),
+    "pg_timezone_names": _function_scan("pg_catalog", "pg_timezone_names"),
+    "upper_case_function_name": _function_scan("pg_catalog", "PG_SHOW_ALL_SETTINGS"),
     "viewdef_output": [
         {"Plan": {"Node Type": "Result", "Output": ["pg_get_viewdef('vu'::regclass)"]}}
     ],
@@ -286,6 +290,24 @@ async def test_postgres_plan_with_catalog_functions_is_denied(plan: Any) -> None
     """表の名前が計画に出なくても、カタログの関数ノード・関数呼び出しは拒否する。"""
     with pytest.raises(ProgramSqlDeniedError):
         await assert_relations_permitted(_FakePgReader(plan), "SELECT query FROM pg_stat_activity")
+
+
+BUILTIN_SET_RETURNING = [
+    "generate_series",
+    "unnest",
+    "jsonb_array_elements",
+    "regexp_split_to_table",
+    "ts_stat",
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("function", BUILTIN_SET_RETURNING)
+async def test_builtin_set_returning_functions_are_permitted(function: str) -> None:
+    """`pg_catalog` にある組み込みの集合を返す関数は、正当な SQL が使うので拒否しない。"""
+    plan = _function_scan("pg_catalog", function)
+
+    await assert_relations_permitted(_FakePgReader(plan), f"SELECT 1 FROM {function}(1)")
 
 
 @pytest.mark.asyncio
@@ -383,6 +405,15 @@ def test_path_needs_the_patient_key_as_a_whole_segment(pattern: str, expected: b
         ("/Observation?patient= {{patient_id}}", False),
         ("/Observation?patient={{patient_id}} ", False),
         ("/Observation?patient={{patient_id}}&_Include=x", False),
+        # `#` 以降は送られない（HTTP クライアントが落とす）ので、絞りが消える
+        ("/Observation?code=x#&patient={{patient_id}}", False),
+        ("/Observation#?patient={{patient_id}}", False),
+        ("/Observation?patient={{patient_id}}#", False),
+        ("/Observation?patient={{patient_id}}&code=a b", False),
+        ("/Observation?patient={{patient_id}}&code=a\tb", False),
+        ("/Observation?patient={{patient_id}}&code=a\nb", False),
+        ("/Observation?patient={{patient_id}}\r\nX: y", False),
+        ("/Observation?patient={{patient_id}}&code=a\x00b", False),
         # 値の `%` は普通に使う（符号化したコード体系）
         ("/Observation?code=http%3A%2F%2Floinc.org%7C1234-5&patient={{patient_id}}", True),
     ],

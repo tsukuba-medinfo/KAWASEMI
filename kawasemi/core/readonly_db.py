@@ -235,14 +235,16 @@ def _plan_catalog_references(node: Any) -> list[str]:
     結合の省略で `Function Scan on pg_stat_get_activity` だけが残る）と、出力式に現れる
     関数呼び出しを拾う。関数ノード（`Function Name`）と、計画の文字列値（`Output`・
     `Function Call`・`Filter` など）を見る。
+
+    拒否するのは**名前が `pg_` で始まる関数**（大文字小文字を区別しない）だけで、`pg_catalog` に
+    ある組み込みの集合を返す関数（`generate_series`・`unnest`・`jsonb_array_elements`・
+    `regexp_split_to_table` など）は通す（正当な SQL が使う）。計画の文字列値の走査は
+    リテラルの中身も見るので、`'pg_x('` を含む定数があると誤って拒否する（安全側の誤検知）。
     """
     found: list[str] = []
     if isinstance(node, dict):
-        schema, func = node.get("Schema"), node.get("Function Name")
-        if isinstance(func, str) and (
-            func.lower().startswith("pg_")
-            or (isinstance(schema, str) and schema.lower() in _CATALOG_SCHEMAS)
-        ):
+        func = node.get("Function Name")
+        if isinstance(func, str) and func.lower().startswith("pg_"):
             found.append(func)
         for value in node.values():
             found.extend(_plan_catalog_references(value))
@@ -264,7 +266,7 @@ async def assert_relations_permitted(
     """PostgreSQL: SQL の**計画に出る実表**を実行前に調べ、許されない表なら拒否する。
 
     調べるのは計画の `Relation Name`（ビューは基表まで展開される）と、カタログへの参照
-    （`pg_catalog` / `information_schema` の関数ノード、`pg_*` 関数の呼び出し。`pg_stat_activity`、
+    （名前が `pg_` で始まる関数ノードと `pg_*` 関数の呼び出し。`pg_stat_activity`、
     `pg_settings`、`pg_get_viewdef(...)`、`pg_relation_size(...)` など）である。**ユーザー定義や
     拡張の関数が表を読む形**（`query_to_xml('select ...')`、`dblink` など）は計画に実表として
     現れないので、ここでは捕まえない。そちらは `is_select_only_sql` の禁止語の一覧（補助の層）と、

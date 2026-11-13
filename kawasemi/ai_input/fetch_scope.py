@@ -42,6 +42,7 @@ def fhir_query_scopes_patient(query: str) -> bool:
     - または `/Patient/{{patient_id}}` で始まるパス（`Patient` も大文字小文字のとおり）
 
     次のクエリは絞っていても認めない:
+    - `#`、空白、制御文字（プレースホルダの波括弧の中の空白を除く）
     - パスに `%`（符号化した `.` `/`、二重の符号化）、`.` / `..` の区間
     - 検索パラメータ**名**に、字種（英数字と `_ . : -`）以外が含まれる（`%5Finclude` のような符号化、
       空白）。名前も値も**前後の空白を落とさない**（`patient ={{patient_id}}` は別の名前）
@@ -51,6 +52,12 @@ def fhir_query_scopes_patient(query: str) -> bool:
     パラメータの**値**の `%` は許す（`code=http%3A%2F%2F...` のような符号化は普通に使う）。
     値の中の `&` や `.` はサーバーが符号化を戻しても、パラメータやパスの区切りにはならない。
     """
+    # `#` 以降は、HTTP クライアントが送る前に落とす（`...?code=x#&patient=...` や
+    # `...#?patient=...` は、絞りの文字列が送られず、絞らない要求になる）。空白・制御文字も、
+    # 検査が見た文字列と送られる要求を食い違わせる（`{{ patient_id }}` の波括弧の中の空白は除く）
+    bare = _PLACEHOLDER.sub("", query)
+    if "#" in bare or any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in bare):
+        return False
     path, _, qs = query.partition("?")
     if "%" in path:
         return False
