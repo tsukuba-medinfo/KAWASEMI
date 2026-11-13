@@ -55,6 +55,9 @@ class Settings(BaseSettings):
         default="", description="施設の索引規則（indexer_rules.yaml）。無ければ施設に依らない既定"
     )
 
+    # serve（索引診断 WebUI/JSON API）の Bearer トークン。空なら起動のたびに生成して表示する。
+    indexer_serve_token: str = Field(default="")
+
     # search サブコマンドの足切り閾値（点検用）
     resource_index_min_score: float = Field(default=0.5)
 

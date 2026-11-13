@@ -4,7 +4,11 @@
 webapi.py 経由で呼び、構造化 JSON と単一ページ UI を提供する。
 
 設計:
-- ローカル専用。host=127.0.0.1 既定（PHI を外に出さない）。認証なし・同一オリジンで CORS 不要。
+- ローカル専用。host=127.0.0.1 既定。同一オリジンで CORS は出さない。
+- 認証と Host/Origin の検査を必須にする（DNS rebinding と、ループバック以外への bind への備え）:
+  Host ヘッダは許可一覧（localhost / 127.0.0.1 / [::1] ＋ 明示した名前）だけ、Origin /
+  Sec-Fetch-Site は同一オリジンだけを通し、`/api/*` は Bearer トークンを要する。
+  トークン無しで起動できるのは、ループバックに限って明示した場合（`--no-auth`）だけ。
 - 索引（store）と embedder はアプリ生成時に 1 回だけ構築し全リクエストで共有（遅延ロード済）。
 - フィルタ/top_k/min_score はステートレス（リクエスト毎に webapi 側で短命 Session を組む）。
 - embedding 必須。is_searchable=False なら起動を拒否する（誤検索防止, debug_spec §4）。
@@ -12,8 +16,11 @@ webapi.py 経由で呼び、構造化 JSON と単一ページ UI を提供する
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import hmac
+import ipaddress
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any, TypeVar
+from urllib.parse import urlsplit
 
 from kawasemi_indexer.config import settings
 from kawasemi_indexer.logging_config import get_logger
@@ -44,17 +51,76 @@ T = TypeVar("T")
 
 _OLLAMA_ERROR = "Ollama に接続できません。`ollama serve` が起動しているか確認してください。"
 
+# Host ヘッダとして常に許す名前（ポートは見ない）。これ以外は --allowed-host で明示する。
+LOOPBACK_HOST_NAMES = frozenset({"localhost", "127.0.0.1", "[::1]"})
+
+
+def is_loopback_bind(host: str) -> bool:
+    """bind アドレスがループバックか。名前は localhost だけ認め、それ以外は IP で判定する。"""
+    h = host.strip().lower().strip("[]")
+    if h == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(h).is_loopback
+    except ValueError:
+        return False
+
+
+def _host_name(header: str) -> str:
+    """Host ヘッダからポートを除いた名前を返す（`[::1]:8000` → `[::1]`）。"""
+    h = header.strip().lower()
+    if h.startswith("["):
+        end = h.find("]")
+        return h[: end + 1] if end != -1 else h
+    if h.count(":") == 1:
+        return h.rsplit(":", 1)[0]
+    return h
+
+
+def allowed_host_names(bind_host: str | None, extra: Iterable[str] = ()) -> frozenset[str]:
+    """許す Host 名の集合。bind アドレスが名前や個別の IP のときはそれも許す（0.0.0.0 などは除く）。"""
+    names = set(LOOPBACK_HOST_NAMES)
+    for h in (*extra, *([bind_host] if bind_host else [])):
+        name = h.strip().lower()
+        if not name:
+            continue
+        try:
+            ip = ipaddress.ip_address(name.strip("[]"))
+        except ValueError:
+            names.add(name)
+            continue
+        if not ip.is_unspecified:
+            names.add(f"[{ip}]" if ip.version == 6 else str(ip))
+    return frozenset(names)
+
 
 def create_app(
-    index_dir: str | None = None, model: str | None = None, embedder: Embedder | None = None
+    index_dir: str | None = None,
+    model: str | None = None,
+    embedder: Embedder | None = None,
+    *,
+    token: str | None = None,
+    insecure_no_auth: bool = False,
+    allowed_hosts: Iterable[str] = (),
 ) -> FastAPI:
     """索引診断 FastAPI アプリを構築する。
 
     embedder を渡すとそれを共有利用（テストで HashingEmbedder を注入可能）。
     省略時は設定値で OllamaEmbedder を生成する。
+
+    `/api/*` は `Authorization: Bearer <token>` を要する。`token` が空で `insecure_no_auth` も
+    無いときは起動を拒否する（認証無しは明示したときだけ）。`allowed_hosts` は loopback の名前に
+    足して許す Host 名（bind アドレスが名前や個別の IP のときは呼び出し側がそれも渡す）。
     """
-    from fastapi import FastAPI, HTTPException
-    from fastapi.responses import HTMLResponse
+    from fastapi import FastAPI, HTTPException, Request
+    from fastapi.responses import HTMLResponse, JSONResponse
+
+    if not token and not insecure_no_auth:
+        raise ValueError(
+            "token が必要です（認証無しで起動するなら insecure_no_auth=True を明示する）"
+        )
+    hosts = allowed_host_names(None, allowed_hosts)
+    expected = token.encode() if token else None
 
     store = get_store(index_dir)
     resolved_model = model or settings.embedding_model
@@ -84,7 +150,34 @@ def create_app(
     rewriter = QueryRewriter.load(resolved_dir)
     ref_links = RefLinkIndex.load(resolved_dir)
 
-    app = FastAPI(title="kawasemi-indexer 索引診断", docs_url="/docs", redoc_url=None)
+    # /docs と /openapi.json は出さない（診断 UI は / だけで足りる）。
+    app = FastAPI(
+        title="kawasemi-indexer 索引診断", docs_url=None, redoc_url=None, openapi_url=None
+    )
+
+    @app.middleware("http")
+    async def _guard(request: Request, call_next: Callable[[Request], Any]) -> Any:
+        """Host 許可一覧 → 同一オリジン → Bearer トークン、の順に検査する。"""
+        host = request.headers.get("host", "")
+        if _host_name(host) not in hosts:
+            return JSONResponse({"detail": "許可されていない Host です"}, status_code=400)
+        origin = request.headers.get("origin")
+        if origin is not None and urlsplit(origin).netloc.lower() != host.strip().lower():
+            return JSONResponse({"detail": "別オリジンからの要求は受け付けません"}, status_code=403)
+        if request.headers.get("sec-fetch-site", "same-origin") not in ("same-origin", "none"):
+            return JSONResponse({"detail": "別オリジンからの要求は受け付けません"}, status_code=403)
+        if expected is not None and request.url.path.startswith("/api/"):
+            auth = request.headers.get("authorization", "")
+            scheme, _, given = auth.partition(" ")
+            if scheme.lower() != "bearer" or not hmac.compare_digest(
+                given.strip().encode(), expected
+            ):
+                return JSONResponse(
+                    {"detail": "トークンが必要です"},
+                    status_code=401,
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+        return await call_next(request)
 
     def _embed_guard(fn: Callable[[], T]) -> T:
         """embedding 呼び出し中の例外を 503（Ollama 接続不可）へ変換する。"""
@@ -426,14 +519,29 @@ _INDEX_HTML = r"""<!doctype html>
 const $ = (id) => document.getElementById(id);
 let lastQuery = "";
 
+/* トークンは起動時に表示される URL の `#token=...` で渡る。fragment はサーバへ送られない。
+ * 読んだら URL から消し、再読込に備えて sessionStorage（タブを閉じれば消える）に置く。 */
+let TOKEN = "";
+try {
+  const m = /[#&]token=([^&]+)/.exec(location.hash);
+  if (m) {
+    TOKEN = decodeURIComponent(m[1]);
+    sessionStorage.setItem("kawasemi-indexer-token", TOKEN);
+    history.replaceState(null, "", location.pathname + location.search);
+  } else {
+    TOKEN = sessionStorage.getItem("kawasemi-indexer-token") || "";
+  }
+} catch (e) {}
+const authHeaders = () => (TOKEN ? {"authorization": "Bearer " + TOKEN} : {});
+
 async function jpost(url, body) {
-  const r = await fetch(url, {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify(body)});
+  const r = await fetch(url, {method:"POST", headers:{"content-type":"application/json", ...authHeaders()}, body:JSON.stringify(body)});
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.detail || ("HTTP " + r.status));
   return data;
 }
 async function jget(url) {
-  const r = await fetch(url);
+  const r = await fetch(url, {headers: authHeaders()});
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.detail || ("HTTP " + r.status));
   return data;

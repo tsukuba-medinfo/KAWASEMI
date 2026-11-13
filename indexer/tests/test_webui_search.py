@@ -30,6 +30,7 @@ from kawasemi_indexer.webapi import (
 )
 
 MODEL = "test-hash"
+TOKEN = "test-token-0123456789abcdef"
 
 
 @pytest.fixture
@@ -198,8 +199,10 @@ def client(tmp_path):
     build_db_index(source=FIXTURE_DIR, out_dir=out, embedder=HashingEmbedder())
     reset_store_cache()  # tmp_path 索引を確実にロードさせる
     get_store(str(out))  # キャッシュへ載せる
-    app = create_app(index_dir=str(out), model=MODEL, embedder=HashingEmbedder())
-    with TestClient(app) as c:
+    app = create_app(index_dir=str(out), model=MODEL, embedder=HashingEmbedder(), token=TOKEN)
+    # Host は許可一覧の名前でなければ通らない（既定の testserver は 400）。
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    with TestClient(app, base_url="http://localhost", headers=headers) as c:
         yield c
     reset_store_cache()
 
