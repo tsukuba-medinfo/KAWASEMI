@@ -512,8 +512,28 @@ async def test_a_keyword_right_after_a_dollar_quote_is_not_hidden(
         "SELECT relname FROM pg_catalog.pg_class",
         "SELECT table_name FROM information_schema.tables",
         "SELECT usename FROM pg_user",  # ビュー。計画では基表（pg_shadow / pg_authid）まで展開される
+        # 関数で作るビュー。結合の省略で `Relation Name` が消え、`Function Scan` だけが残る
+        "SELECT query FROM pg_stat_activity",
+        "SELECT name, setting FROM pg_settings",
+        "SELECT pid FROM pg_locks",
+        "SELECT line_number FROM pg_hba_file_rules",
+        "SELECT name FROM pg_file_settings",
+        # 出力式のカタログ関数
+        "SELECT pg_get_viewdef('pg_user'::regclass)",
+        "SELECT pg_relation_size('pg_class')",
     ],
-    ids=["pg_catalog", "information_schema", "view_over_catalog"],
+    ids=[
+        "pg_catalog",
+        "information_schema",
+        "view_over_catalog",
+        "pg_stat_activity",
+        "pg_settings",
+        "pg_locks",
+        "pg_hba_file_rules",
+        "pg_file_settings",
+        "viewdef",
+        "relation_size",
+    ],
 )
 async def test_the_plan_check_refuses_catalog_relations(
     app_session: AsyncSession, sql: str

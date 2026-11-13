@@ -249,6 +249,61 @@ async def test_postgres_plan_touching_application_tables_is_denied(
         await assert_relations_permitted(reader, "SELECT 1 FROM innocent_view")
 
 
+def _function_scan(schema: str, function: str) -> list[dict[str, Any]]:
+    """結合の省略で `Relation Name` が消え、関数ノードだけが残った計画（`pg_stat_activity` など）。"""
+    node = {
+        "Node Type": "Function Scan",
+        "Schema": schema,
+        "Function Name": function,
+        "Function Call": f"{function}(NULL::integer)",
+        "Output": ["query"],
+    }
+    return [{"Plan": node}]
+
+
+CATALOG_PLANS = {
+    "pg_stat_activity": _function_scan("pg_catalog", "pg_stat_get_activity"),
+    "pg_settings": _function_scan("pg_catalog", "pg_show_all_settings"),
+    "pg_locks": _function_scan("pg_catalog", "pg_lock_status"),
+    "pg_hba_file_rules": _function_scan("pg_catalog", "pg_hba_file_rules"),
+    "pg_file_settings": _function_scan("pg_catalog", "pg_show_all_file_settings"),
+    "catalog_schema_function": _function_scan("pg_catalog", "some_function"),
+    "viewdef_output": [
+        {"Plan": {"Node Type": "Result", "Output": ["pg_get_viewdef('vu'::regclass)"]}}
+    ],
+    "relation_size_output": [
+        {"Plan": {"Node Type": "Result", "Output": ["pg_relation_size('users'::regclass)"]}}
+    ],
+    "qualified_function_output": [
+        {"Plan": {"Node Type": "Result", "Output": ["pg_catalog.current_setting('x'::text)"]}}
+    ],
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("plan", CATALOG_PLANS.values(), ids=CATALOG_PLANS.keys())
+async def test_postgres_plan_with_catalog_functions_is_denied(plan: Any) -> None:
+    """表の名前が計画に出なくても、カタログの関数ノード・関数呼び出しは拒否する。"""
+    with pytest.raises(ProgramSqlDeniedError):
+        await assert_relations_permitted(_FakePgReader(plan), "SELECT query FROM pg_stat_activity")
+
+
+@pytest.mark.asyncio
+async def test_postgres_plan_with_ordinary_functions_is_permitted() -> None:
+    """正常系: 集計・日付などの普通の関数は拒否しない。"""
+    plan = [
+        {
+            "Plan": {
+                "Node Type": "Aggregate",
+                "Output": ["count(*)", "max(l.v)", "date_trunc('day'::text, l.t)"],
+                "Plans": [{"Node Type": "Seq Scan", "Schema": "public", "Relation Name": "labs"}],
+            }
+        }
+    ]
+
+    await assert_relations_permitted(_FakePgReader(plan), "SELECT count(*) FROM labs")
+
+
 @pytest.mark.asyncio
 async def test_postgres_allowed_tables_restrict_the_plan() -> None:
     reader = _FakePgReader(_plan_of(("public", "labs")))
@@ -315,6 +370,21 @@ def test_path_needs_the_patient_key_as_a_whole_segment(pattern: str, expected: b
         ("/Observation?patient={{patient_id}}&_include=Observation:subject", False),
         ("/Observation?patient={{patient_id}}&_revinclude=Provenance:target", False),
         ("/Observation?patient={{patient_id}}&_has:Group:member:_id=g", False),
+        # 符号化した検索パラメータ名・二重の符号化（M2）
+        ("/Observation?patient={{patient_id}}&%5Finclude=*", False),
+        ("/Observation?patient={{patient_id}}&_in%63lude=*", False),
+        ("/Observation?patient={{patient_id}}&%5f%68as=1", False),
+        ("/Observation?patient={{patient_id}}&_%68as:Patient:link:x=1", False),
+        ("/Observation?patient={{patient_id}}&%5f_include=x", False),
+        ("/Patient/{{patient_id}}/%252e%252e", False),
+        ("/Observation%2fx?patient={{patient_id}}", False),
+        # 前後の空白は落とさない（別の名前・値）
+        ("/Observation?patient ={{patient_id}}", False),
+        ("/Observation?patient= {{patient_id}}", False),
+        ("/Observation?patient={{patient_id}} ", False),
+        ("/Observation?patient={{patient_id}}&_Include=x", False),
+        # 値の `%` は普通に使う（符号化したコード体系）
+        ("/Observation?code=http%3A%2F%2Floinc.org%7C1234-5&patient={{patient_id}}", True),
     ],
 )
 def test_fhir_query_needs_the_patient_param(query: str, expected: bool) -> None:

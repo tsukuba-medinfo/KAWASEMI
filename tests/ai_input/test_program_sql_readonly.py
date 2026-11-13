@@ -36,18 +36,26 @@ def _plan(link_id: str, program: dict) -> InputPlan:
 
 
 @pytest.mark.asyncio
-async def test_writes_are_refused_inside_the_guard(db_session: AsyncSession) -> None:
+async def test_writes_are_refused_inside_the_guard(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """関門の中では**書き込みが DB 側で拒否される**こと（文字列検査に依存しない証拠）。
 
     `is_select_only_sql` を迂回できたとしても、接続が読み取り専用なら書けない。
     ここでは検査を通さずに直接 INSERT を投げて、**DB が拒否する**ことを見る。
+
+    **authorizer を外して**見る。authorizer が先に拒否すると、`PRAGMA query_only` の
+    効き目（読み取り専用の関門そのもの）を見ていることにならない。
     """
+
+    async def _no_authorizer(db: AsyncSession, callback: Any) -> None:
+        return None
+
+    monkeypatch.setattr(readonly_db, "_set_sqlite_authorizer", _no_authorizer)
     async with readonly_program_sql(db_session):
         with pytest.raises(Exception) as exc:  # noqa: PT011 - 方言ごとに例外型が違う
             await db_session.execute(text("CREATE TABLE evil_117 (x INTEGER)"))
-    # 書き込みは `query_only`（readonly）と authorizer（not authorized）のどちらでも DB 側で止まる
-    message = str(exc.value).lower()
-    assert any(w in message for w in ("readonly", "read-only", "not authorized")), exc.value
+    assert "readonly" in str(exc.value).lower() or "read-only" in str(exc.value).lower(), exc.value
 
 
 @pytest.mark.asyncio
@@ -499,6 +507,41 @@ async def test_sqlite_is_unaffected_by_production(
     async with readonly_program_sql(db_session) as reader:
         assert reader is db_session
         assert (await reader.execute(text("SELECT 1"))).scalar() == 1
+
+
+@pytest.mark.asyncio
+async def test_statistical_profile_checks_the_plan_on_postgres(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """統計プロファイルの PostgreSQL の経路も、計画の表の検査（`assert_relations_permitted`）を通ること。"""
+    import json
+    from types import SimpleNamespace
+
+    import kawasemi.ai_input.statistical_profile as sp
+    from kawasemi.ai_input.models import OpType, SourceCategory
+
+    plan = [{"Plan": {"Node Type": "Seq Scan", "Schema": "public", "Relation Name": "users"}}]
+
+    class _PgReader:
+        dialect = SimpleNamespace(name="postgresql")
+
+        async def execute(self, stmt: Any, params: Any = None) -> Any:
+            return SimpleNamespace(scalar_one=lambda: json.dumps(plan))
+
+    @asynccontextmanager
+    async def _fake_guard(db: AsyncSession) -> AsyncIterator[Any]:
+        yield _PgReader()
+
+    monkeypatch.setattr(sp, "readonly_program_sql", _fake_guard)
+    monkeypatch.setattr(sp, "resolve_db_op", lambda *_a: OpType.SQL_EXTRACT)
+    candidate = {
+        "source_category": SourceCategory.LOCAL_DB,
+        "payload": {"db_qualified": "users", "physical_name": "username"},
+    }
+
+    profile = await sp.generate_statistical_profile(candidate, db_session, min_cell_size=1)
+
+    assert profile["applicable"] is False
 
 
 @pytest.mark.asyncio

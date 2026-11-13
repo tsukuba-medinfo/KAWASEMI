@@ -59,6 +59,7 @@ PostgreSQL では加えて:
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from collections.abc import AsyncIterator, Callable, Iterable
 from contextlib import asynccontextmanager
@@ -99,6 +100,9 @@ class ReadOnlySessionUnavailableError(RuntimeError):
 
 class ProgramSqlDeniedError(RuntimeError):
     """プログラム SQL が、読むことを許されていない表に触れた（ポリシー拒否）。"""
+
+
+_CATALOG_SCHEMAS = {"pg_catalog", "information_schema"}
 
 
 def denied_tables() -> frozenset[str]:
@@ -219,6 +223,37 @@ def _plan_relations(node: Any) -> set[tuple[str | None, str]]:
     return found
 
 
+# カタログの関数の呼び出し（`pg_stat_get_activity(...)`、`pg_get_viewdef(...)`、
+# `pg_relation_size(...)`）。結合の省略で表の読み取りが消えても、計画の関数ノードや出力式に残る
+_CATALOG_CALL = re.compile(r"\bpg_[a-z0-9_]+\s*\(|\b(?:pg_catalog|information_schema)\s*\.", re.I)
+
+
+def _plan_catalog_references(node: Any) -> list[str]:
+    """計画の中の、カタログ（`pg_catalog` / `information_schema` / `pg_*` 関数）への参照。
+
+    `Relation Name` を持たない読み取り（`pg_stat_activity` などの関数で作るビューは、
+    結合の省略で `Function Scan on pg_stat_get_activity` だけが残る）と、出力式に現れる
+    関数呼び出しを拾う。関数ノード（`Function Name`）と、計画の文字列値（`Output`・
+    `Function Call`・`Filter` など）を見る。
+    """
+    found: list[str] = []
+    if isinstance(node, dict):
+        schema, func = node.get("Schema"), node.get("Function Name")
+        if isinstance(func, str) and (
+            func.lower().startswith("pg_")
+            or (isinstance(schema, str) and schema.lower() in _CATALOG_SCHEMAS)
+        ):
+            found.append(func)
+        for value in node.values():
+            found.extend(_plan_catalog_references(value))
+    elif isinstance(node, list):
+        for item in node:
+            found.extend(_plan_catalog_references(item))
+    elif isinstance(node, str) and _CATALOG_CALL.search(node):
+        found.append(node)
+    return found
+
+
 async def assert_relations_permitted(
     reader: AsyncSession | AsyncConnection,
     sql: str,
@@ -228,9 +263,11 @@ async def assert_relations_permitted(
 ) -> None:
     """PostgreSQL: SQL の**計画に出る実表**を実行前に調べ、許されない表なら拒否する。
 
-    調べるのは計画の `Relation Name`（ビューは基表まで展開される）だけである。**関数が表を
-    読む形**（`query_to_xml('select ...')`、`dblink` など）は計画に実表として現れないので、
-    ここでは捕まえない。そちらは `is_select_only_sql` の禁止語の一覧（補助の層）と、
+    調べるのは計画の `Relation Name`（ビューは基表まで展開される）と、カタログへの参照
+    （`pg_catalog` / `information_schema` の関数ノード、`pg_*` 関数の呼び出し。`pg_stat_activity`、
+    `pg_settings`、`pg_get_viewdef(...)`、`pg_relation_size(...)` など）である。**ユーザー定義や
+    拡張の関数が表を読む形**（`query_to_xml('select ...')`、`dblink` など）は計画に実表として
+    現れないので、ここでは捕まえない。そちらは `is_select_only_sql` の禁止語の一覧（補助の層）と、
     ロールの権限（境界）に頼る。
 
     SQLite は接続の authorizer が文の準備時に見るので何もしない。PostgreSQL・SQLite 以外の
@@ -260,6 +297,9 @@ async def assert_relations_permitted(
     for schema, table in _plan_relations(plan):
         if not table_read_permitted(table, allowed, schema):
             raise ProgramSqlDeniedError(f"このSQLが読む表は許されていません: {table}")
+    catalog = _plan_catalog_references(plan)
+    if catalog:
+        raise ProgramSqlDeniedError(f"このSQLはカタログを参照しています: {catalog[0]}")
 
 
 async def _qualified_allowance(
