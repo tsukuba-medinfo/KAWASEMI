@@ -802,3 +802,131 @@ async def test_admin_cannot_claim_check_or_batch(
     for path in (f"/datasets/{ds.id}/batch-autofill", f"/datasets/{ds.id}/check/{t.id}/confirm"):
         resp = await admin_client.post(path, data={}, headers={"X-CSRF-Token": csrf_token})
         assert resp.status_code == 403, path
+
+
+@pytest.mark.asyncio
+async def test_same_user_double_claim_ends_with_exactly_one_lease(tmp_path: Path) -> None:
+    """同じ収集者の二重送信（2タブ・ダブルクリック）で有効なリースが2件にならない。"""
+    from kawasemi.core.lease import valid_lease_clause
+
+    for round_no in range(8):
+        url = f"sqlite+aiosqlite:///{tmp_path / f'dbl{round_no}.db'}"
+        ea = create_async_engine(url, connect_args={"timeout": 30})
+        eb = create_async_engine(url, connect_args={"timeout": 30})
+        async with ea.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        ma = async_sessionmaker(ea, class_=AsyncSession, expire_on_commit=False)
+        mb = async_sessionmaker(eb, class_=AsyncSession, expire_on_commit=False)
+        async with ma() as a, mb() as b:
+            for pid in ("P-1", "P-2", "P-3"):
+                a.add(InputTarget(dataset_id=1, questionnaire_id=1, patient_id=pid))
+            await a.commit()
+            got_a, got_b = await asyncio.gather(
+                claim_next_target(a, user_id=101), claim_next_target(b, user_id=101)
+            )
+            assert got_a is not None and got_b is not None
+            assert got_a.id == got_b.id, round_no
+            held = (
+                (await a.execute(select(InputTarget).where(valid_lease_clause(101))))
+                .scalars()
+                .all()
+            )
+            assert len(held) == 1 and held[0].id == got_a.id
+        await ea.dispose()
+        await eb.dispose()
+
+
+@pytest.mark.asyncio
+async def test_convergence_releases_extra_leases_keeping_the_lowest_id(
+    db_session: AsyncSession, collector_user: User
+) -> None:
+    """バックストップ: 万一2件持っていても、最小 id だけ残して手放す。"""
+    from kawasemi.core.lease import _converge_to_one_lease
+
+    t1 = await lease_patient(db_session, collector_user.id, "P-K1")
+    t2 = await lease_patient(db_session, collector_user.id, "P-K2")
+    kept = await _converge_to_one_lease(db_session, collector_user.id, t2.id)
+    assert kept.id == t1.id
+    assert (await _reload(db_session, t2.id)).started_by_id is None
+    assert await user_can_access_patient(db_session, collector_user, "P-K2") is False
+    assert await user_can_access_patient(db_session, collector_user, "P-K1") is True
+
+
+@pytest.mark.asyncio
+async def test_submit_requires_a_lease_on_this_patient_and_questionnaire(
+    collector_client: AsyncClient,
+    collector_user: User,
+    db_session: AsyncSession,
+    csrf_token: str,
+) -> None:
+    from kawasemi.models.questionnaire import Questionnaire
+    from kawasemi.models.questionnaire_response import QuestionnaireResponse
+
+    qs = []
+    for n in (1, 2):
+        q = Questionnaire(
+            fhir_id=f"q-sub{n}",
+            title=f"提出{n}",
+            status="active",
+            content={
+                "resourceType": "Questionnaire",
+                "id": f"q-sub{n}",
+                "item": [{"linkId": "name", "type": "string", "text": "氏名"}],
+            },
+        )
+        db_session.add(q)
+        qs.append(q)
+    await db_session.commit()
+    leased = await lease_patient(
+        db_session, collector_user.id, "P-SUB", questionnaire_id=qs[0].id, minutes=30
+    )
+
+    async def submit(qid: int, **extra: str):
+        data = {"subject": "Patient/P-SUB", "name": "x", **extra}
+        return await collector_client.post(
+            f"/forms/{qid}/submit", data=data, headers={"X-CSRF-Token": csrf_token}
+        )
+
+    async def saved() -> int:
+        return len((await db_session.execute(select(QuestionnaireResponse))).scalars().all())
+
+    # 別の様式（担当は qs[0] の対象）: 拒否され、何も保存されない
+    assert (await submit(qs[1].id)).status_code == 403
+    assert (await submit(qs[1].id, input_target_id=str(leased.id))).status_code == 403
+    # 別の対象 id を名乗る: 拒否
+    assert (await submit(qs[0].id, input_target_id=str(leased.id + 99))).status_code == 403
+    # subject が無い: 拒否
+    resp = await collector_client.post(
+        f"/forms/{qs[0].id}/submit", data={"name": "x"}, headers={"X-CSRF-Token": csrf_token}
+    )
+    assert resp.status_code == 403
+    assert await saved() == 0
+    assert (await _reload(db_session, leased.id)).status != InputTargetStatus.COMPLETED
+
+    # input_target_id なしでも、担当の対象（患者 × 様式）に一致すれば通り、対象は完了になる
+    ok = await submit(qs[0].id)
+    assert ok.status_code == 200
+    assert await saved() == 1
+    done = await _reload(db_session, leased.id)
+    assert done.status == InputTargetStatus.COMPLETED
+    assert await user_can_access_patient(db_session, collector_user, "P-SUB") is False
+
+
+@pytest.mark.asyncio
+async def test_submit_with_the_correct_input_target_id_completes_it(
+    collector_client: AsyncClient,
+    collector_user: User,
+    db_session: AsyncSession,
+    csrf_token: str,
+) -> None:
+    ds, t = await _dataset_with_target(db_session, "P-OK", status=InputTargetStatus.IN_PROGRESS)
+    t.started_by_id = collector_user.id
+    t.lease_expires_at = datetime.now(UTC) + timedelta(minutes=30)
+    await db_session.commit()
+    resp = await collector_client.post(
+        f"/forms/{t.questionnaire_id}/submit",
+        data={"subject": "Patient/P-OK", "name": "x", "input_target_id": str(t.id)},
+        headers={"X-CSRF-Token": csrf_token},
+    )
+    assert resp.status_code == 200
+    assert (await _reload(db_session, t.id)).status == InputTargetStatus.COMPLETED
