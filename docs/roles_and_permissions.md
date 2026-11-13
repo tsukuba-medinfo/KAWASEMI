@@ -140,7 +140,7 @@
 
 | エンドポイント | 許可されるアクティブ役割 |
 |---|---|
-| `POST /api/v100/questionnaire-responses/` | `collector`（自分が有効なリースを持つ入力対象 = 患者 × この様式 に限る。Web の保存と同じ検査。`subject` が無い・担当でない・期限切れは 403。`input_target_id` を指定するならその対象） |
+| `POST /api/v100/questionnaire-responses/` | `collector`（自分が有効なリースを持つ入力対象 = 患者 × この様式 に限る。Web の保存と同じ検査。`subject` が無い・担当でない・期限切れは 403。`input_target_id` を指定するならその対象。`author` はクライアントの値を使わず `User/{id}` に固定） |
 | `GET /api/v100/questionnaire-responses/`, `GET /{response_id}` | `reviewer` |
 | `POST /{response_id}/export`, `POST /bulk-export` | `reviewer`（既定は検証済のみ。`include_unverified=true` で全件） |
 | `POST /api/v100/questionnaires/`（取り込み）, `DELETE /{id}` | `admin` |

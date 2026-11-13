@@ -239,3 +239,27 @@ async def test_the_lease_alone_is_enough_without_input_target_id(
     )
 
     assert resp.status_code == 201
+
+
+@pytest.mark.asyncio
+async def test_the_author_is_the_authenticated_user_not_the_client_value(
+    collector_client: AsyncClient,
+    collector_user: User,
+    db_session: AsyncSession,
+    csrf_token: str,
+) -> None:
+    """クライアントが送る author（他人の参照）は使わず、`User/{id}` に固定する（F17/F18）。"""
+    q = await _questionnaire(db_session, 10)
+    qid, uid = q.id, collector_user.id
+    await lease_patient(db_session, uid, "P-AUTH", questionnaire_id=qid)
+
+    resp = await collector_client.post(
+        "/api/v100/questionnaire-responses/",
+        json=_body(qid, "Patient/P-AUTH", author="Practitioner/someone-else"),
+        headers={"X-CSRF-Token": csrf_token},
+    )
+
+    assert resp.status_code == 201
+    assert resp.json()["author"] == f"User/{uid}"
+    saved = (await db_session.execute(select(QuestionnaireResponse))).scalars().one()
+    assert saved.content["author"] == {"reference": f"User/{uid}"}

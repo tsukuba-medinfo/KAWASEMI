@@ -94,21 +94,32 @@ def fhir_request_url(base_url: str, query_path: str) -> str:
 
     - 先頭の `/` が無ければ補う（索引の `Observation?...` と同じ規約。executor の規約は `/` 始まり）。
     - `//` で始まるもの、バックスラッシュ、スキーム（`:` が最初の `/` `?` より前）は拒否する。
-    - 組み立てた URL を解析し、スキーム・ホスト（ユーザー情報を含む）がベース URL と同じで、
+    - 組み立てた URL を解析し、スキーム・ホスト（ユーザー情報を含む。ベース URL 自身のものだけ）がベース URL と同じで、
       パスがベース URL のパスの下にあることを確かめる（上の規則が破れても残る最後の線）。
     """
     base = base_url.rstrip("/")
     path = query_path if query_path.startswith("/") else f"/{query_path}"
+    # 空白・制御文字（CR/LF/タブ/NUL を含む）は、URL の構造やヘッダーを変える
+    if any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in path):
+        raise FhirUrlError("FHIR クエリに空白・制御文字があります")
     if path.startswith("//") or "\\" in path:
         raise FhirUrlError("FHIR クエリの先頭が不正です")
+    path_only = path.split("?", 1)[0].split("#", 1)[0]
+    # パスの `.` / `..` の区間と、符号化した `.` `/` `\`（`%2e%2e` など）は、ベース URL の下から出る
+    if any(seg in (".", "..") for seg in path_only.split("/")) or re.search(
+        r"%(2e|2f|5c)", path_only, re.IGNORECASE
+    ):
+        raise FhirUrlError("FHIR クエリのパスに、辿り直しを起こす部分があります")
     head = path[1:].split("?", 1)[0].split("/", 1)[0]
     if ":" in head or "@" in head:
         raise FhirUrlError("FHIR クエリの先頭に、スキームまたはユーザー情報に見える部分があります")
     url = f"{base}{path}"
     got, want = urlsplit(url), urlsplit(base)
+    # ユーザー情報はベース URL 自身のものだけ（ベースに `user:pw@` があっても通す。クエリが
+    # 持ち込んだものは、上の先頭の検査と、ここの netloc の一致で拒否される）
     if (
         (got.scheme, got.netloc) != (want.scheme, want.netloc)
-        or got.username is not None
+        or (got.username, got.password) != (want.username, want.password)
         or not got.path.startswith(want.path.rstrip("/") + "/")
     ):
         raise FhirUrlError("FHIR クエリが、設定したサーバー以外を指しています")

@@ -65,6 +65,66 @@ def test_a_host_suffix_stays_a_path_on_the_configured_server(base: str) -> None:
     assert got.path.endswith("/.evil.example/x")
 
 
+@pytest.mark.parametrize(
+    "query",
+    [
+        "/Observation/../../admin?patient=P1",
+        "/Observation/./x?patient=P1",
+        "/Observation%2e%2e/x?patient=P1",
+        "/%2e%2e/%2E%2E/x?patient=P1",
+        "/Observation%2Fx?patient=P1",
+        "/Observation%5cx?patient=P1",
+        "/Observation\r\nHost: evil.example?patient=P1",
+        "/Observation\nx?patient=P1",
+        "/Observation\tx?patient=P1",
+        "/Observation\x00x?patient=P1",
+        "/Observation x?patient=P1",
+        "/Observation?patient=P1\r\nX: y",
+    ],
+)
+@pytest.mark.parametrize("base", BASES)
+def test_the_function_itself_refuses_traversal_and_control_characters(
+    base: str, query: str
+) -> None:
+    """検査（`fhir_query_scopes_patient`）に頼らず、この関数だけで拒否する（多層防御）。"""
+    with pytest.raises(FhirUrlError):
+        fhir_request_url(base, query)
+
+
+USERINFO_BASES = ["https://user:pw@fhir.example/fhir", "https://user:pw@fhir.example"]
+
+
+@pytest.mark.parametrize("base", USERINFO_BASES)
+def test_a_base_url_with_userinfo_still_works_for_a_legit_query(base: str) -> None:
+    url = fhir_request_url(base, "/Observation?patient=P1&code=x")
+    got, want = urlsplit(url), urlsplit(base)
+    assert got.netloc == want.netloc
+    assert (got.username, got.password) == ("user", "pw")
+
+
+@pytest.mark.parametrize("base", USERINFO_BASES)
+@pytest.mark.parametrize(
+    "query",
+    [
+        "@evil.example/x?patient=P1",
+        "evil:pw@evil.example/x?patient=P1",
+        "//evil.example/x?patient=P1",
+        "/@evil.example/x?patient=P1",
+    ],
+)
+def test_a_base_url_with_userinfo_still_refuses_an_injected_authority(
+    base: str, query: str
+) -> None:
+    got = None
+    try:
+        got = urlsplit(fhir_request_url(base, query))
+    except FhirUrlError:
+        return
+    # 通るなら、ホストもユーザー情報もベースのまま（`/@evil.example/x` はパスの一部）
+    assert got.netloc == urlsplit(base).netloc
+    assert got.path.startswith(urlsplit(base).path.rstrip("/") + "/")
+
+
 def test_the_pinned_base_path_is_kept() -> None:
     assert (
         fhir_request_url("https://fhir.example/fhir", "/Observation?patient=P1")

@@ -385,7 +385,8 @@ async def create_questionnaire_response(
         questionnaire_content=questionnaire.content,
         answers=data.answers,
         subject=data.subject,
-        author=data.author,
+        # 作成者は認証したユーザーに固定する（クライアントが送る author は使わない）
+        author=f"User/{current_user.id}",
     )
 
     # FHIR バリデーション

@@ -127,34 +127,39 @@ async def test_list_questionnaire_responses_with_filter(
     csrf_token: str,
     db_session: AsyncSession,
 ):
-    """QuestionnaireResponseフィルタ付き一覧取得のテスト"""
-    # Questionnaireを作成
-    q_response = await admin_client.post(
-        "/api/v100/questionnaires/",
-        json={
-            "resource": {
-                "resourceType": "Questionnaire",
-                "status": "active",
-                "title": "フィルタテスト",
-                "item": [],
-            }
-        },
-        headers={"X-CSRF-Token": csrf_token},
-    )
-    questionnaire_id = q_response.json()["id"]
-    await lease_patient(db_session, multi_role_user.id, "123", questionnaire_id=questionnaire_id)
-    await lease_patient(db_session, multi_role_user.id, "456", questionnaire_id=questionnaire_id)
-    await lease_patient(db_session, multi_role_user.id, "789", questionnaire_id=questionnaire_id)
-    _act_as(admin_client, multi_role_user, RoleType.COLLECTOR)
+    """QuestionnaireResponseフィルタ付き一覧取得のテスト
 
-    # 複数のQuestionnaireResponseを作成
-    subjects = ["Patient/123", "Patient/456", "Patient/789"]
-    for subject in subjects:
-        await admin_client.post(
-            "/api/v100/questionnaire-responses/",
-            json={"questionnaire_id": questionnaire_id, "answers": {}, "subject": subject},
+    同じ患者の回答が2件ある状況（別の様式に対する回答）で、subject の絞り込みが複数件を返す。
+    """
+    questionnaire_ids = []
+    for title in ("フィルタテスト1", "フィルタテスト2"):
+        q_response = await admin_client.post(
+            "/api/v100/questionnaires/",
+            json={
+                "resource": {
+                    "resourceType": "Questionnaire",
+                    "status": "active",
+                    "title": title,
+                    "item": [],
+                }
+            },
             headers={"X-CSRF-Token": csrf_token},
         )
+        questionnaire_ids.append(q_response.json()["id"])
+    q1, q2 = questionnaire_ids
+    # 患者 123 は両方の様式に担当を持つ（2件）。患者 456 は片方だけ（1件）
+    saves = [(q1, "123"), (q2, "123"), (q1, "456")]
+    for qid, pid in saves:
+        await lease_patient(db_session, multi_role_user.id, pid, questionnaire_id=qid)
+    _act_as(admin_client, multi_role_user, RoleType.COLLECTOR)
+
+    for qid, pid in saves:
+        resp = await admin_client.post(
+            "/api/v100/questionnaire-responses/",
+            json={"questionnaire_id": qid, "answers": {}, "subject": f"Patient/{pid}"},
+            headers={"X-CSRF-Token": csrf_token},
+        )
+        assert resp.status_code == 201
 
     # subject でフィルタ
     _act_as(admin_client, multi_role_user, RoleType.REVIEWER)
@@ -162,8 +167,9 @@ async def test_list_questionnaire_responses_with_filter(
 
     assert response.status_code == 200
     data = response.json()
-    assert len(data) == 1
+    assert len(data) == 2
     assert all(item["subject"] == "Patient/123" for item in data)
+    assert {item["questionnaire_id"] for item in data} == {q1, q2}
 
 
 @pytest.mark.asyncio
