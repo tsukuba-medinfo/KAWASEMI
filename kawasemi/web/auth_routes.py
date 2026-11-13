@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, Form, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from fastapi_csrf_protect import CsrfProtect
+from slowapi.util import get_remote_address
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -15,6 +16,7 @@ from sqlalchemy.orm import selectinload
 from kawasemi.core.auth import (
     create_access_token,
     create_refresh_token,
+    decode_access_token,
     decode_refresh_token,
     verify_password,
 )
@@ -23,7 +25,9 @@ from kawasemi.core.database import get_db
 from kawasemi.core.deps import get_current_user, get_current_user_optional
 from kawasemi.core.entry import current_entry
 from kawasemi.core.logging_config import get_logger
+from kawasemi.core.login_throttle import login_throttle
 from kawasemi.core.rate_limit import limiter, login_rate_limit
+from kawasemi.core.sessions import revoke_user_sessions
 from kawasemi.models.auth_event import AuthEvent, AuthEventAction
 from kawasemi.models.refresh_token import RefreshToken
 from kawasemi.models.role import RoleType
@@ -142,9 +146,16 @@ async def login(
         csrf_protect.set_csrf_cookie(signed_token, resp)
         return resp
 
-    locked_msg = "アカウントがロックされています。しばらく待つか管理者に解除を依頼してください"
+    # 失敗時の応答は**常にこの1種類**。ユーザー不在・非アクティブ・ブロック中・パスワード違い
+    # のどれでも同じ文面・同じ処理（bcrypt を1回）にして、応答から有効なユーザー名や
+    # ブロックの有無が分からないようにする（ユーザー名の列挙・締め出しの確認を防ぐ）。
+    failed_msg = "ユーザー名またはパスワードが正しくありません"
 
-    # ユーザーを検索（ロック判定のため is_active では絞らず取得する）
+    # スロットルは (ユーザー名, クライアント IP) の組。存在しないユーザー名も同じく数える。
+    throttle_key = (username, get_remote_address(request))
+    blocked = login_throttle.is_blocked(throttle_key)
+
+    # ユーザーを検索（is_active では絞らず取得する）
     result = await db.execute(
         select(User)
         .where(User.username == username)
@@ -152,19 +163,17 @@ async def login(
     )
     user = result.scalar_one_or_none()
 
-    # ロック済みで期限切れなら自動解除（監査に記録）。期限内なら即拒否。
-    if user is not None and user.locked_until is not None:
-        if user.is_locked():
-            logger.warning(f"ロック中アカウントのログイン試行: username={username}")
-            return _error_response(locked_msg)
-        # 期限切れ → 自動解除
+    # 旧方式のアカウントロック（locked_until）が残っている行: 期限切れなら自動解除（監査に記録）。
+    # 期限内のものは下で「ブロック中」と同じ扱いにする（応答では区別しない）。
+    if user is not None and user.locked_until is not None and not user.is_locked():
         user.reset_lockout()
         db.add(AuthEvent(user_id=user.id, action=AuthEventAction.UNLOCKED, reason="時間経過"))
         await db.commit()
 
-    # 認証チェック。ユーザー不在/非アクティブでもダミーハッシュで bcrypt を実行し、
-    # 応答時間差による有効ユーザー名の列挙（timing oracle）を防ぐ。
-    if user is not None and user.is_active:
+    # 認証チェック。検証できない場合（ユーザー不在/非アクティブ/旧ロック中/ブロック中）も
+    # ダミーハッシュで bcrypt を実行し、応答時間でも区別できないようにする。
+    # ブロック中は正しいパスワードでもここで必ず失敗にする（試行は止まる）。
+    if user is not None and user.is_active and not user.is_locked() and not blocked:
         password_ok = verify_password(password, user.password_hash)
     else:
         verify_password(password, _DUMMY_PASSWORD_HASH)
@@ -172,32 +181,39 @@ async def login(
 
     if not password_ok:
         logger.warning(f"ログイン失敗: username={username}")
-        # 実在かつ有効なアカウントの失敗のみ回数を数える（存在しないユーザーは数えない）
-        if user is not None and user.is_active:
-            locked = user.register_failed_login(
-                settings.lockout_max_attempts, settings.lockout_duration_minutes
+        if not blocked:
+            tripped = login_throttle.register_failure(
+                throttle_key,
+                max_attempts=settings.lockout_max_attempts,
+                window_seconds=settings.lockout_duration_minutes * 60,
             )
-            if locked:
-                db.add(
-                    AuthEvent(
-                        user_id=user.id,
-                        action=AuthEventAction.LOCKED,
-                        reason=f"連続ログイン失敗 {user.failed_login_count} 回",
-                        failed_count=user.failed_login_count,
-                    )
-                )
+            if tripped:
                 logger.warning(
-                    f"アカウントをロックしました: user_id={user.id}, username={username}"
+                    f"ログイン失敗が続いたため受け付けを止めました: username={username}, "
+                    f"ip={throttle_key[1]}, minutes={settings.lockout_duration_minutes}"
                 )
-            await db.commit()
-            if locked:
-                return _error_response(locked_msg)
-        return _error_response("ユーザー名またはパスワードが正しくありません")
+                # 管理者向けの証跡（応答には出さない）。実在するユーザーのときだけ残す
+                if user is not None:
+                    db.add(
+                        AuthEvent(
+                            user_id=user.id,
+                            action=AuthEventAction.LOCKED,
+                            reason=(
+                                f"連続ログイン失敗 {settings.lockout_max_attempts} 回"
+                                f"（IP {throttle_key[1]} からの試行を "
+                                f"{settings.lockout_duration_minutes} 分間受け付けない）"
+                            ),
+                            failed_count=settings.lockout_max_attempts,
+                        )
+                    )
+                    await db.commit()
+        return _error_response(failed_msg)
 
     # password_ok=True は user が存在し有効な場合のみ（型の絞り込み）
     assert user is not None
 
-    # 認証成功 → 失敗カウント/ロックをリセット
+    # 認証成功 → この (ユーザー名, IP) の失敗を忘れる。旧方式の失敗カウントも戻す
+    login_throttle.reset(throttle_key)
     if user.failed_login_count or user.locked_until is not None:
         user.reset_lockout()
         await db.commit()
@@ -220,7 +236,11 @@ async def login(
 
     # JWTトークン生成（既定アクティブ役割=最高権限を act クレームに載せる）
     access_token = create_access_token(
-        data={"sub": str(user.id), "act": user.default_active_role()}
+        data={
+            "sub": str(user.id),
+            "act": user.default_active_role(),
+            "tv": user.token_version,
+        }
     )
 
     logger.info(
@@ -263,7 +283,21 @@ async def switch_role(
         logger.warning(f"不正な役割切替: user_id={current_user.id}, role={role}")
         return RedirectResponse(url="/", status_code=303)
 
-    access_token = create_access_token(data={"sub": str(current_user.id), "act": role})
+    # **有効期限は延ばさない。** 元のトークンの残り時間だけを引き継ぐ。切替のたびに新しい
+    # 期限を発行すると、盗まれたアクセストークンを切替で更新し続けられてしまう。
+    # `get_current_user` を通っているので、署名・期限・世代（tv）は検証済み。
+    old_payload = decode_access_token(request.cookies.get(settings.jwt_cookie_name, ""))
+    exp = old_payload.get("exp") if old_payload else None
+    if not isinstance(exp, int | float):
+        return RedirectResponse(url="/login", status_code=303)
+    remaining = datetime.fromtimestamp(exp, UTC) - datetime.now(UTC)
+    if remaining <= timedelta(0):
+        return RedirectResponse(url="/login", status_code=303)
+
+    access_token = create_access_token(
+        data={"sub": str(current_user.id), "act": role, "tv": current_user.token_version},
+        expires_delta=remaining,
+    )
     logger.info(f"役割切替: user_id={current_user.id} -> active_role={role} next={target}")
 
     response = RedirectResponse(url=target, status_code=303)
@@ -273,28 +307,54 @@ async def switch_role(
         httponly=True,
         secure=settings.cookie_secure,
         samesite="lax",
-        max_age=settings.jwt_access_token_expire_minutes * 60,
+        max_age=max(1, int(remaining.total_seconds())),
     )
     return response
 
 
 @router.get("/logout")
+async def logout_get() -> RedirectResponse:
+    """GET では**何も変更しない**（ログイン画面へ戻すだけ）。
+
+    以前はここでログアウトしていたので、外部ページからの遷移（`<img src="/logout">` や
+    リンク）で利用者を勝手にログアウトさせられた。ログアウトは POST（CSRF 検証あり）。
+    """
+    return RedirectResponse(url="/login", status_code=303)
+
+
+@router.post("/logout")
 async def logout(
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
+    csrf_protect: CsrfProtect = Depends(),
 ) -> RedirectResponse:
-    """ログアウト処理。リフレッシュトークンを失効し両 Cookie を削除する。"""
+    """ログアウト処理（CSRF 検証あり）。
+
+    このユーザーの**すべての**発行済みトークンを無効にする: リフレッシュトークンは全件失効、
+    アクセストークンは世代番号を +1 して期限前でも使えなくする。盗まれたトークンがログアウト後も
+    生き残らないためで、他の端末のセッションも終わる。Cookie は両方削除する。
+    """
+    await csrf_protect.validate_csrf(request)
+
+    # 持ち主の特定は、署名を検証した Cookie だけから行う（他人のセッションは触らない）
+    user_id: int | None = None
+    access_payload = decode_access_token(request.cookies.get(settings.jwt_cookie_name, ""))
+    if access_payload and str(access_payload.get("sub", "")).isdigit():
+        user_id = int(access_payload["sub"])
     refresh_cookie = request.cookies.get(settings.jwt_refresh_cookie_name)
-    if refresh_cookie:
-        payload = decode_refresh_token(refresh_cookie)
-        if payload:
-            result = await db.execute(
-                select(RefreshToken).where(RefreshToken.jti == payload["jti"])
-            )
-            rt = result.scalar_one_or_none()
-            if rt and not rt.revoked:
-                rt.revoked = True
-                await db.commit()
+    refresh_payload = decode_refresh_token(refresh_cookie) if refresh_cookie else None
+    if user_id is None and refresh_payload:
+        rt_result = await db.execute(
+            select(RefreshToken).where(RefreshToken.jti == refresh_payload["jti"])
+        )
+        rt = rt_result.scalar_one_or_none()
+        user_id = rt.user_id if rt else None
+
+    if user_id is not None:
+        user_row = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+        if user_row is not None:
+            await revoke_user_sessions(db, user_row)
+            await db.commit()
 
     response = RedirectResponse(url="/login", status_code=303)
     response.delete_cookie(key=settings.jwt_cookie_name)
@@ -361,7 +421,11 @@ async def refresh_access_token(
     # ローテーション: 旧トークンを失効し、新アクセス＋新リフレッシュを発行
     rt.revoked = True
     access_token = create_access_token(
-        data={"sub": str(user.id), "act": user.default_active_role()}
+        data={
+            "sub": str(user.id),
+            "act": user.default_active_role(),
+            "tv": user.token_version,
+        }
     )
     refresh_token = await _issue_refresh_token(user.id, db)
 

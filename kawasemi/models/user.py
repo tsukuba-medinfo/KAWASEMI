@@ -31,6 +31,13 @@ class User(Base, TimestampMixin):
     )
     locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # トークン世代。アクセストークンは発行時の値を `tv` クレームに載せ、リクエストごとに
+    # この列と照合する。パスワード再設定・ログアウトで +1 すると、その時点までに発行された
+    # アクセストークンは（期限前でも）すべて無効になる。0 は既存トークン（`tv` なし）と同じ。
+    token_version: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
+
     # リレーション
     user_roles: Mapped[list["UserRole"]] = relationship(
         "UserRole",

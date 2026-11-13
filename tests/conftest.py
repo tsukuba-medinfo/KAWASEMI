@@ -107,9 +107,12 @@ def _reset_login_rate_limit():
     **Limiter はプロセスに1つである**。`core/rate_limit.py` が
     その1つを持ち、`api/main.py` の `app.state.limiter` も各ルータもそれを使う。
     """
+    from kawasemi.core.login_throttle import login_throttle
     from kawasemi.core.rate_limit import limiter
 
     limiter.reset()
+    # (ユーザー名, IP) ごとの失敗カウントもプロセス内で共有される。テスト間へ持ち越さない
+    login_throttle.clear()
     yield
 
 

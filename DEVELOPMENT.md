@@ -124,7 +124,7 @@ KAWASEMI/
 │   │   ├── input_target.py         # 入力対象
 │   │   ├── batch_job.py            # バッチAI自動入力ジョブ
 │   │   ├── valueset.py             # ValueSet
-│   │   ├── auth_event.py           # 認証・アカウントロックの監査ログ
+│   │   ├── auth_event.py           # 認証の監査ログ（ログイン失敗でのブロック・旧ロックの解除）
 │   │   └── refresh_token.py        # リフレッシュトークン
 │   ├── utils/
 │   │   ├── fhir_client.py  # FHIR サーバ REST クライアント

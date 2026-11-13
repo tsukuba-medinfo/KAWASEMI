@@ -14,6 +14,7 @@ from kawasemi.core.auth import get_password_hash
 from kawasemi.core.database import get_db
 from kawasemi.core.deps import require_roles
 from kawasemi.core.logging_config import get_logger
+from kawasemi.core.sessions import revoke_user_sessions
 from kawasemi.models.auth_event import AuthEvent, AuthEventAction
 from kawasemi.models.role import Role
 from kawasemi.models.user import User, UserRole
@@ -256,6 +257,9 @@ async def update_user(
 
     if password:
         user.password_hash = get_password_hash(password)
+        # パスワードを変えたら、それまでに発行された全トークンを無効にする。盗まれた
+        # リフレッシュ Cookie やアクセストークンが再設定後も生き残らないように
+        await revoke_user_sessions(db, user)
 
     # ロールを更新（既存を削除して再作成）
     for ur in user.user_roles:

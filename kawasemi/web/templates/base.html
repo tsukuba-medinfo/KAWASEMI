@@ -145,7 +145,10 @@
 
                 {% if current_entry().name %}<span class="nav-role-badge">入り口: {{ current_entry().name }}</span>{% endif %}
                 <span class="nav-role-badge">{{ current_user.full_name }}</span>
-                <a href="{{ base_path() }}/logout">ログアウト</a>
+                {# ログアウトは POST（GET では何も起きない）。CSRF は上の共通の submit ハンドラが付ける #}
+                <form action="{{ base_path() }}/logout" method="POST" style="display:inline; margin:0;">
+                    <button type="submit" class="nav-logout">ログアウト</button>
+                </form>
                 {% else %}
                 <a href="{{ base_path() }}/login">ログイン</a>
                 {% endif %}

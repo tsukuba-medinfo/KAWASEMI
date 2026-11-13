@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from kawasemi.core.auth import decode_access_token
+from kawasemi.core.auth import decode_access_token, token_version_of
 from kawasemi.core.database import get_db
 from kawasemi.models.role import RoleType
 from kawasemi.models.user import User, UserRole
@@ -45,6 +45,12 @@ async def get_current_user_optional(
     )
     user = result.scalar_one_or_none()
     if user is None:
+        return None
+
+    # トークン世代の照合。パスワード再設定・ログアウトで User.token_version を +1 すると、
+    # それ以前に発行されたアクセストークンは期限前でもここで無効になる。
+    # `tv` の無いトークン（世代導入前に発行）は 0 として扱う。
+    if token_version_of(payload) != user.token_version:
         return None
 
     # アクティブ役割を決定する。JWT の `act` クレームを尊重するが、

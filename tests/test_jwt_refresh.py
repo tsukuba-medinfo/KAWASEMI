@@ -157,8 +157,8 @@ async def test_logout_revokes_refresh_token(
     client: AsyncClient, admin_user: User, db_session: AsyncSession
 ) -> None:
     """ログアウトでリフレッシュトークンが失効する。"""
-    await _login(client)
-    resp = await client.get("/logout")
+    csrf = await _login(client)
+    resp = await client.post("/logout", headers={"X-CSRF-Token": csrf})
     assert resp.status_code == 303
 
     result = await db_session.execute(
