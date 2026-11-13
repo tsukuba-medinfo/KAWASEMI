@@ -3,6 +3,8 @@
 {% block title %}入力対象一覧 - KAWASEMI{% endblock %}
 
 {% block content %}
+{% set notice = request.query_params.get('notice') %}
+{% if notice %}<div class="info-box">{{ notice }}</div>{% endif %}
 {% if filter_warnings %}
 <div class="alert alert-warning" role="alert">
     {% for w in filter_warnings %}<div>{{ w }}</div>{% endfor %}
@@ -12,6 +14,28 @@
     <div class="page-head">
         <h2>入力対象一覧</h2>
     </div>
+
+    {# 担当は管理者が登録した対象リストから先着で自動割り当て。患者は選べない。 #}
+    {% if my_lease %}
+    <div class="info-box">
+        <h4>現在の担当</h4>
+        <p>
+            <strong>{{ my_lease.questionnaire.title or my_lease.questionnaire.fhir_id }}</strong>
+            ／ Patient ID: {{ my_lease.patient_id }}
+            ／ {{ my_lease.dataset.name }}
+            <span class="badge badge--info">{{ status_labels[my_lease.status] }}</span>
+        </p>
+        <p class="help-text">一度に担当できるのは1件です。無操作が続くと担当は失効し、他の収集者へ回ります。</p>
+        <a href="{{ base_path() }}{{ my_lease_url }}" class="btn btn--sm btn--primary">続きを開く</a>
+    </div>
+    {% else %}
+    <div class="info-box">
+        <p>受け取れる患者: AIドラフト済み <b>{{ pool_counts.ai_drafted }}</b> ／ 未着手 <b>{{ pool_counts.pending }}</b> ／ 入力中（期限切れ） <b>{{ pool_counts.in_progress }}</b></p>
+        <form method="post" action="{{ base_path() }}/input-targets/claim" style="margin: 0;">
+            <button type="submit" class="btn btn--sm btn--primary">次の患者を受け取る</button>
+        </form>
+    </div>
+    {% endif %}
 
     {% set pending_count = all_targets | selectattr('status', 'equalto', 'pending') | list | length %}
     {% set in_progress_count = all_targets | selectattr('status', 'equalto', 'in_progress') | list | length %}
@@ -70,7 +94,7 @@
             <p class="meta-line"><strong>Patient ID:</strong> {{ t.patient_id }}</p>
             <div class="tag-list">
                 <span class="tag">{{ t.dataset.name }}</span>
-                {% set badge = {'pending': 'neutral', 'in_progress': 'info', 'completed': 'success'}.get(t.status, 'neutral') %}
+                {% set badge = {'pending': 'neutral', 'in_progress': 'info', 'ai_drafted': 'warning', 'completed': 'success'}.get(t.status, 'neutral') %}
                 <span class="badge badge--{{ badge }}">{{ status_labels[t.status] }}</span>
                 {% if t.started_by %}
                 <span class="help-text">入力者: {{ t.started_by.full_name }}</span>
@@ -81,19 +105,10 @@
             </div>
         </div>
         <div class="page-head__actions">
-            {% if t.status == 'pending' %}
-            <form action="{{ base_path() }}/input-targets/{{ t.id }}/start" method="post" style="margin: 0;">
-                <button type="submit" class="btn btn--sm btn--primary">入力を開始</button>
-            </form>
-            {% elif t.status == 'in_progress' %}
-                {% if t.started_by_id == current_user.id %}
-                <a href="{{ base_path() }}/forms/{{ t.questionnaire_id }}?patient_id={{ t.patient_id }}&input_target_id={{ t.id }}"
-                   class="btn btn--sm btn--primary">入力を続ける</a>
-                {% else %}
-                <span class="help-text">入力中（{{ t.started_by.full_name if t.started_by else '他ユーザー' }}）</span>
-                {% endif %}
-            {% elif t.status == 'completed' %}
+            {% if t.status == 'completed' %}
             <span class="badge badge--success">完了済み</span>
+            {% elif my_lease and my_lease.id == t.id %}
+            <span class="badge badge--info">あなたの担当</span>
             {% endif %}
         </div>
     </div>

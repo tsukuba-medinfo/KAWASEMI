@@ -258,7 +258,7 @@ def _fail_open(report: GateReport, gate: str, reason: str) -> None:
 
 async def run_pipeline(cfg: PipelineConfig) -> PipelineResult:
     """生成 → 索引 → 設計 → 実行 → 保存を1回通し、関門 (a)〜(e) を判定する。"""
-    from sqlalchemy import select
+    from sqlalchemy import select, update
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
     from kawasemi.ai_input import reference_scope
@@ -272,9 +272,8 @@ async def run_pipeline(cfg: PipelineConfig) -> PipelineResult:
     from kawasemi.core.database import get_db
     from kawasemi.core.entry import reset_entry_cache
     from kawasemi.core.rate_limit import limiter
-    from kawasemi.models import User
     from kawasemi.models.base import Base
-    from kawasemi.models.case_assignment import CaseAssignment
+    from kawasemi.models.input_target import InputTarget
     from kawasemi.models.questionnaire_response import QuestionnaireResponse
 
     work = cfg.work_dir
@@ -377,17 +376,8 @@ async def run_pipeline(cfg: PipelineConfig) -> PipelineResult:
 
         qid = await seed_all(session_factory)
         q = QBASE.format(qid=qid)
-        async with session_factory() as s:
-            collector = (
-                await s.execute(select(User).where(User.username == USER_COLLECTOR))
-            ).scalar_one()
-            for subj in SUBJECTS:
-                s.add(
-                    CaseAssignment(
-                        questionnaire_id=qid, patient_id=subj.reg_no, assigned_to_id=collector.id
-                    )
-                )
-            await s.commit()
+        # 対象患者リスト（Dataset + InputTarget 10件）は seed_all が入れる。収集者は患者を選べず、
+        # 先着の自動割り当て（POST /input-targets/claim）で1人ずつ受け取る。
 
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test", follow_redirects=False
@@ -588,6 +578,25 @@ async def run_pipeline(cfg: PipelineConfig) -> PipelineResult:
             t_exec = time.perf_counter()
             for subj in SUBJECTS:
                 reg = subj.reg_no
+                # 次の患者を受け取る（対象は id 順に先着で割り当たる）。この患者のリースが
+                # 有効な間だけ autofill と保存が通る。
+                # 前の患者で autofill が失敗してリースが残っても、次の患者を受け取れるようにする
+                async with session_factory() as s:
+                    await s.execute(
+                        update(InputTarget)
+                        .where(InputTarget.status != "completed")
+                        .values(started_by_id=None, lease_expires_at=None)
+                    )
+                    await s.commit()
+                await client.post(
+                    "/input-targets/claim",
+                    data={"csrf_token": csrf},
+                    headers={"X-CSRF-Token": csrf},
+                )
+                async with session_factory() as s:
+                    target_id = (
+                        await s.execute(select(InputTarget.id).where(InputTarget.patient_id == reg))
+                    ).scalar_one()
                 r = await _post(client, f"{q}/autofill", csrf, {"patient_id": reg})
                 if r.status_code != 200 or not r.json().get("success"):
                     autofill_errors.append(reg)
@@ -619,7 +628,12 @@ async def run_pipeline(cfg: PipelineConfig) -> PipelineResult:
                                 f"{reg}: 経路が {src} のはずが本文読みの実行={text_ran}"
                             )
                 # 回答の送信（フォームの確定保存と同じ経路）
-                form = {"subject": f"Patient/{reg}", "csrf_token": csrf, "patient_id": reg}
+                form = {
+                    "subject": f"Patient/{reg}",
+                    "csrf_token": csrf,
+                    "patient_id": reg,
+                    "input_target_id": str(target_id),
+                }
                 form.update({k: str(v) for k, v in prefill.items() if v is not None})
                 r = await client.post(
                     f"/forms/{qid}/submit", data=form, headers={"X-CSRF-Token": csrf}

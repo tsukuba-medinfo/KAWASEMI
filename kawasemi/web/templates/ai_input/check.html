@@ -9,27 +9,14 @@
 
 <div class="check-toolbar">
   <div>
-    <span class="pos">{{ position }} / {{ queue_total }} 件</span>
-    <span class="patient">／ Patient ID: <b>{{ target.patient_id }}</b></span>
+    <span class="patient">Patient ID: <b>{{ target.patient_id }}</b></span>
     {% if target.needs_attention %}<span class="badge badge--warning">⚑ 要確認</span>{% endif %}
   </div>
   <div class="nav-links">
-    {% if prev_id %}
     <a class="btn btn--secondary btn--sm"
-       href="{{ base_path() }}/datasets/{{ dataset_id }}/check?questionnaire_id={{ questionnaire.id }}&target_id={{ prev_id }}">← 前へ</a>
-    {% endif %}
-    {% if next_id %}
-    <a class="btn btn--secondary btn--sm"
-       href="{{ base_path() }}/datasets/{{ dataset_id }}/check?questionnaire_id={{ questionnaire.id }}&target_id={{ next_id }}">次へ →</a>
-    {% endif %}
-    <a class="btn btn--secondary btn--sm"
-       href="{{ base_path() }}/datasets/{{ dataset_id }}?questionnaire_id={{ questionnaire.id }}">一覧へ戻る</a>
+       href="{{ base_path() }}/input-targets">一覧へ戻る</a>
   </div>
 </div>
-
-{% if locked_by %}
-<div class="alert alert-warning">⚠ この対象は <b>{{ locked_by }}</b> さんがレビュー中でした（あなたがレビュー担当になりました）。</div>
-{% endif %}
 
 {% if not execution %}
 <div class="alert alert-warning">この対象のAIドラフト（実行ログ）が見つかりませんでした。手入力で確定するか、バッチを再実行してください。</div>

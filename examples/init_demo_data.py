@@ -13,7 +13,6 @@
 """
 
 import asyncio
-from datetime import UTC, date, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,8 +21,10 @@ from kawasemi.core.auth import get_password_hash
 from kawasemi.core.database import AsyncSessionLocal, drop_db, init_db
 from kawasemi.core.demo_secrets import demo_password, was_generated
 from kawasemi.models import (
-    AssignmentStatus,
-    CaseAssignment,
+    Dataset,
+    DatasetQuestionnaire,
+    InputTarget,
+    InputTargetStatus,
     Questionnaire,
     Role,
     RoleType,
@@ -58,7 +59,7 @@ async def create_users(db: AsyncSession, roles: dict[str, Role]) -> dict[str, Us
     文字列（`admin` / `admin`）を焼き込んでおり、このデータでシードされて到達可能な
     デプロイでは管理者権限を丸ごと奪われた（CWE-798）。
 
-    データ入力者の username は症例割り当てで参照する都合上 "user1" とする。
+    収集者の username は "user1" とする。
     """
     password = demo_password()
     users_data = [
@@ -240,140 +241,40 @@ async def create_questionnaires(db: AsyncSession) -> dict[str, Questionnaire]:
     return questionnaires
 
 
-async def create_case_assignments(
+async def create_target_list(
     db: AsyncSession, users: dict[str, User], questionnaires: dict[str, Questionnaire]
-) -> None:
-    """症例割り当てを作成"""
+) -> int:
+    """対象患者リスト（Dataset と InputTarget）を作成する。
 
-    # 割り当てパターン
-    assignments_data = []
-    today = date.today()
-
-    # patient-001: user1に2つのQuestionnaireを割り当て（複数割り当ての例）
-    assignments_data.append(
-        {
-            "patient_id": "patient-001",
-            "patient_name": "テスト患者01",
-            "questionnaire": questionnaires["patient-basic-info"],
-            "assigned_to": users["user1"],
-            "status": AssignmentStatus.PENDING,
-            "due_date": today + timedelta(days=7),  # 1週間後
-        }
+    誰を収集するかは管理者が登録するリストで決まり、収集者は「次の患者を受け取る」で
+    先着の自動割り当てを受ける（患者を自分で選ぶことはできない）。
+    """
+    dataset = Dataset(
+        name="デモ対象患者リスト",
+        description="デモ用の対象患者（架空）。収集者は入力対象一覧から次の患者を受け取る。",
+        created_by_id=users["admin"].id,
     )
-    assignments_data.append(
-        {
-            "patient_id": "patient-001",
-            "patient_name": "テスト患者01",
-            "questionnaire": questionnaires["surgery-record"],
-            "assigned_to": users["user1"],
-            "status": AssignmentStatus.PENDING,
-            "due_date": today + timedelta(days=14),  # 2週間後
-        }
-    )
-
-    # patient-002: user1, 入力中
-    assignments_data.append(
-        {
-            "patient_id": "patient-002",
-            "patient_name": "テスト患者02",
-            "questionnaire": questionnaires["patient-basic-info"],
-            "assigned_to": users["user1"],
-            "status": AssignmentStatus.IN_PROGRESS,
-            "due_date": today + timedelta(days=3),
-        }
-    )
-
-    # patient-003: user1, 完了済み
-    assignments_data.append(
-        {
-            "patient_id": "patient-003",
-            "patient_name": "テスト患者03",
-            "questionnaire": questionnaires["patient-basic-info"],
-            "assigned_to": users["user1"],
-            "status": AssignmentStatus.COMPLETED,
-            "due_date": today - timedelta(days=5),
-            "completed_at": datetime.now(UTC) - timedelta(days=7),
-        }
-    )
-
-    # patient-004: user1, 期限切れ
-    assignments_data.append(
-        {
-            "patient_id": "patient-004",
-            "patient_name": "テスト患者04",
-            "questionnaire": questionnaires["surgery-record"],
-            "assigned_to": users["user1"],
-            "status": AssignmentStatus.PENDING,
-            "due_date": today - timedelta(days=3),  # 3日前（期限切れ）
-        }
-    )
-
-    # patient-005: user1, 期限なし
-    assignments_data.append(
-        {
-            "patient_id": "patient-005",
-            "patient_name": "テスト患者05",
-            "questionnaire": questionnaires["patient-basic-info"],
-            "assigned_to": users["user1"],
-            "status": AssignmentStatus.PENDING,
-            "due_date": None,  # 期限なし
-        }
-    )
-
-    # patient-006 ~ patient-010: 残りの患者にランダムに割り当て
-    for i in range(6, 11):
-        patient_id = f"patient-{i:03d}"
-        patient_name = f"テスト患者{i:02d}"
-
-        # データ収集者 user1 に割り当て（デモは収集者1名構成）
-        assigned_to = users["user1"]
-
-        # Questionnaireも交互に
-        questionnaire = (
-            questionnaires["patient-basic-info"] if i % 2 == 0 else questionnaires["surgery-record"]
+    db.add(dataset)
+    await db.flush()
+    qs = [questionnaires["patient-basic-info"], questionnaires["surgery-record"]]
+    for order, q in enumerate(qs):
+        db.add(
+            DatasetQuestionnaire(dataset_id=dataset.id, questionnaire_id=q.id, display_order=order)
         )
-
-        # ステータスと期限を変化させる
-        if i % 3 == 0:
-            status = AssignmentStatus.COMPLETED
-            completed_at = datetime.now(UTC) - timedelta(days=i)
-        elif i % 3 == 1:
-            status = AssignmentStatus.IN_PROGRESS
-            completed_at = None
-        else:
-            status = AssignmentStatus.PENDING
-            completed_at = None
-
-        due_date = today + timedelta(days=(i - 5) * 2)  # -8, -6, -4, -2, 0, 2, 4, 6, 8日
-
-        assignments_data.append(
-            {
-                "patient_id": patient_id,
-                "patient_name": patient_name,
-                "questionnaire": questionnaire,
-                "assigned_to": assigned_to,
-                "status": status,
-                "due_date": due_date,
-                "completed_at": completed_at,
-            }
-        )
-
-    # データベースに保存
-    for data in assignments_data:
-        assignment = CaseAssignment(
-            questionnaire_id=data["questionnaire"].id,
-            patient_id=data["patient_id"],
-            patient_name=data["patient_name"],
-            assigned_to_id=data["assigned_to"].id,
-            assigned_by_id=users["user1"].id,  # 割り当ては収集者の行為
-            status=data["status"],
-            due_date=data["due_date"],
-            completed_at=data.get("completed_at"),
-            notes=f"{data['patient_name']}の症例データ",
-        )
-        db.add(assignment)
-
+    count = 0
+    for q in qs:
+        for i in range(1, 11):
+            db.add(
+                InputTarget(
+                    dataset_id=dataset.id,
+                    questionnaire_id=q.id,
+                    patient_id=f"patient-{i:03d}",
+                    status=InputTargetStatus.PENDING,
+                )
+            )
+            count += 1
     await db.commit()
+    return count
 
 
 async def init_demo_data() -> None:
@@ -417,14 +318,10 @@ async def init_demo_data() -> None:
         for fhir_id, q in questionnaires.items():
             print(f"  - {q.title} (status: {q.status})")
 
-        # 症例割り当て作成
-        print("\n[5/5] 症例割り当てを作成中...")
-        await create_case_assignments(db, users, questionnaires)
-
-        # 作成された割り当て数を確認
-        result = await db.execute(select(CaseAssignment))
-        assignments = result.scalars().all()
-        print(f"✓ {len(assignments)}件の症例割り当てを作成しました")
+        # 対象患者リスト作成
+        print("\n[5/5] 対象患者リストを作成中...")
+        n_targets = await create_target_list(db, users, questionnaires)
+        print(f"✓ {n_targets}件の入力対象を作成しました")
 
     print("\n" + "=" * 60)
     print("デモデータ初期化が完了しました！")

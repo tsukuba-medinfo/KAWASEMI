@@ -75,11 +75,14 @@ NAV_ITEMS: list[dict[str, Any]] = [
     {"label": "ValueSet管理", "url": "/valuesets", "roles": [RoleType.DESIGNER]},
     {"label": "データ自動収集", "url": "/ai-input/dashboard", "roles": [RoleType.DESIGNER]},
     {"label": "ユーザー管理", "url": "/admin/users", "roles": [RoleType.ADMIN]},
-    {"label": "データセット管理", "url": "/datasets", "roles": [RoleType.COLLECTOR]},
-    {"label": "症例割り当て", "url": "/assignments", "roles": [RoleType.COLLECTOR]},
+    # 対象患者リスト（Dataset）。登録・削除は管理者だけ、閲覧は収集者・閲覧検証者も。
+    {
+        "label": "データセット管理",
+        "url": "/datasets",
+        "roles": [RoleType.ADMIN, RoleType.COLLECTOR, RoleType.REVIEWER],
+    },
     {"label": "入力対象一覧", "url": "/input-targets", "roles": [RoleType.COLLECTOR]},
     {"label": "回答管理", "url": "/questionnaires?mode=response", "roles": [RoleType.REVIEWER]},
-    {"label": "チェック", "url": "/datasets", "roles": [RoleType.REVIEWER]},
     {
         "label": "取得メトリクス",
         "url": "/ai-input/metrics/acquisition",

@@ -43,11 +43,7 @@
 
     <form method="POST" action="{{ base_path() }}/forms/{{ questionnaire_id }}/submit" id="questionnaire-form">
         {% if assignment_info %}
-        {% if assignment_info.is_input_target %}
         <input type="hidden" name="input_target_id" value="{{ assignment_info.id }}">
-        {% else %}
-        <input type="hidden" name="assignment_id" value="{{ assignment_info.id }}">
-        {% endif %}
         {% endif %}
         {% for field in fields %}
         <div class="form-group" data-link-id="{{ field.link_id }}" {% if field.enable_when or field.enable_when_ancestors %}data-enable-when="true" data-enable-ancestors='{{ (field.enable_when_ancestors or []) | tojson }}' style="display: none;"{% endif %}>
