@@ -89,6 +89,12 @@ def decode_access_token(token: str) -> dict[str, Any] | None:
     return payload
 
 
+def token_version_of(payload: dict[str, Any]) -> int:
+    """アクセストークンの世代（`tv` クレーム）。無い・不正なものは 0（世代導入前のトークン）。"""
+    tv = payload.get("tv", 0)
+    return tv if isinstance(tv, int) and not isinstance(tv, bool) else -1
+
+
 def create_refresh_token(user_id: int, jti: str, expires_delta: timedelta | None = None) -> str:
     """リフレッシュトークンを生成する。
 

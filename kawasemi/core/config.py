@@ -136,18 +136,17 @@ class Settings(BaseSettings):
     # `SlowAPIMiddleware` を入れる必要があり、それは掃除の範囲を越える）。
     rate_limit_login: str = Field(default="5/minute", description="ログインレート制限")
 
-    # アカウントロック設定: レート制限（IP単位）とは別に、
-    # アカウント単位の連続失敗ロックでブルートフォースを恒久的に抑止する。
-    # 注意: 単一IPからのロックを機能させるには rate_limit_login（IP単位の分あたり
-    # 許可回数）を lockout_max_attempts 以上にすること。前者を小さくすると 429 が
-    # 先に返り、その IP からはアカウントロックに到達しない（分散IP攻撃には有効）。
-    # 以前は `rate_limit_login` がどこからも読まれておらず、ログインの上限は
-    # "5/minute" のハードコードだったので、この注意書きは実態と合っていなかった。
+    # ログイン失敗のスロットル（`core/login_throttle.py`）。**アカウント単位のロックではない**。
+    # 失敗を (ユーザー名, クライアント IP) の組で数え、lockout_max_attempts 回に達した組を
+    # lockout_duration_minutes 分だけ受け付けない（その間は正しいパスワードでも同じ失敗応答）。
+    # 認証前の第三者が他人のアカウントを締め出せず、応答の違いで有効なユーザー名も分からない。
+    # 失敗を数える窓の長さも lockout_duration_minutes と同じ。IP 単位の rate_limit_login とは
+    # 別の機構で、こちらは同じ IP から同じユーザー名を狙う試行を止める。
     lockout_max_attempts: int = Field(
-        default=5, description="アカウントロックまでの連続ログイン失敗回数"
+        default=5, description="同じ (ユーザー名, IP) からの連続ログイン失敗でブロックに入る回数"
     )
     lockout_duration_minutes: int = Field(
-        default=30, description="アカウントロックの継続時間（分）。経過後は自動解除"
+        default=30, description="ブロックの継続時間と失敗を数える窓（分）。経過後は自動解除"
     )
 
     # ログ設定

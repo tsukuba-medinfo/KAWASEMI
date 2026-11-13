@@ -98,7 +98,8 @@ Cookie は同じホストで共有されるので、両方の入り口で使え�
   `*` は直接到達可能な環境で `X-Forwarded-For` 詐称（レート制限回避・監査ログ汚染）を
   許すため本番非推奨。nginx とアプリが別ホスト/別コンテナの構成では、必ず
   `FORWARDED_ALLOW_IPS` にプロキシの実 IP を設定すること（未設定だと scheme 判定や
-  クライアント IP が正しく扱われない）。
+  クライアント IP が正しく扱われない）。ログイン失敗のスロットルも (ユーザー名, クライアント IP)
+  で数えるので、これが無いと全員がプロキシの IP になり、一人の失敗が全員のブロックになる。
 - 認証 Cookie / CSRF Cookie の `secure` 属性は `ENVIRONMENT=production` で有効化される。
   本番では `ENVIRONMENT="production"` を設定すること。
 - `ALLOWED_HOSTS` は CORS で許可するオリジン（`allow_origins`）で、ホスト名によるアクセス制限

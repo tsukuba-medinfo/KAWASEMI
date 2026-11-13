@@ -566,7 +566,7 @@ async def run_pipeline(cfg: PipelineConfig) -> PipelineResult:
                     r.status_code == 200 and r.json().get("status") == "confirmed",
                     *(() if r.status_code == 200 else (f"確認できない: {r.text[:200]}",)),
                 )
-            await client.get("/logout")
+            await _post(client, "/logout", csrf)
 
             # ---- 実行（収集者の本番 autofill）→ 回答の送信: 関門 d / e ------------------
             if cfg.before_execute is not None:
@@ -670,7 +670,7 @@ async def run_pipeline(cfg: PipelineConfig) -> PipelineResult:
                         it.set("d", not mismatch_d[lid], *mismatch_d[lid])
                 if it.open_at("e"):
                     it.set("e", not mismatch_e[lid], *mismatch_e[lid])
-            await client.get("/logout")
+            await _post(client, "/logout", csrf)
     await engine.dispose()
 
     notes["timings"] = timings

@@ -61,6 +61,13 @@ header .brand-icon { width: 32px; height: 32px; vertical-align: middle; margin-r
 .nav { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-sm) var(--space-md); }
 .nav a, .nav span { color: var(--color-ink-2); text-decoration: none; white-space: nowrap; font-size: var(--text-sm); }
 .nav a:hover { color: var(--color-primary); }
+/* ログアウトは POST のフォーム。見た目はナビのリンクと同じにする */
+.nav .nav-logout {
+  all: unset; cursor: pointer; white-space: nowrap;
+  color: var(--color-ink-2); font-size: var(--text-sm);
+}
+.nav .nav-logout:hover { color: var(--color-primary); }
+.nav .nav-logout:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
 .nav-role-badge {
   background: var(--color-surface-2);
   border: 1px solid var(--color-border);
