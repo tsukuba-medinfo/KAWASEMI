@@ -403,7 +403,10 @@ def resolve_db_op(candidate: Mapping[str, Any], registry: ConnectionRegistry | N
     reg = registry if registry is not None else get_registry()
     scope = reg.scope_of(candidate.get("connection_id") or payload.get("connection_id"))
     if scope == SCOPE_EXTERNAL:
-        return OpType.EXTERNAL_DB_EXTRACT
+        # 実行時の関門（kind: db かつ scope: external）と同じ判定にする。kind を省いた
+        # external 接続は、実行時に拒否される op を作らず、不足（人の補完）に回す
+        cid = candidate.get("connection_id") or payload.get("connection_id")
+        return OpType.EXTERNAL_DB_EXTRACT if reg.is_external_db(cid) else None
     if scope is not None:
         return OpType.SQL_EXTRACT
     if candidate.get("source_category") == SourceCategory.EXTERNAL_DB:
@@ -642,7 +645,11 @@ def _derive_db(
             key_type=None if unscoped else payload.get("key_type"),
             patient_scoped=not unscoped,
             missing=(
-                "接続の種別（connections.yaml に未登録のため自アプリDB/外部DBを判定できない）",
+                "接続の種別（"
+                + (registry if registry is not None else get_registry()).unresolved_reason(
+                    connection_id
+                )
+                + "ため自アプリDB/外部DBを判定できない）",
             ),
         )
     if op == OpType.EXTERNAL_DB_EXTRACT and not connection_id:

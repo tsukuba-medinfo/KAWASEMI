@@ -39,6 +39,9 @@ logger = get_logger(__name__)
 
 SCOPE_SELF = "self"
 SCOPE_EXTERNAL = "external"
+KIND_DB = "db"
+KINDS = frozenset({"db", "fhir", "file"})
+SCOPES = frozenset({SCOPE_SELF, SCOPE_EXTERNAL})
 
 
 def resolve_secret(ref: str | None) -> str | None:
@@ -78,6 +81,55 @@ class ConnectionRegistry:
             return None
         scope = conn.get("scope")
         return str(scope) if scope is not None else None
+
+    def is_external_db(self, connection_id: str | None) -> bool:
+        """`external_db_extract` に使える接続か（`kind: db` かつ `scope: external`）。
+
+        実行時の関門（executor）と、コンパイラの op の選択が同じ判定を使う。
+        `kind` を省いた `scope: external` の接続は、ここで False になり、実行時に拒否される。
+        """
+        conn = self.get(connection_id)
+        if not conn:
+            return False
+        return conn.get("kind") == KIND_DB and conn.get("scope") == SCOPE_EXTERNAL
+
+    def unresolved_reason(self, connection_id: str | None) -> str:
+        """DB 候補の接続を、自アプリDB/外部DBのどちらとも決められない理由（人に見せる文）。
+
+        未登録と、登録済みだが kind が無効（実行時の関門 kind: db かつ scope: external を
+        満たさない）を区別する。後者を「未登録」と書くと、直すべき場所を誤らせる。
+        """
+        conn = self.get(connection_id)
+        if conn is None:
+            return "connections.yaml に未登録"
+        if conn.get("kind") not in KINDS:
+            return "connections.yaml に登録済みだが kind が無効または未指定で、DB 接続には kind: db が必要"
+        return "接続の scope が解決できない"
+
+    def problems(self) -> list[str]:
+        """登録内容の不備（実行時に拒否される形）を、接続名つきの文で返す。
+
+        読み込み時に警告する。`scope: external` の DB 接続が `kind: db` を省くと、
+        コンパイルは通るのに `external_db_extract` が実行時に `path_not_permitted` になる。
+        """
+        found: list[str] = []
+        for cid, conn in self._connections.items():
+            kind, scope = conn.get("kind"), conn.get("scope")
+            if kind not in KINDS:
+                note = (
+                    "scope: external の DB 接続なら kind: db を書いてください。"
+                    if scope == SCOPE_EXTERNAL
+                    else ""
+                )
+                found.append(
+                    f"接続 {cid!r}: kind が不正または未指定です（{kind!r}。db / fhir / file のいずれか）。"
+                    f"この接続は external_db_extract に使えません。{note}"
+                )
+            if scope is not None and scope not in SCOPES:
+                found.append(
+                    f"接続 {cid!r}: scope が不正です（{scope!r}。self / external のいずれか）"
+                )
+        return found
 
     def dsn_of(self, connection_id: str | None) -> str | None:
         """db 接続の DSN（SQLAlchemy URL）を secret_ref から解決する。
@@ -150,6 +202,8 @@ class ConnectionRegistry:
             return cls()
         registry._connections = {str(k): (v or {}) for k, v in conns.items()}
         logger.info(f"接続レジストリ読み込み完了: {len(registry._connections)}件 ({p})")
+        for problem in registry.problems():
+            logger.warning(f"接続レジストリの不備: {problem}（{p}）")
         return registry
 
 

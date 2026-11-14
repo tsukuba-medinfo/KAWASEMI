@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import ipaddress
 import secrets
 import sys
 from pathlib import Path
@@ -521,6 +522,34 @@ def _serve_token(token_file: str | None) -> str:
     return token
 
 
+def _is_wildcard_host(host: str) -> bool:
+    """全インターフェースで待ち受ける指定か（`0.0.0.0`・`::`・`0`・`0:0:0:0:0:0:0:0`・
+    `::ffff:0.0.0.0`・空）。前後の空白と IPv6 の角括弧は無視する。"""
+    h = host.strip().strip("[]")
+    if h in ("", "0"):
+        return True
+    try:
+        ip = ipaddress.ip_address(h)
+    except ValueError:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return ip.is_unspecified
+
+
+def _browser_url(host: str, port: int) -> str:
+    """起動時に表示する、ブラウザで開ける URL。
+
+    `0.0.0.0` / `::` は「全インターフェースで待ち受ける」指定で、宛先としては使えない
+    （Host 検査も通らない）。同じマシンから開ける `localhost` を表示する。IPv6 リテラルは
+    URL では角括弧で囲む。
+    """
+    shown = "localhost" if _is_wildcard_host(host) else host.strip()
+    if ":" in shown and not shown.startswith("["):
+        shown = f"[{shown}]"
+    return f"http://{shown}:{port}/"
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     """ローカル索引診断 WebUI/JSON API を起動する（embedding 必須）。"""
     from kawasemi_indexer.store import get_store
@@ -574,7 +603,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         insecure_no_auth=args.no_auth,
         allowed_hosts=[*args.allowed_host, args.host],
     )
-    url = f"http://{args.host}:{args.port}/"
+    url = _browser_url(args.host, args.port)
     print(f"索引診断 WebUI を起動: {url} （Ctrl-C で停止）")
     if args.no_auth:
         print("  認証なし（--no-auth）。ループバックの bind でのみ有効です。")
@@ -583,6 +612,13 @@ def cmd_serve(args: argparse.Namespace) -> int:
         print(f"  ブラウザは {url}#token=<トークン> を開く。")
     else:
         print(f"  ブラウザはこの URL を開く（トークンは今回だけ有効）: {url}#token={token}")
+    if _is_wildcard_host(args.host):
+        print(
+            f"  {args.host} は全インターフェースで待ち受ける指定で、ブラウザで開く宛先ではありません。"
+            "上の URL は同じマシンから開く用です。"
+            "別のマシンから開くときは、その名前を --allowed-host に指定して、"
+            "その名前の URL を使ってください（Host 検査は緩めていません）。"
+        )
     uvicorn.run(app, host=args.host, port=args.port)
     return 0
 

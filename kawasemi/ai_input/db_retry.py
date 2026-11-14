@@ -11,6 +11,11 @@
   「一発で取れた項目」と「3回目で取れた項目」を後から区別できなくなるので
 - **上限まで失敗したら例外をそのまま上げる。** 握り潰すと「一時的なエラーが続いた」と
   「表が存在しない」を区別できなくなる
+- **やり直しても結果が変わらない失敗は投げ直さない**。読み取り専用の違反（書き込もうとした）、
+  文タイムアウトによる取り消し、権限・構文・データの誤りは、待っても通らない。投げ直すと、
+  文タイムアウト（既定60秒）× 待機 × 回数で接続を長く握り続ける。これらは1回目で
+  `RetriesExhausted(attempts=1)` として返す（原因は `__cause__`）。接続断・過負荷・
+  デッドロック・直列化の失敗のような一時的な失敗だけを投げ直す
 - 対象は施設の外部DBだけ。自アプリDB（`sql_extract`）は再試行しない。失敗した
   セッションを同じトランザクションのまま投げ直すと別の失敗を招く
 """
@@ -28,6 +33,26 @@ logger = get_logger(__name__)
 
 RETRY_WAIT_SECONDS = 10.0
 RETRY_MAX_ATTEMPTS = 3
+
+
+# 投げ直さない SQLSTATE（PostgreSQL）。完全一致と、先頭2桁のクラス。
+_NON_RETRYABLE_STATES = frozenset(
+    {"25006", "57014"}
+)  # 読み取り専用の違反、取り消し（タイムアウト）
+_NON_RETRYABLE_CLASSES = frozenset({"22", "23", "0A", "42"})  # データ・整合性・未対応・構文/権限
+
+
+def is_deterministic_failure(e: BaseException) -> bool:
+    """投げ直しても同じ結果になる失敗か（読み取り専用の違反・タイムアウト・権限や構文の誤り）。
+
+    判定できないものは False（＝従来どおり投げ直す）。一時的な失敗を取りこぼさないため。
+    """
+    orig = getattr(e, "orig", None) or e
+    state = getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)
+    if isinstance(state, str) and state:
+        return state in _NON_RETRYABLE_STATES or state[:2] in _NON_RETRYABLE_CLASSES
+    # SQLite は SQLSTATE を持たない。読み取り専用の違反だけを文言で見分ける
+    return "readonly database" in str(orig).lower() or "read-only" in str(orig).lower()
 
 
 class RetriesExhausted(Exception):  # noqa: N818
@@ -54,6 +79,8 @@ async def with_retry[T](
         try:
             return await call(), attempt
         except SQLAlchemyError as e:
+            if is_deterministic_failure(e):
+                raise RetriesExhausted(attempt, e) from e
             if attempt == RETRY_MAX_ATTEMPTS:
                 raise RetriesExhausted(attempt, e) from e
             logger.warning(

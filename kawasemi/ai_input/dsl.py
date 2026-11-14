@@ -172,7 +172,13 @@ _SQL_FORBIDDEN = re.compile(
     # - 設定の再読込・WAL の切替・統計のリセットはサーバ全体に作用する
     r"pg_reload_conf|pg_switch_wal|pg_stat_reset\w*|"
     # - サーバのファイルシステムの一覧・属性（`pg_read_file` 系は上で拒否済み）
-    r"pg_ls_\w+|pg_stat_file)"
+    r"pg_ls_\w+|pg_stat_file|"
+    # - **セッションの設定を書く・読む関数**。`set_config('app.x', ...)` は SELECT から
+    #   通り、RLS の方針が信頼する設定（`current_setting`）を計画の SQL が書き換えられる
+    #   （実機で再現）。`pg_notify` は読み取り専用でも通るが、他のセッションへ届く。
+    #   **これは多層の一つで境界ではない**（語の一覧は字句の層）。設定を書かせない保証は、
+    #   ロールから `set_config` の実行権を外す運用に置く（DEPLOYMENT.md）
+    r"set_config|current_setting|pg_notify)"
     + _SQL_WORD_END
     + "|"
     # - ラージオブジェクトの作成・書き込み・削除・ファイル入出力（`lo_import`/`lo_export` を含む）。

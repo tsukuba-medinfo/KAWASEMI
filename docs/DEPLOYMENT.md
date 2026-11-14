@@ -175,23 +175,107 @@ READONLY_DATABASE_URL=postgresql+asyncpg://kawasemi_ro:...@postgres:5432/kawasem
   計画の関数ノード（名前が `pg_` で始まるもの）と出力式で見つけて実行しません。`generate_series`・`unnest`・
   `jsonb_array_elements` のような組み込みの集合を返す関数は拒否しません。計画の文字列の走査はリテラルの中身も
   見るので、`'pg_x('` を含む定数は誤って拒否します（安全側）。これは追加の層で、ロールの権限の代わりではありません。
-  **名前が `pg_` で始まらないカタログ関数は拒否しません**: `current_setting`・`version()`・`has_table_privilege`・`to_regclass`・`set_config`・`inet_server_addr`・`txid_current` のような、名前が `pg_` で始まらないカタログ関数は拒否しません（設定の開示などは防げません。境界はロールの権限です）。
+  **名前が `pg_` で始まらないカタログ関数は、この計画の検査では拒否しません**: `version()`・`has_table_privilege`・`to_regclass`・`inet_server_addr`・`txid_current` のような関数です（設定の開示などは防げません。境界はロールの権限です）。`set_config`・`current_setting`・`pg_notify` は、SELECT 限定の検査の禁止語（字句の層）が拒否しますが、これは多層の一つで境界ではありません（下の RLS の注意を参照）。
   **表を読む関数**（`query_to_xml`・`table_to_xml`・`database_to_xml` は `pg_catalog` の組み込み関数で、
   ユーザー定義ではありません。`dblink` は拡張です）は計画に実表として出ないので、この検査では捕まえません。
   これらは SELECT 限定の検査の禁止語の一覧（補助の層）に頼ります。拒否は**名前**で決まります: `users`・`roles`・`datasets`・`subjects` など
   アプリの表と同じ名前の表は、どのスキーマにあっても読めません（臨床データの表にそれらの名前を付けないでください）。そちらは SELECT 限定の検査の禁止語の一覧
   （補助の層）と、上のロールの権限（境界）に頼ります。PostgreSQL・SQLite 以外の DB は表を検査
   できないので、プログラム SQL を実行しません。
-- **SQL の患者の範囲は、アプリでは保証していません（F7 の SQL 部分は閉じていません）。**
+- **SQL を認可された患者に絞ることは、運用者がデータベース側で行う責任です。アプリは保証しません。**
   `sql_extract` と `external_db_extract` の SQL は、`:patient_id` で絞る形を要求しません。
-  設計者が保存した SQL が `WHERE` を省けば、認可を通った1人の実行でも、読める表の全患者の行を
-  返します。SQL の構造を読んで絞り込みを保証する方法は、結合・導出表・定数の作り方でいくつも
-  すり抜けられるため採っていません。SQL の境界は DB 側にあります。
-  - (a) **読める表を絞る**（上の F8/F9）。アプリ自身の表（認証・回答・実行記録）は読めません。
-    臨床データの表は、読める範囲を `READONLY_DATABASE_URL` のロールの `GRANT` で必要な表だけにしてください
-  - (b) **行レベルセキュリティ**（PostgreSQL の RLS を、トランザクションごとの患者設定
-    〔`set_config('app.patient_id', ..., true)` など〕で絞る）が、今後の対応です。実装するまでは、
-    設計者ロールに実患者データの実行権限を持たせない運用（試行は `TRIAL_RUN_PATIENT_IDS` の患者だけ）で補ってください
+  設計者が保存した SQL が `WHERE` を省けば、認可を通った1人の実行でも、そのアカウントが読める
+  表の全患者の行を返します。アプリは SQL の構造を読んで患者の範囲を保証しません
+  （結合・導出表・定数の作り方でいくつもすり抜けられ、閉じ切れないため）。したがって、
+  臨床データを持つデータベースでは、次を運用者が整えてください。
+  - (a) **最小権限の読み取り専用アカウント**: 計画が読む表・ビューにだけ `GRANT SELECT` を与える。
+    アプリ自身の表（認証・回答・実行記録）を読めないのは、**`sql_extract`（アプリ DB）の経路だけ**です
+    （上の F8/F9）。`external_db_extract`（外部 DB）は表を検査しないので、外部 DB の表の範囲は
+    接続アカウントの `GRANT` だけが決めます。アプリ DB の臨床データの表も、
+    `READONLY_DATABASE_URL` のロールの `GRANT` が決めます
+  - (b) **患者ごとに絞るビュー、または行レベルセキュリティ（RLS）**: 参照の入口を、
+    現在の患者の行だけが見える形にする。PostgreSQL の一例を下に示す。
+    **アプリは、患者の設定を入れる仕組みを提供しません。** 設定する経路は運用者が用意します。
+    **計画の SQL が書き換えられる設定は境界ではありません**（下の例の注意）
+  - (c) **運用**: 設計者が自分の SQL 計画を確定でき、`TRIAL_RUN_PATIENT_IDS` の患者への試行実行もできます。
+    実患者を含むデータベースに対しては、設計者に確定と試行を任せない運用（確定は別の人、試行は
+    検証用のデータだけ）にしてください
+
+  PostgreSQL の RLS の例です（**そのまま使わず、自分のスキーマと接続の経路に合わせて書き直してください**）。
+
+  > **まず、やってはいけない形（実機 PostgreSQL 17 で確認）**: 方針が
+  > `current_setting('app.patient_id', true)` のような**セッション設定**を信頼する形は、
+  > 読み取りロールがその設定を書ける限り、境界になりません。
+  > - `SELECT set_config('app.patient_id', '他の患者', true)` を実行すれば、他の患者の行が読めます。
+  >   `set_config` の実行権を読み取りロールから外せば、これは止まります。
+  > - しかし、**`SET LOCAL app.patient_id = '他の患者'`（素の `SET` 文）は、実行権の取り消しでは止まりません**。
+  >   カスタム設定（`app.` で始まる名前）は、誰でも変更できる種類だからです。
+  >   PostgreSQL 15 以降の `REVOKE SET ON PARAMETER app.patient_id` でも止まらないことを確かめました
+  >   （パラメータの権限は、管理者だけが変えられる設定にしか効きません）。
+  > - `RESET ROLE` / `SET ROLE` も同様で、特権ロールで接続して `SET LOCAL ROLE plan_reader` とする形は、
+  >   `RESET ROLE` で元のロールに戻れます。
+  >
+  > アプリは、`set_config` / `current_setting` / `pg_notify` と、`SET`・`RESET`・複数文を、SELECT 限定の
+  > 検査で拒否します。これは**多層防御の一つで、境界ではありません**（字句の検査は、これまでも
+  > 何度か回避されました）。上の形が成り立つのは、この検査が破られていない間だけです。
+
+  **検査が破られても成り立つ形（実機 PostgreSQL 17 で確認した例）**: 患者の絞りを、
+  読み取りロールが**書けない表**に置きます。読み取りロールは**そのロールで直接ログイン**し
+  （特権ロールから `SET ROLE` しない）、患者の設定は、**別の接続**で信頼できる層が行います。
+
+  ```sql
+  -- 例: lab_results(patient_id, result_value, ...) を、接続ごとに決めた患者の行だけに絞る
+  CREATE ROLE plan_reader LOGIN NOBYPASSRLS;   -- 計画の SQL を流す接続が、直接ログインするロール。
+                                               -- 他のロールのメンバーにしない（SET ROLE の行き先を作らない）
+  CREATE ROLE conn_layer LOGIN;                -- 信頼できる層が、患者の設定を書くための接続ロール
+
+  -- 患者の設定表。読み取りロールは、自分の接続の行だけを読める。書けるのは信頼できる層だけ
+  CREATE SCHEMA ctl;
+  CREATE TABLE ctl.patient_ctx (backend_pid int PRIMARY KEY, patient_id text NOT NULL);
+  ALTER TABLE ctl.patient_ctx ENABLE ROW LEVEL SECURITY;
+  CREATE POLICY own_row ON ctl.patient_ctx FOR SELECT TO plan_reader
+    USING (backend_pid = pg_catalog.pg_backend_pid());
+  CREATE POLICY layer_all ON ctl.patient_ctx FOR ALL TO conn_layer USING (true) WITH CHECK (true);
+  GRANT USAGE ON SCHEMA ctl TO plan_reader, conn_layer;
+  GRANT SELECT ON ctl.patient_ctx TO plan_reader;
+  GRANT SELECT, INSERT, UPDATE, DELETE ON ctl.patient_ctx TO conn_layer;
+
+  -- 臨床データの表: 読み取りロールには、設定表が示す患者の行だけを見せる
+  ALTER TABLE lab_results ENABLE ROW LEVEL SECURITY;
+  ALTER TABLE lab_results FORCE ROW LEVEL SECURITY;      -- 表の所有者にも効かせる
+  CREATE POLICY patient_scope ON lab_results FOR SELECT TO plan_reader
+    USING (patient_id = (SELECT c.patient_id FROM ctl.patient_ctx c
+                          WHERE c.backend_pid = pg_catalog.pg_backend_pid()));
+  GRANT USAGE ON SCHEMA public TO plan_reader;
+  GRANT SELECT ON lab_results TO plan_reader;
+
+  -- 読み取りロールに、表・関数・一時表を作らせない（設定表を隠す偽物を作らせない）
+  REVOKE ALL ON SCHEMA public FROM PUBLIC;
+  REVOKE TEMPORARY ON DATABASE mydb FROM PUBLIC;
+
+  -- 運用（信頼できる層）: 計画の SQL を流す接続の pg_backend_pid() を知り、別の接続で
+  --   INSERT INTO ctl.patient_ctx VALUES (<その pid>, '<認可された患者の ID>')
+  --     ON CONFLICT (backend_pid) DO UPDATE SET patient_id = EXCLUDED.patient_id;
+  -- を実行してから計画の SELECT を流し、終わったら必ず DELETE FROM ctl.patient_ctx WHERE backend_pid = <その pid>
+  -- を行う。設定が無い接続は 0 行になる。
+  ```
+
+  この形で、読み取りロールとして次を試して、他の患者の行が読めないことを確かめました:
+  `SET LOCAL app.patient_id`、`set_config(...)`、`RESET ROLE`、`SET ROLE conn_layer` / `SET ROLE <管理者>`
+  （権限が無く失敗）、設定表への `INSERT` / `UPDATE` / `DELETE`（失敗）、`search_path` を `pg_temp` 先頭にする、
+  一時表・一時関数・`public` への表や関数の作成（失敗）。
+
+  守る条件は次のとおりです。**アプリはこの経路を提供しません**。運用者が、接続の層（プロキシや接続プール、
+  計画を流す専用の部品）として用意します。
+  - 計画の SQL を流す接続は、`plan_reader` で直接ログインする（特権ロールからの `SET ROLE` にしない）。
+  - 設定は別の接続で書き、使い終わったら消す。接続プールで同じ接続を使い回すときは、要求ごとに上書きし、
+    終わりに消す（古い行が残ると、同じ pid の次の要求が前の患者を見る）。
+  - 表と関数は、スキーマ名つきで書く（上の例のとおり）。
+  - `plan_reader` に、ほかの表・ビュー・関数の `GRANT` を足さない。`PUBLIC` への `REVOKE` は、
+    アプリ本体や監視など他のロールにも影響するので、影響を確かめてから行い、PostgreSQL の更新のあとにも
+    権限が残っていることを確かめる。
+  - 接続の層を使わずに済ませるなら、**患者ごとのビューやアカウント**にして、計画の SQL が
+    別の患者の入口に届かない形にする（これも、アプリではなく運用者の設計です）。
 - **ファイルと FHIR の患者の範囲は、アプリが確かめます。** 次の形でなければ実行しません（`path_not_permitted`）。
   - ファイル: `path_pattern` のパス区間の1つが `{{patient_id}}`（`{{patient_id}}.txt` は可、
     `{{a}}{{patient_id}}` は不可）
@@ -210,16 +294,31 @@ READONLY_DATABASE_URL=postgresql+asyncpg://kawasemi_ro:...@postgres:5432/kawasem
 ### 外部DBの接続アカウント（connections.yaml）
 
 DSL の `external_db_extract` は、接続レジストリ（`connections.yaml`）に登録した外部DB（DWH など）へ、
-LLM や索引が組んだ SELECT を発行します。コードは外部DBの接続を読み取り専用にしません。
-**書き込みを止める境界は、接続に使うアカウントの権限です。** SELECT 限定の文字列検査は補助の層で、
-境界ではありません（`docs/dsl_specification.md` §6.3）。次を必ず守ってください。
+LLM や索引が組んだ SELECT を発行します。アプリは、使える接続を `kind: db` かつ `scope: external` の
+ものに限り（fhir・file・自アプリ DB の接続は拒否します）、抽出を**読み取り専用トランザクション**の中で
+実行し（PostgreSQL は `READ ONLY` と `statement_timeout`〔`READONLY_STATEMENT_TIMEOUT_SECONDS`〕、SQLite は
+`query_only`、ほかの方言は `SET TRANSACTION READ ONLY`。通らない方言は失敗します）、終了時に必ずロールバックします。
+これは追加の層です。**書き込みを止める境界は、接続に使うアカウントの権限です。** SELECT 限定の文字列検査も
+補助の層で、境界ではありません（`docs/dsl_specification.md` §6.3）。また、**どの患者の行を返すかは
+アプリが保証しません**（上の「SQL を認可された患者に絞ることは…」）。次を必ず守ってください。
 
+- **`connections.yaml` の DB 接続には `kind: db` と `scope: external` の両方を書く**。`kind` を省いた
+  `scope: external` の接続は、`external_db_extract` に使えません。起動（レジストリの読み込み）時に
+  接続名つきで警告を出し、コンパイルは `external_db_extract` を作らず（不足として人の補完に回す）、
+  実行時にも `path_not_permitted` で断ります。
+- **読み取り専用の違反（SQLSTATE 25006）と取り消し（57014）、データ・整合性・未対応・構文/権限/未定義の誤り
+  （クラス 22・23・0A・42。表が無い 42P01 を含む）は、投げ直しません**（待っても通らないため）。
+  接続断・デッドロック・直列化の失敗・ロック待ちの失敗のような一時的なエラーと、分類できないエラーだけを、
+  10 秒待って最大 3 回投げ直します。注意点が 2 つあります。(1) 57014 は、文タイムアウトだけでなく、
+  管理者が `pg_cancel_backend` で取り消した場合にも付くので、その場合も投げ直しません。
+  (2) 外部 DB の表を作り直している最中の一時的な「表が無い」（42P01）も、投げ直さずに 1 回目で失敗します。
+  その項目は、再実行で取り直してください。
 - **接続アカウントは読み取り専用にする**。書き込み・DDL・関数やプロシージャの作成・実行の権限を与えません。
 - **抽出に要る表とビューにだけ `SELECT` を与える**。読み取り専用のアカウントでも、与えられた表は
   すべて読めます（たとえば `UNION` で別の表を読み足すことは、文字列検査が止めなくても権限が止める）。
   スキーマ全体への `GRANT SELECT` は避け、患者情報以外の機微な表（認証情報など）は含めないでください。
-- **DB 側で文の実行時間の上限を掛ける**。外部DBへの SQL には、アプリからは `statement_timeout` を
-  掛けません。アカウントに設定してください。
+- **DB 側で文の実行時間の上限も掛ける**。アプリが掛ける上限は PostgreSQL だけです。アカウントにも
+  設定してください（アプリの上限とは独立の、境界側の設定です）。
 
 PostgreSQL の例:
 

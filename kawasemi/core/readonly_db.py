@@ -386,7 +386,7 @@ async def _release_session_state(conn: AsyncConnection, dialect: str) -> None:
 
 
 @asynccontextmanager
-async def _readonly_transaction(engine: AsyncEngine) -> AsyncIterator[AsyncConnection]:
+async def readonly_transaction(engine: AsyncEngine) -> AsyncIterator[AsyncConnection]:
     """別接続で読み取り専用トランザクションを張り、抜けるときに必ずロールバックする。"""
     dialect = engine.dialect.name
     async with engine.connect() as conn:
@@ -452,5 +452,5 @@ async def readonly_program_sql(
         if _refuses_without_dsn():
             raise ReadOnlySessionUnavailableError(UNCONFIGURED_PRODUCTION_WARNING)
         engine = _app_engine(db)
-    async with _readonly_transaction(engine) as conn:
+    async with readonly_transaction(engine) as conn:
         yield conn
