@@ -32,11 +32,11 @@
             <h3>メタデータ</h3>
             <div class="form-group">
                 <label for="subject">患者 (subject)</label>
-                <input type="text" id="subject" name="subject" placeholder="Patient/xxx" value="{{ response.subject or '' }}">
+                <input type="text" id="subject" value="{{ response.subject or '' }}" readonly>
             </div>
             <div class="form-group">
                 <label for="author">作成者 (author)</label>
-                <input type="text" id="author" name="author" placeholder="Practitioner/xxx" value="{{ response.author or '' }}">
+                <input type="text" id="author" value="{{ response.author or '' }}" readonly>
             </div>
             <div class="form-group">
                 <label for="status">ステータス</label>

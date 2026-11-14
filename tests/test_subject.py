@@ -12,6 +12,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kawasemi.models import CaseAssignment, Subject, get_or_create_subject
+from kawasemi.models.user import User
+from tests.lease_helpers import ensure_parents
 
 
 async def test_get_or_create_is_idempotent(db_session: AsyncSession) -> None:
@@ -47,11 +49,15 @@ async def test_whitespace_is_normalized(db_session: AsyncSession) -> None:
 
 async def test_case_assignment_links_to_subject(db_session: AsyncSession) -> None:
     subject = await get_or_create_subject(db_session, "STUDY-A", "0000123456")
+    await ensure_parents(db_session, 1, 1)
+    holder = User(username="ca_holder", email="ca@example.com", password_hash="x", full_name="c")
+    db_session.add(holder)
+    await db_session.flush()
     ca = CaseAssignment(
         questionnaire_id=1,
         patient_id="0000123456",
         subject_id=subject.id,
-        assigned_to_id=1,
+        assigned_to_id=holder.id,
     )
     db_session.add(ca)
     await db_session.commit()

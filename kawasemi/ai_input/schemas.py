@@ -5,6 +5,7 @@ from typing import Any, Literal, get_args
 
 from pydantic import AliasChoices, BaseModel, Field, field_validator
 
+from kawasemi.ai_input.models import MAX_SQL_LENGTH
 from kawasemi.core.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -499,7 +500,7 @@ class DSLStep(BaseModel):
     guard: str | bool | None = None
 
     # --- 抽出系（sql_extract / external_db_extract / file_extract） ---
-    sql: str | None = None
+    sql: str | None = Field(default=None, max_length=MAX_SQL_LENGTH)
     # 接続レジストリ（connections.yaml）の接続ID。executor はこの名前で DSN/
     # root_path を解決する。external_db_extract / file_extract で使用。
     connection_id: str | None = None

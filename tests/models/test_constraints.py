@@ -3,6 +3,7 @@
 db_session は in-memory SQLite（Base.metadata.create_all）。SQLite は既定で
 外部キー制約 OFF のため DB レベルの ondelete は検証しないが、ORM の
 cascade="all, delete-orphan" は SQLAlchemy が発行するため検証できる。
+（テスト用エンジンは本番と同じく外部キーを強制する。親行は `_parents` で先に作る。）
 """
 
 from datetime import UTC, datetime, timedelta
@@ -18,13 +19,35 @@ from kawasemi.models.dataset import Dataset, DatasetQuestionnaire
 from kawasemi.models.input_target import InputTarget, InputTargetStatus
 from kawasemi.models.questionnaire import Questionnaire
 from kawasemi.models.refresh_token import RefreshToken
+from kawasemi.models.user import User
+
+# --- 親行の用意（外部キーを強制するため） ---
+
+
+async def _parents(db: AsyncSession, *questionnaire_ids: int, dataset_id: int = 1) -> None:
+    """指定した id のデータセットと質問票を作る。"""
+    db.add(Dataset(id=dataset_id, name=f"D{dataset_id}"))
+    for qid in questionnaire_ids:
+        db.add(
+            Questionnaire(
+                id=qid,
+                fhir_id=f"qc-{qid}",
+                content={"resourceType": "Questionnaire"},
+                status="active",
+            )
+        )
+    await db.flush()
+
 
 # --- default 値 ---
 
 
 @pytest.mark.asyncio
 async def test_refresh_token_default_not_revoked(db_session: AsyncSession) -> None:
-    rt = RefreshToken(jti="j1", user_id=1, expires_at=datetime.now(UTC) + timedelta(days=1))
+    user = User(username="rt_user", email="rt@example.com", password_hash="x", full_name="n")
+    db_session.add(user)
+    await db_session.flush()
+    rt = RefreshToken(jti="j1", user_id=user.id, expires_at=datetime.now(UTC) + timedelta(days=1))
     db_session.add(rt)
     await db_session.flush()
     await db_session.refresh(rt)
@@ -42,6 +65,7 @@ async def test_questionnaire_default_not_deleted(db_session: AsyncSession) -> No
 
 @pytest.mark.asyncio
 async def test_input_target_default_status_and_attention(db_session: AsyncSession) -> None:
+    await _parents(db_session, 1)
     t = InputTarget(dataset_id=1, questionnaire_id=1, patient_id="P1")
     db_session.add(t)
     await db_session.flush()
@@ -52,6 +76,7 @@ async def test_input_target_default_status_and_attention(db_session: AsyncSessio
 
 @pytest.mark.asyncio
 async def test_batch_job_defaults(db_session: AsyncSession) -> None:
+    await _parents(db_session, 1)
     job = BatchJob(dataset_id=1, questionnaire_id=1)
     db_session.add(job)
     await db_session.flush()
@@ -79,6 +104,8 @@ async def test_questionnaire_fhir_id_unique(db_session: AsyncSession) -> None:
 
 @pytest.mark.asyncio
 async def test_dataset_questionnaire_composite_unique(db_session: AsyncSession) -> None:
+    await _parents(db_session, 2)
+    await db_session.commit()
     db_session.add(DatasetQuestionnaire(dataset_id=1, questionnaire_id=2))
     db_session.add(DatasetQuestionnaire(dataset_id=1, questionnaire_id=2))
     with pytest.raises(IntegrityError):
@@ -88,6 +115,8 @@ async def test_dataset_questionnaire_composite_unique(db_session: AsyncSession) 
 
 @pytest.mark.asyncio
 async def test_input_target_composite_unique(db_session: AsyncSession) -> None:
+    await _parents(db_session, 2)
+    await db_session.commit()
     db_session.add(InputTarget(dataset_id=1, questionnaire_id=2, patient_id="P1"))
     db_session.add(InputTarget(dataset_id=1, questionnaire_id=2, patient_id="P1"))
     with pytest.raises(IntegrityError):
@@ -97,6 +126,8 @@ async def test_input_target_composite_unique(db_session: AsyncSession) -> None:
 
 @pytest.mark.asyncio
 async def test_input_target_composite_allows_different_patient(db_session: AsyncSession) -> None:
+    await _parents(db_session, 2)
+    await db_session.commit()
     db_session.add(InputTarget(dataset_id=1, questionnaire_id=2, patient_id="P1"))
     db_session.add(InputTarget(dataset_id=1, questionnaire_id=2, patient_id="P2"))
     await db_session.commit()  # patient_id が異なれば衝突しない
@@ -109,6 +140,11 @@ async def test_input_target_composite_allows_different_patient(db_session: Async
 
 @pytest.mark.asyncio
 async def test_dataset_delete_cascades_children(db_session: AsyncSession) -> None:
+    db_session.add(
+        Questionnaire(
+            id=1, fhir_id="qc-1", content={"resourceType": "Questionnaire"}, status="active"
+        )
+    )
     ds = Dataset(name="D")
     db_session.add(ds)
     await db_session.flush()

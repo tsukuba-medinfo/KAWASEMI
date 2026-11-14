@@ -283,10 +283,13 @@ async def test_validation_report_idor_blocked_for_non_owner(
 ) -> None:
     """IDOR 防止: 実行者でない data_entry（admin/verifier でもない）は、
     他者が実行した記録の検証文書（患者ID・抽出値・生LLM出力を含む）を閲覧できない（403）。"""
+    other = User(username="other_exec", email="oe@example.com", password_hash="x", full_name="o")
+    db_session.add(other)
+    await db_session.flush()
     qid, eid = await _make_execution(
         db_session,
         trace=DETERMINISTIC_TRACE,
-        executed_by_id=collector_user.id + 999,  # 別ユーザーが実行した記録
+        executed_by_id=other.id,  # 別ユーザーが実行した記録
     )
     # 403 は様式の分岐より前段の閲覧権限検査で返るのでフラグに依存しないが、
     # このファイルの作法（フラグは常に明示する）に揃える。

@@ -169,9 +169,11 @@ async def test_it_reports_provenance_that_matches_no_record(db_session: AsyncSes
     出すことで、その状態が表に出る。
     """
     q = await _questionnaire(db_session)
+    other = await _questionnaire(db_session, "q-recompute-other")  # id は q.id + 1
+    assert other.id == q.id + 1
     db_session.add(_annotation(q.id, "item1"))
     # 来歴は「別の DB での採番」を指している（item1 は q.id + 1 側にある、という食い違い）
-    db_session.add(_call(q.id + 1, ["item1", "item2"]))
+    db_session.add(_call(other.id, ["item1", "item2"]))
     await db_session.commit()
 
     result = await recompute(db_session, apply=True)

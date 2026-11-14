@@ -486,6 +486,15 @@ async def test_run_batch_job_does_not_revert_targets_claimed_or_completed_meanwh
 
     from sqlalchemy import update
 
+    from kawasemi.models.user import User
+
+    holder = User(
+        username="racing_holder", email="rh@example.com", password_hash="x", full_name="r"
+    )
+    db_session.add(holder)
+    await db_session.commit()
+    holder_id = holder.id
+
     class _Racing(_FakeInterpreter):
         async def execute(self, plans, patient_id, db, *a, **kw):
             result = await super().execute(plans, patient_id, db, *a, **kw)
@@ -493,7 +502,7 @@ async def test_run_batch_job_does_not_revert_targets_claimed_or_completed_meanwh
                 if patient_id == "p-002":  # 処理中に収集者が受け取った
                     values = {
                         "status": InputTargetStatus.IN_PROGRESS,
-                        "started_by_id": 7,
+                        "started_by_id": holder_id,
                         "lease_expires_at": datetime.now(UTC) + timedelta(minutes=30),
                     }
                 elif patient_id == "p-003":  # 処理中に完了された
@@ -527,7 +536,7 @@ async def test_run_batch_job_does_not_revert_targets_claimed_or_completed_meanwh
         by = {t.patient_id: t for t in rows}
         assert by["p-001"].status == InputTargetStatus.AI_DRAFTED
         assert by["p-002"].status == InputTargetStatus.IN_PROGRESS
-        assert by["p-002"].started_by_id == 7
+        assert by["p-002"].started_by_id == holder_id
         assert by["p-003"].status == InputTargetStatus.COMPLETED
         execs = (
             (

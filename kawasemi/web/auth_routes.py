@@ -433,6 +433,11 @@ async def refresh_access_token(
         logger.warning(f"リフレッシュトークン再利用を検知: 家系失効 user_id={rt.user_id}")
         return JSONResponse({"success": False, "message": "リフレッシュトークンが無効です"}, 401)
 
+    if rt is not None and rt.user_id != int(payload["sub"]):
+        # jti の持ち主と sub が食い違う（持ち主を取り違えさせる形）。拒否する
+        logger.warning("リフレッシュトークン拒否: jti の持ち主と sub が不一致")
+        return JSONResponse({"success": False, "message": "リフレッシュトークンが無効です"}, 401)
+
     now = datetime.now(UTC)
     expires_at = rt.expires_at if rt else None
     if expires_at is not None and expires_at.tzinfo is None:

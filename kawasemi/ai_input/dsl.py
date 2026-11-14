@@ -19,7 +19,7 @@ from collections.abc import Callable, Iterable
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any, TypeGuard
 
-from kawasemi.ai_input.models import OpType
+from kawasemi.ai_input.models import MAX_SQL_LENGTH, OpType
 
 # 各 op が「人間補完なしで実行可能」になるために最低限必要なフィールド。
 # ここが欠けていて needs_input=false の場合は検証エラーにする。
@@ -233,13 +233,13 @@ _SQL_UNICODE_ESCAPE = re.compile(_SQL_WORD_START + r"u&\s*[\"']", re.IGNORECASE)
 #   `SELECT [a'] ; SELECT 1 ; [']` は PostgreSQL の読みでは `;` が文字列の中に入るが、SQLite の
 #   読みでは引用の外に出るので落ちる。
 # - 閉じていない引用は拒否する。
+_SQL_LONG_WORD = re.compile(r"\w{256}")
 _SQL_IDENT_CHAR = re.compile(r"[A-Za-z0-9_$\x80-\U0010ffff]")
 _SQL_DOLLAR_TAG = re.compile(r"\$(?:[A-Za-z_\x80-\U0010ffff][A-Za-z0-9_\x80-\U0010ffff]*)?\$")
 _SQL_COMMENT_MARKERS = ("--", "/*", "*/")
 # 引用を置き換える印。空白にすると `SELECT 1; 'x'` の文末側の引用が消えて「文末の `;` が1つ」に
 # 見え、SQLite では2つ目の文になる（`` SELECT 1 ;`x` ``）。空白でも `;` でもない文字で残す
 _SQL_QUOTED_PLACEHOLDER = " Q "
-_SQLITE_TCL_VARIABLE = re.compile(r"[$@:#](?:[A-Za-z0-9_$\x80-\U0010ffff]|::)+\(")
 
 
 class _SqlLexError(ValueError):
@@ -280,6 +280,37 @@ def _is_disallowed_char(sql: str, i: int) -> bool:
     return unicodedata.category(ch)[0] in "CZ"
 
 
+def _tcl_variable_name_end(sql: str, start: int, memo: dict[int, int]) -> int | None:
+    """`sql[start]`（`$@:#`）で始まる SQLite の `$name(` 形の変数の、`(` の次の位置を返す
+
+    名前は識別子文字と `::` の並びで、その直後が `(` のときだけ変数。無ければ None。
+
+    以前は正規表現 `[$@:#](?:ident|::)+\\(` を各開始位置で試していたが、`:` の長い連続では
+    各位置が文末まで読み直す二次時間になった。ここでは位置ごとの「名前が終わる位置」を
+    `memo` に残し、全体で線形にする（名前の分解は一通りなので、貪欲に読んだ結果が正規表現の
+    結果と同じ）。
+    """
+    n = len(sql)
+    path: list[int] = []
+    q = start + 1
+    while q not in memo:
+        if q < n and _SQL_IDENT_CHAR.match(sql[q]):
+            path.append(q)
+            q += 1
+        elif sql.startswith("::", q):
+            path.append(q)
+            q += 2
+        else:
+            memo[q] = q
+            break
+    stop = memo[q]
+    for p in path:
+        memo[p] = stop
+    if stop > start + 1 and stop < n and sql[stop] == "(":
+        return stop + 1
+    return None
+
+
 def _lex_sql(sql: str, *, sqlite: bool) -> str:
     """引用を印（`_SQL_QUOTED_PLACEHOLDER`）へ置き換えた SQL を返す（セミコロン・先頭語の検査用）。
 
@@ -291,6 +322,7 @@ def _lex_sql(sql: str, *, sqlite: bool) -> str:
             バックスラッシュでエスケープした引用符。
     """
     code: list[str] = []
+    tcl_memo: dict[int, int] = {}
     i = 0
     n = len(sql)
     while i < n:
@@ -307,10 +339,10 @@ def _lex_sql(sql: str, *, sqlite: bool) -> str:
             # SQLite の TCL 形式の変数 `$a(…)`（`@`・`:`・`#` も同じ）は `)` までが変数名の
             # 一部で、中身はコードとして読まれない（`$a([) , $b$ ; SELECT 2 $b$ ]` の `;` は
             # SQLite では引用の外）。中に空白があると SQLite はトークンにしないので拒否する
-            m = _SQLITE_TCL_VARIABLE.match(sql, i)
-            if m:
-                end = sql.find(")", m.end())
-                if end < 0 or any(c.isspace() for c in sql[m.end() : end]):
+            m_end = _tcl_variable_name_end(sql, i, tcl_memo)
+            if m_end is not None:
+                end = sql.find(")", m_end)
+                if end < 0 or any(c.isspace() for c in sql[m_end:end]):
                     raise _SqlLexError("SQLite の変数 $name(…) の読みが決まらない")
                 code.append(_SQL_QUOTED_PLACEHOLDER)
                 i = end + 1
@@ -378,6 +410,16 @@ def is_select_only_sql(sql: str) -> bool:
     保証していない**ため、`... UNION SELECT password_hash FROM users` が通っていた（実測）。
     """
     if not sql or not sql.strip():
+        return False
+    # 正規表現・字句解析の前に長さを抑える（長い入力で処理時間が伸びるのを防ぐ）
+    if len(sql) > MAX_SQL_LENGTH:
+        return False
+    # 単語の文字が長く続く入力を拒否する。禁止語の正規表現は語の末尾を `\w*` / `\w+` で読むので、
+    # 開始位置（直前が数字や `$` なら語の途中でも開始になる）ごとに連なりの終わりまで読み直し、
+    # `1lo_1lo_1lo_…` のような入力で二次時間になった。連なりを制限すれば、1か所あたりの読みが
+    # 有界になり、全体は線形で済む。識別子は PostgreSQL で 63 バイトに切られるので、この長さの
+    # 連なりを要する正当な SQL は無い
+    if _SQL_LONG_WORD.search(sql):
         return False
     try:
         # PostgreSQL の読みと SQLite の読みの両方で通ること（上の「方針」）

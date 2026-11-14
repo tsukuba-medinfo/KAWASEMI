@@ -17,6 +17,7 @@ from kawasemi.ai_input.models import ExecutionStatus, InputExecution, InputPlan,
 from kawasemi.models.batch_job import BatchJob, BatchJobStatus
 from kawasemi.models.input_target import InputTarget, InputTargetStatus
 from tests.conftest import TestSessionLocal
+from tests.lease_helpers import ensure_parents
 
 # FK は本テストのインメモリSQLiteで強制されないため、Dataset/Questionnaire 実体は作らず
 # ダミーIDで参照する（ランナーのロジック検証に外部実体は不要）。
@@ -32,6 +33,7 @@ async def _seed(
     cancel: bool = False,
     total: int | None = None,
 ) -> int:
+    await ensure_parents(db, _DSID, _QID)
     for lid in plan_link_ids:
         db.add(
             InputPlan(
@@ -211,6 +213,7 @@ async def test_run_batch_job_persists_program_snapshot(
         "steps": [{"op": "sql_extract", "id": "s", "reasoning": "バッチ根拠", "sql": "SELECT 1"}],
         "return": "$s",
     }
+    await ensure_parents(db_session, _DSID, _QID)
     db_session.add(
         InputPlan(
             questionnaire_id=_QID, link_id="item1", program=program, status=PlanStatus.CONFIRMED
@@ -289,8 +292,10 @@ async def test_run_batch_job_rejects_values_that_do_not_fit_the_answer_type(
 ) -> None:
     """バッチ経路も回答型を executor へ渡す。date 項目の「不明」は prefill しない。"""
     from kawasemi.ai_input.models import FailureCode
+    from kawasemi.models.dataset import Dataset
     from kawasemi.models.questionnaire import Questionnaire
 
+    db_session.add(Dataset(id=_DSID, name="stub-dataset"))
     db_session.add(
         Questionnaire(
             id=_QID,
