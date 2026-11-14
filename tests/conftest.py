@@ -17,6 +17,7 @@ import pytest
 import yaml
 from fastapi_csrf_protect import CsrfProtect
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -54,6 +55,15 @@ test_engine = create_async_engine(
     connect_args={"check_same_thread": False},
     poolclass=StaticPool,
 )
+
+
+@event.listens_for(test_engine.sync_engine, "connect")
+def _enable_sqlite_foreign_keys(dbapi_connection, connection_record):  # type: ignore[no-untyped-def]
+    """本番（core/database.py）と同じく外部キーを強制する。宙に浮いた id を入れる fixture を許さない。"""
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.close()
+
 
 TestSessionLocal = sessionmaker(test_engine, class_=AsyncSession, expire_on_commit=False)
 

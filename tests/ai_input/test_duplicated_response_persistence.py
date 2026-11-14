@@ -22,6 +22,15 @@ from kawasemi.ai_input.design_provenance import DesignLlmRecorder, save_design_l
 from kawasemi.ai_input.llm_json import LLMCallRecord
 from kawasemi.ai_input.models import ClinicalAnnotation, DesignLlmCall, DesignRole
 from kawasemi.ai_input.routes import _duplicated_link_ids
+from tests.lease_helpers import ensure_parents
+
+
+@pytest.fixture(autouse=True)
+async def _parent_questionnaires(db_session: AsyncSession) -> None:
+    """来歴・注釈の親（質問票 1 と 7）。テスト用エンジンも本番と同じく外部キーを強制する。"""
+    await ensure_parents(db_session, 1, 1)
+    await ensure_parents(db_session, 1, 7)
+    await db_session.commit()
 
 
 def _record(label: str = "臨床的意味AI下書き") -> LLMCallRecord:

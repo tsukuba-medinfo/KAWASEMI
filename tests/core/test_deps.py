@@ -16,7 +16,7 @@ from kawasemi.models.case_assignment import CaseAssignment
 from kawasemi.models.input_target import InputTargetStatus
 from kawasemi.models.role import Role, RoleType
 from kawasemi.models.user import User, UserRole
-from tests.lease_helpers import lease_patient, make_target
+from tests.lease_helpers import ensure_parents, lease_patient, make_target
 
 
 def _user_with_roles(*role_names: str) -> User:
@@ -182,6 +182,7 @@ class TestUserCanAccessPatient:
     ) -> None:
         """CaseAssignment は認可の根拠ではない（残っているのは表だけ）。"""
         collector_user.active_role = RoleType.COLLECTOR
+        await ensure_parents(db_session, 1, 1)
         db_session.add(
             CaseAssignment(questionnaire_id=1, patient_id="P-CA", assigned_to_id=collector_user.id)
         )
@@ -191,7 +192,12 @@ class TestUserCanAccessPatient:
     @pytest.mark.asyncio
     async def test_other_users_lease_denied(self, db_session, collector_user: User) -> None:
         collector_user.active_role = RoleType.COLLECTOR
-        await lease_patient(db_session, collector_user.id + 999, "P-OTHER")
+        other = User(
+            username="other_holder", email="o@example.com", password_hash="x", full_name="o"
+        )
+        db_session.add(other)
+        await db_session.flush()
+        await lease_patient(db_session, other.id, "P-OTHER")
         assert await user_can_access_patient(db_session, collector_user, "P-OTHER") is False
 
     @pytest.mark.asyncio

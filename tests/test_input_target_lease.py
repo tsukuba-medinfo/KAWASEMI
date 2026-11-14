@@ -930,3 +930,33 @@ async def test_submit_with_the_correct_input_target_id_completes_it(
     )
     assert resp.status_code == 200
     assert (await _reload(db_session, t.id)).status == InputTargetStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_submit_ignores_the_client_author_and_uses_the_signed_in_user(
+    collector_client: AsyncClient,
+    collector_user: User,
+    db_session: AsyncSession,
+    csrf_token: str,
+) -> None:
+    """Web の確定保存でも、作成者は認証したユーザーに固定する（クライアントの author は採らない）。"""
+    from kawasemi.models.questionnaire_response import QuestionnaireResponse
+
+    ds, t = await _dataset_with_target(db_session, "P-AUTH", status=InputTargetStatus.IN_PROGRESS)
+    t.started_by_id = collector_user.id
+    t.lease_expires_at = datetime.now(UTC) + timedelta(minutes=30)
+    await db_session.commit()
+    resp = await collector_client.post(
+        f"/forms/{t.questionnaire_id}/submit",
+        data={
+            "subject": "Patient/P-AUTH",
+            "name": "x",
+            "author": "Practitioner/spoofed-doctor",
+        },
+        headers={"X-CSRF-Token": csrf_token},
+    )
+    assert resp.status_code == 200
+    saved = (await db_session.execute(select(QuestionnaireResponse))).scalars().all()
+    assert len(saved) == 1
+    assert saved[0].author == f"User/{collector_user.id}"
+    assert "spoofed" not in str(saved[0].content)

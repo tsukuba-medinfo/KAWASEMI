@@ -244,6 +244,41 @@ def test_migration_makes_users_autoincrement_and_keeps_rows(tmp_path: Path) -> N
         assert conn.execute("SELECT id FROM users WHERE username='u3'").fetchone()[0] == 3
 
 
+def test_migration_purges_orphans_and_seeds_the_sequence_above_them(tmp_path: Path) -> None:
+    """旧アプリで（外部キー無効のまま）ユーザーを消した DB を移行しても、残りのトークンは通らない。
+
+    ユーザー 3 を消し、そのリフレッシュトークンの行が残った DB を移行する。宙に浮いた行は
+    片付き、`users` の次の id は 3 ではなく 4 になる（id が戻らない）。
+    """
+    db_path = tmp_path / "legacy.db"
+    before = _alembic(db_path, "upgrade", "d1f3b5a7c9e2")
+    assert before.returncode == 0, before.stderr
+    with sqlite3.connect(db_path) as conn:
+        for i in (1, 2, 3):
+            conn.execute(_INSERT_USER, (i, f"u{i}", f"u{i}@example.com"))
+        for jti, uid in (("keep", 2), ("orphan", 3)):
+            conn.execute(
+                "INSERT INTO refresh_tokens (jti, user_id, expires_at, revoked, created_at, "
+                "updated_at) VALUES (?, ?, '2099-01-01', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                (jti, uid),
+            )
+        # 旧アプリの削除（PRAGMA foreign_keys は OFF のまま）: 子表の行が残る
+        conn.execute("DELETE FROM users WHERE id = 3")
+
+    after = _alembic(db_path, "upgrade", "head")
+    assert after.returncode == 0, after.stderr
+    with sqlite3.connect(db_path) as conn:
+        jtis = {r[0] for r in conn.execute("SELECT jti FROM refresh_tokens")}
+        assert jtis == {"keep"}
+        conn.execute(
+            "INSERT INTO users (username, email, password_hash, full_name, is_active, "
+            "failed_login_count, token_version, created_at, updated_at) VALUES "
+            "('new', 'new@example.com', 'x', 'n', 1, 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        )
+        new_id = conn.execute("SELECT id FROM users WHERE username='new'").fetchone()[0]
+        assert new_id == 4
+
+
 # ===== F6 =====
 
 
