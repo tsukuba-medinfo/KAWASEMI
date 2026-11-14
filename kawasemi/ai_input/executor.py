@@ -868,7 +868,7 @@ class DSLInterpreter:
         """DSN に対する AsyncEngine を取得（生成済みなら再利用）。"""
         engine = self._external_engines.get(dsn)
         if engine is None:
-            engine = create_async_engine(dsn, pool_pre_ping=True)
+            engine = create_async_engine(dsn, pool_pre_ping=True, hide_parameters=True)
             self._external_engines[dsn] = engine
         return engine
 

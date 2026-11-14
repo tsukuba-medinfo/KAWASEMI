@@ -13,8 +13,12 @@ from kawasemi.core.config import settings
 # "key=value"/"key: value"/'"key":"value"' 形式でテキストをマスクする）。
 _SENSITIVE_KEYS = (
     "password",
+    "password_hash",
     "passwd",
     "token",
+    "jti",
+    "refresh_token",
+    "access_token",
     "secret",
     "authorization",
     "api_key",
@@ -38,7 +42,29 @@ _KV_PATTERN = re.compile(
 )
 
 
+# SQLAlchemy の DBAPIError 文字列にある "[parameters: (...)]" / "[SQL: ...]" に続く束縛値。
+# 位置指定のタプルにはキーが無く、キー名の照合では伏せられないので、セグメントごと取り除く。
+# 値の中に ']' や改行があっても取りこぼさないよう、次の "(Background on this error" か
+# 文字列の終わりまでを範囲とする。
+_PARAMETERS_PATTERN = re.compile(
+    r"\[parameters:.*?\](?=\s*(?:\(Background on this error|$))", re.DOTALL | re.IGNORECASE
+)
+# 伏せ済みの印（_REDACTED）が続くものは対象外にする（後続の "(Background ..." を消さないため）。
+_PARAMETERS_FALLBACK = re.compile(
+    r"\[parameters:(?!\s*" + re.escape(_REDACTED) + r").*", re.DOTALL | re.IGNORECASE
+)
+
+
+# URL の userinfo（`scheme://user:pw@host`）。運用者が URL に埋め込んだ資格情報を、どの呼び出し
+# 箇所のログからも伏せる（個別の呼び出し側が表示用 URL を作る一次対策の、二重防御）。
+_URL_USERINFO = re.compile(r"(?i)\b([a-z][a-z0-9+.\-]*://)[^/\s]*@")
+
+
 def _redact_text(text: str) -> str:
+    text = _URL_USERINFO.sub(lambda m: m.group(1) + _REDACTED + "@", text)
+    text = _PARAMETERS_PATTERN.sub("[parameters: " + _REDACTED + "]", text)
+    # 閉じ括弧が見つからない形（途中で切れた文字列など）は、残り全体を伏せる。
+    text = _PARAMETERS_FALLBACK.sub("[parameters: " + _REDACTED + "]", text)
     return _KV_PATTERN.sub(lambda m: m.group(1) + _REDACTED, text)
 
 

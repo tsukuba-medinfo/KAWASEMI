@@ -25,6 +25,7 @@ from kawasemi.core.exceptions import (
 from kawasemi.core.lease import (
     extend_lease,
     mark_completed,
+    patient_ref_of,
     require_leased_target,
     valid_lease_clause,
 )
@@ -135,20 +136,28 @@ async def _user_can_access_response(
 ) -> bool:
     """収集者が対象の回答へアクセスしてよいか判定する。
 
-    「自分の提出（submitted_by_id）」または「担当患者（subject を InputTarget の有効なリースと
-    突合）」の回答に限定し、response_id 総当たりで他収集者担当の回答（プリフィル値＝PHI）を
-    閲覧・改ざんできないようにする。管理者の全許可は無い（患者データを見ない）。
+    「自分の提出（submitted_by_id）」または「担当の入力対象（患者 × この回答の様式）に
+    有効なリースを持つ」回答に限定し、response_id 総当たりで他収集者担当の回答（プリフィル値
+    ＝PHI）を閲覧・改ざんできないようにする。患者だけでなく様式も一致させる（保存の経路
+    `require_leased_target` と同じ粒度）。同じ患者の別の様式のリースでは、他の収集者が入力した
+    回答を読み書きできない。管理者の全許可は無い（患者データを見ない）。
     書き込み(update_response)と読み取り(edit_response)で共用する。
     """
     if response_obj.submitted_by_id == user.id:
         return True
-    if response_obj.subject:
-        subject_str = str(response_obj.subject)
-        patient_ref = (
-            subject_str.split("/", 1)[1] if subject_str.startswith("Patient/") else subject_str
+    patient_ref = patient_ref_of(response_obj.subject)
+    if not patient_ref:
+        return False
+    leased = await db.execute(
+        select(InputTarget.id)
+        .where(
+            InputTarget.patient_id == patient_ref,
+            InputTarget.questionnaire_id == response_obj.questionnaire_id,
+            valid_lease_clause(user.id),
         )
-        return await _user_can_access_patient(db, user, patient_ref)
-    return False
+        .limit(1)
+    )
+    return leased.first() is not None
 
 
 # =============================================================================

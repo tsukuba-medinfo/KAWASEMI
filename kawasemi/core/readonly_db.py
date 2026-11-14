@@ -336,7 +336,7 @@ def get_readonly_engine() -> AsyncEngine | None:
         return None
     engine = _readonly_engines.get(url)
     if engine is None:
-        engine = create_async_engine(url, pool_pre_ping=True)
+        engine = create_async_engine(url, pool_pre_ping=True, hide_parameters=True)
         _readonly_engines[url] = engine
     return engine
 

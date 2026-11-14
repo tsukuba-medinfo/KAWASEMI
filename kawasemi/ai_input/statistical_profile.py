@@ -364,7 +364,7 @@ async def generate_statistical_profile(
                     f"外部DB接続が解決できません（connection_id={connection_id!r}）",
                     source_category,
                 )
-            engine = create_async_engine(dsn, pool_pre_ping=True)
+            engine = create_async_engine(dsn, pool_pre_ping=True, hide_parameters=True)
 
             async def _read() -> tuple[int, list[_GroupedRow]]:
                 # **接続の取得ごと投げ直す。** 同じ `AsyncConnection` を使い回して投げ直すと、

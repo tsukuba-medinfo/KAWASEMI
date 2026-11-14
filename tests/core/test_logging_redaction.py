@@ -45,3 +45,75 @@ def test_filter_redacts_exception_parameters() -> None:
     assert record.exc_text is not None
     assert "abc123secret" not in record.exc_text
     assert "UC-0009" not in record.exc_text
+
+
+# --- 再スキャン F4: SQLAlchemy の [parameters: ...] の束縛値 -------------------------
+
+_HASH = "$2b$12$abcdefghijklmnopqrstuuABCDEFGHIJKLMNOPQRSTUVWXYZ0123456"
+
+
+def _real_integrity_error(hide_parameters: bool) -> Exception:
+    """実際の SQLAlchemy の IntegrityError（束縛値にハッシュ・メール・患者 ID を含む）を作る。"""
+    import sqlalchemy as sa
+
+    engine = sa.create_engine("sqlite://", hide_parameters=hide_parameters)
+    with engine.connect() as conn:
+        conn.execute(sa.text("CREATE TABLE u (name TEXT UNIQUE, email TEXT, h TEXT, pid TEXT)"))
+        ins = sa.text("INSERT INTO u (name, email, h, pid) VALUES (:n, :e, :h, :p)")
+        params = {"n": "alice", "e": "alice@example.org", "h": _HASH, "p": "PAT-777"}
+        conn.execute(ins, params)
+        try:
+            conn.execute(ins, params)
+        except sa.exc.IntegrityError as exc:
+            return exc
+    raise AssertionError("IntegrityError が起きなかった")
+
+
+def test_real_dbapi_error_text_has_parameters_when_not_hidden() -> None:
+    """前提の確認: hide_parameters なしの実例外文字列には束縛値が入る（フィルタが要る理由）。"""
+    assert "alice@example.org" in str(_real_integrity_error(False))
+
+
+def test_filter_strips_bind_values_from_a_real_dbapi_error() -> None:
+    """hide_parameters を忘れたエンジンでも、フィルタが束縛値（ハッシュ・メール・患者 ID）を伏せる。"""
+    f = PHIRedactionFilter()
+    exc = _real_integrity_error(False)
+    record = logging.LogRecord(
+        "x", logging.ERROR, "p", 1, f"db failed: {exc}", (), (type(exc), exc, exc.__traceback__)
+    )
+    f.filter(record)
+    shown = record.getMessage() + (record.exc_text or "")
+    for secret in (_HASH, "alice@example.org", "PAT-777"):
+        assert secret not in shown, secret
+
+
+def test_hidden_parameters_engine_text_has_no_bind_values() -> None:
+    assert "alice@example.org" not in str(_real_integrity_error(True))
+
+
+def test_filter_strips_parameters_with_brackets_and_newlines_in_values() -> None:
+    text = (
+        "(sqlite3.IntegrityError) boom\n[SQL: INSERT ...]\n"
+        "[parameters: ('a]b', 'line1\nline2', '" + _HASH + "')]\n"
+        "(Background on this error at: https://sqlalche.me/e/20/gkpj)"
+    )
+    out = _redact_text(text)
+    assert _HASH not in out and "line2" not in out and "a]b" not in out
+    assert "(Background on this error at:" in out
+
+
+def test_truncated_parameters_segment_is_redacted_to_the_end() -> None:
+    out = _redact_text("err [parameters: ('x@example.org', '" + _HASH)
+    assert "x@example.org" not in out and _HASH not in out
+
+
+def test_password_hash_and_jti_keys_are_masked() -> None:
+    out = _redact_text(f"password_hash={_HASH} jti=abc-123-def")
+    assert _HASH not in out and "abc-123-def" not in out
+
+
+def test_engines_hide_parameters() -> None:
+    """アプリの DB エンジンは、例外文字列に束縛値を入れない設定で作られている。"""
+    from kawasemi.core.database import engine
+
+    assert engine.sync_engine.hide_parameters is True

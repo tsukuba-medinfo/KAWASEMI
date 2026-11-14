@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 async def get_async_session() -> AsyncSession:
     """非同期セッションを取得"""
-    engine = create_async_engine(settings.database_url, echo=False)
+    engine = create_async_engine(settings.database_url, echo=False, hide_parameters=True)
     async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     return async_session()
 
