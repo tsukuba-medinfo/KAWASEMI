@@ -24,6 +24,18 @@ _FHIR_ID_MAX_LEN = 64
 _SAFE_FHIR_ID_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-.")
 
 
+def dumps_html_safe(content: Any) -> str:
+    """JSON を整形して返す。`<` `>` `&` を `\\uXXXX` に置き換える。
+
+    エクスポートした JSON が、取り違えて HTML として解釈されても（ブラウザの種別推測や
+    取得した本文をページに書く実装）、利用者が入力した文字列からタグを作れないようにする。
+    JSON の文字列の外に `<` `>` `&` は現れないので、置換しても構文は変わらず、
+    読み戻した値は元と同じになる。
+    """
+    text = json.dumps(content, ensure_ascii=False, indent=2)
+    return text.replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
+
+
 def safe_fhir_id(fhir_id: str | int | None) -> str:
     """fhir_id をファイル名/ZIP エントリ名に使える安全な文字列へ正規化する。
 
@@ -77,7 +89,7 @@ def export_questionnaire_to_file(
 
     # JSON ファイルとして出力
     with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(content, f, ensure_ascii=False, indent=2)
+        f.write(dumps_html_safe(content))
 
     logger.info(f"Questionnaireをファイルに出力: {filepath}")
     return filepath
@@ -550,7 +562,7 @@ def export_questionnaire_response_to_file(
 
     # JSON ファイルとして出力
     with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(content, f, ensure_ascii=False, indent=2)
+        f.write(dumps_html_safe(content))
 
     logger.info(f"QuestionnaireResponseをファイルに出力: {filepath}")
     return filepath
@@ -624,7 +636,7 @@ def export_questionnaire_responses_to_zip(
             json_filename = f"QuestionnaireResponse_{safe_fhir_id(fhir_id)}.json"
 
             # JSONをZIPに追加
-            json_content = json.dumps(content, ensure_ascii=False, indent=2)
+            json_content = dumps_html_safe(content)
             zf.writestr(json_filename, json_content)
 
     logger.info(f"{len(responses)}件のQuestionnaireResponseをZIPにエクスポート: {zip_path}")
@@ -652,7 +664,7 @@ def create_bulk_export_zip(
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for fhir_id, content in questionnaire_responses:
             json_filename = f"QuestionnaireResponse_{safe_fhir_id(fhir_id)}.json"
-            json_content = json.dumps(content, ensure_ascii=False, indent=2)
+            json_content = dumps_html_safe(content)
             zf.writestr(json_filename, json_content)
 
     logger.info(f"{len(questionnaire_responses)}件をZIPにエクスポート: {zip_path}")

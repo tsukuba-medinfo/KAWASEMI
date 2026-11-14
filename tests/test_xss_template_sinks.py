@@ -222,3 +222,17 @@ async def test_plan_and_runbook_pages_embed_data_as_inert_json(
         resp = await designer_client.get(f"/ai-input/questionnaires/{q.id}/{page}")
         assert resp.status_code == 200, page
         assert "<img src=x onerror=alert(1)>" not in resp.text, page
+
+
+def test_fetched_bodies_are_only_written_as_html_for_html_responses() -> None:
+    """取得した本文を `document.write` するのは base.html と login.html だけで、
+    どちらも `Content-Type: text/html` の応答に限ること（再スキャン F1）。
+
+    JSON（エクスポートやエラー）を HTML として書くと、保存された値のタグが実行される。
+    """
+    writers = [p for p in _TEMPLATES.rglob("*.html") if "document.write(" in p.read_text("utf-8")]
+    assert {p.name for p in writers} == {"base.html", "login.html"}
+    for p in writers:
+        text = p.read_text(encoding="utf-8")
+        assert "indexOf('text/html')" not in text, f"{p.name}: 前方一致では text/htmlx も通る"
+        assert r"/^\s*text\/html(\s|;|$)/i.test(" in text, p.name

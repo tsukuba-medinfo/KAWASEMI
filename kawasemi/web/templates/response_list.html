@@ -175,8 +175,11 @@ function exportSelected() {
     const form = document.createElement('form');
     form.method = 'POST';
     form.action = '/api/v100/questionnaire-responses/bulk-export?ids=' + ids.join(',');
+    form.style.display = 'none';
     document.body.appendChild(form);
-    form.submit();
+    // submit() は submit イベントを出さず、base.html の CSRF 付き送信を通らない。
+    // requestSubmit() なら通り、応答のダウンロードもそちらが扱う。
+    form.requestSubmit();
 }
 </script>
 {% endblock %}

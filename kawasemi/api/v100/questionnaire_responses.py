@@ -532,6 +532,7 @@ async def export_questionnaire_response(
         path=str(filepath),
         media_type="application/fhir+json",
         filename=filepath.name,
+        headers={"X-Content-Type-Options": "nosniff"},
     )
 
 
@@ -598,4 +599,5 @@ async def bulk_export_questionnaire_responses(
         path=str(zip_path),
         media_type="application/zip",
         filename=zip_path.name,
+        headers={"X-Content-Type-Options": "nosniff"},
     )

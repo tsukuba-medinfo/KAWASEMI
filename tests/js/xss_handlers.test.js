@@ -48,7 +48,7 @@ function makeWindow(bodyHtml, { confirmResult = true } = {}) {
   });
   const w = dom.window;
   w.fetchCalls = [];
-  // 応答は返さない（base.html は応答で document.write するため、動かしたくない）。
+  // 応答は返さない（応答を扱うテストは windowWithResponse で fetch を差し替える）。
   w.fetch = (url, opts) => {
     w.fetchCalls.push({ url, opts });
     return new Promise(() => {});
@@ -244,17 +244,178 @@ test("questionnaire_list: 削除リンクは data-delete-id / data-delete-title 
   assert.strictEqual(msg.querySelectorAll("img").length, 0);
 });
 
+// ------------------------- 取得した本文をページに書かない（再スキャン F1: document.write）
+//
+// base.html の送信ハンドラは、取得した本文を document.write() していた。エクスポートの応答
+// （保存された回答の JSON。Content-Disposition: attachment）がそのままページに書かれ、
+// 回答に含まれるタグがレビュー担当者のページで実行された。応答の種類で扱いを分ける。
+
+function responseLike({ ok = true, headers = {}, body = "" } = {}) {
+  const lower = {};
+  for (const [k, v] of Object.entries(headers)) lower[k.toLowerCase()] = v;
+  return {
+    ok,
+    redirected: false,
+    headers: { get: (k) => (lower[String(k).toLowerCase()] ?? null) },
+    text: async () => body,
+    blob: async () => ({ size: body.length, body }),
+  };
+}
+
+function windowWithResponse(res) {
+  const w = makeWindow(
+    `<meta name="csrf-token" content="tok">
+     <form method="post" action="/api/v100/questionnaire-responses/1/export">
+       <button type="submit">エクスポート</button></form>`
+  );
+  w.fetch = (url, opts) => {
+    w.fetchCalls.push({ url, opts });
+    return Promise.resolve(res);
+  };
+  w.writes = [];
+  w.document.write = (h) => w.writes.push(h);
+  w.alerts = [];
+  w.alert = (m) => w.alerts.push(m);
+  w.downloads = [];
+  w.URL.createObjectURL = (blob) => `blob:test/${w.downloads.length}`;
+  w.URL.revokeObjectURL = () => {};
+  w.HTMLAnchorElement.prototype.click = function () {
+    w.downloads.push({ name: this.download, href: this.href });
+  };
+  load(w, baseScript());
+  const form = w.document.querySelector("form");
+  form.requestSubmit(form.querySelector("button"));
+  return w;
+}
+
+const settle = () => new Promise((r) => setTimeout(r, 30));
+const HOSTILE_JSON = JSON.stringify({ item: [{ answer: [{ valueString: HOSTILE }] }] });
+
+test("エクスポート（attachment の JSON）はページに書かず、ファイルとして保存する", async () => {
+  const w = windowWithResponse(
+    responseLike({
+      headers: {
+        "Content-Type": "application/fhir+json",
+        "Content-Disposition": 'attachment; filename="QuestionnaireResponse_1.json"',
+      },
+      body: HOSTILE_JSON,
+    })
+  );
+  await settle();
+  assert.strictEqual(w.writes.length, 0, "取得した本文を document.write した");
+  assert.strictEqual(w.document.querySelectorAll("img").length, 0);
+  assert.deepStrictEqual(
+    w.downloads.map((d) => d.name),
+    ["QuestionnaireResponse_1.json"]
+  );
+  assert.strictEqual(w.alerts.length, 0);
+});
+
+test("attachment のファイル名のパス区切りは落とす（../ を含んでも保存名に残さない）", async () => {
+  const w = windowWithResponse(
+    responseLike({
+      headers: { "Content-Disposition": 'attachment; filename="../../etc/x.json"' },
+      body: "{}",
+    })
+  );
+  await settle();
+  assert.ok(!/[\\/]/.test(w.downloads[0].name), w.downloads[0].name);
+});
+
+test("JSON（attachment なし）の本文は、タグを含んでも HTML にせず、文字列で通知する", async () => {
+  const w = windowWithResponse(
+    responseLike({
+      ok: false,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ detail: HOSTILE }),
+    })
+  );
+  await settle();
+  assert.strictEqual(w.writes.length, 0);
+  assert.strictEqual(w.document.querySelectorAll("img").length, 0);
+  assert.strictEqual(w.alerts.length, 1);
+  assert.ok(w.alerts[0].includes(HOSTILE), w.alerts[0]);
+});
+
+test("Content-Type が無い・知らない種類の本文も HTML として書かない", async () => {
+  const w = windowWithResponse(
+    responseLike({ headers: { "Content-Type": "text/plain" }, body: HOSTILE })
+  );
+  await settle();
+  assert.strictEqual(w.writes.length, 0);
+  assert.strictEqual(w.document.querySelectorAll("img").length, 0);
+});
+
+test("text/html の応答（検証エラーの再表示等）は、従来どおりページを描き直す", async () => {
+  const w = windowWithResponse(
+    responseLike({ headers: { "Content-Type": "text/html; charset=utf-8" }, body: "<p>再表示</p>" })
+  );
+  await settle();
+  assert.deepStrictEqual(w.writes, ["<p>再表示</p>"]);
+  assert.strictEqual(w.downloads.length, 0);
+});
+
+test("text/htmlx のような似た種類は HTML として書かない", async () => {
+  for (const type of ["text/htmlx", "text/html-foo", "xtext/html", "application/text/html"]) {
+    const w = windowWithResponse(responseLike({ headers: { "Content-Type": type }, body: HOSTILE }));
+    await settle();
+    assert.strictEqual(w.writes.length, 0, type);
+    assert.strictEqual(w.document.querySelectorAll("img").length, 0, type);
+  }
+});
+
+test("text/html は大文字・前置の空白・パラメータ付きでも HTML ページとして扱う", async () => {
+  for (const type of ["TEXT/HTML", " text/html", "text/html;charset=utf-8", "text/html ; charset=utf-8"]) {
+    const w = windowWithResponse(responseLike({ headers: { "Content-Type": type }, body: "<p>ok</p>" }));
+    await settle();
+    assert.deepStrictEqual(w.writes, ["<p>ok</p>"], type);
+  }
+});
+
+test("message だけを持つ JSON のエラーも、本文の文字列として通知する（HTML にしない）", async () => {
+  const w = windowWithResponse(
+    responseLike({
+      ok: false,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: HOSTILE }),
+    })
+  );
+  await settle();
+  assert.strictEqual(w.writes.length, 0);
+  assert.strictEqual(w.document.querySelectorAll("img").length, 0);
+  assert.strictEqual(w.alerts.length, 1);
+  assert.ok(w.alerts[0].includes(HOSTILE), w.alerts[0]);
+  assert.ok(!w.alerts[0].includes('"message"'), w.alerts[0]);
+});
+
+test("attachment の text/html 応答はページに書かない（ダウンロードとして扱う）", async () => {
+  const w = windowWithResponse(
+    responseLike({
+      headers: {
+        "Content-Type": "text/html",
+        "Content-Disposition": 'attachment; filename="x.html"',
+      },
+      body: HOSTILE,
+    })
+  );
+  await settle();
+  assert.strictEqual(w.writes.length, 0);
+  assert.strictEqual(w.downloads.length, 1);
+});
+
 // --------------------------------------------------------------------- 実行
 
-let failed = 0;
-for (const [name, fn] of tests) {
-  try {
-    fn();
-    console.log(`ok   ${name}`);
-  } catch (e) {
-    failed++;
-    console.log(`FAIL ${name}\n     ${String(e.message).split("\n").join("\n     ")}`);
+(async () => {
+  let failed = 0;
+  for (const [name, fn] of tests) {
+    try {
+      await fn();
+      console.log(`ok   ${name}`);
+    } catch (e) {
+      failed++;
+      console.log(`FAIL ${name}\n     ${String(e.message).split("\n").join("\n     ")}`);
+    }
   }
-}
-console.log(`${tests.length - failed}/${tests.length} passed`);
-process.exit(failed ? 1 : 0);
+  console.log(`${tests.length - failed}/${tests.length} passed`);
+  process.exit(failed ? 1 : 0);
+})();
