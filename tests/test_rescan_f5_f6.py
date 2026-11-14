@@ -279,6 +279,57 @@ def test_migration_purges_orphans_and_seeds_the_sequence_above_them(tmp_path: Pa
         assert new_id == 4
 
 
+_INSERT_NEW_USER = (
+    "INSERT INTO users (username, email, password_hash, full_name, is_active, "
+    "failed_login_count, token_version, created_at, updated_at) VALUES "
+    "('new', 'new@example.com', 'x', 'n', 1, 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+)
+
+
+def test_migration_counts_user_columns_that_have_no_foreign_key(tmp_path: Path) -> None:
+    """外部キーの無い `submitted_by_id` だけが削除済みユーザーを覚えていても、id は戻らない。
+
+    子表に外部キーの孤児も `user_roles` も無く、`questionnaire_responses.submitted_by_id`
+    （外部キー制約なし）だけがユーザー 3 を指す。次のユーザーは 3 ではなく 4 になる。
+    """
+    db_path = tmp_path / "legacy_nofk.db"
+    assert _alembic(db_path, "upgrade", "d1f3b5a7c9e2").returncode == 0
+    with sqlite3.connect(db_path) as conn:
+        for i in (1, 2, 3):
+            conn.execute(_INSERT_USER, (i, f"u{i}", f"u{i}@example.com"))
+        conn.execute(
+            "INSERT INTO questionnaires (id, fhir_id, content, status, is_deleted) "
+            "VALUES (1, 'q1', '{}', 'active', 0)"
+        )
+        conn.execute("DELETE FROM user_roles")
+        conn.execute(
+            "INSERT INTO questionnaire_responses (id, fhir_id, questionnaire_id, content, "
+            "status, submitted_by_id) VALUES (1, 'r1', 1, '{}', 'completed', 3)"
+        )
+        conn.execute("DELETE FROM users WHERE id = 3")
+    assert _alembic(db_path, "upgrade", "head").returncode == 0
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(_INSERT_NEW_USER)
+        assert conn.execute("SELECT id FROM users WHERE username='new'").fetchone()[0] == 4
+
+
+def test_downgrade_then_upgrade_does_not_lower_the_sequence(tmp_path: Path) -> None:
+    """降格して再度上げても、採番済みの値は下がらない（削除済みの id が再利用されない）。"""
+    db_path = tmp_path / "roundtrip.db"
+    assert _alembic(db_path, "upgrade", "head").returncode == 0
+    with sqlite3.connect(db_path) as conn:
+        for i in (1, 2, 3):
+            conn.execute(_INSERT_USER, (i, f"u{i}", f"u{i}@example.com"))
+        conn.execute("DELETE FROM users WHERE id = 3")
+        conn.execute("DELETE FROM user_roles")
+        assert conn.execute("SELECT seq FROM sqlite_sequence WHERE name='users'").fetchone()[0] == 3
+    assert _alembic(db_path, "downgrade", "d1f3b5a7c9e2").returncode == 0
+    assert _alembic(db_path, "upgrade", "head").returncode == 0
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(_INSERT_NEW_USER)
+        assert conn.execute("SELECT id FROM users WHERE username='new'").fetchone()[0] == 4
+
+
 # ===== F6 =====
 
 
@@ -315,3 +366,38 @@ async def test_edit_cannot_repoint_the_response_to_another_patient(
         assert saved.content["author"]["reference"] == f"User/{collector_user.id}"
         # 回答自体は更新される
         assert "修正値" in str(saved.content)
+
+
+# ===== 本番エンジンの外部キー強制 =====
+
+
+@pytest.mark.asyncio
+async def test_production_engine_enforces_foreign_keys(tmp_path: Path) -> None:
+    """本番の接続時リスナー（`core.database.set_sqlite_pragmas`）が外部キーを強制する。
+
+    テスト用エンジン（conftest）ではなく、本番エンジンに登録されているのと同じ関数を、
+    一時ファイルのエンジンに付けて確かめる。外れると ON DELETE CASCADE / SET NULL が
+    効かなくなる。本番エンジンが SQLite のとき、そのリスナーが登録済みであることも見る。
+    """
+    from sqlalchemy import event, text
+    from sqlalchemy.exc import IntegrityError
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from kawasemi.core import database
+
+    if database.engine.dialect.name == "sqlite":
+        assert event.contains(database.engine.sync_engine, "connect", database.set_sqlite_pragmas)
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'fk.db'}")
+    event.listen(engine.sync_engine, "connect", database.set_sqlite_pragmas)
+    try:
+        async with engine.begin() as conn:
+            assert (await conn.execute(text("PRAGMA foreign_keys"))).scalar_one() == 1
+            await conn.execute(text("CREATE TABLE p (id INTEGER PRIMARY KEY)"))
+            await conn.execute(
+                text("CREATE TABLE c (id INTEGER PRIMARY KEY, pid INTEGER REFERENCES p(id))")
+            )
+        with pytest.raises(IntegrityError):
+            async with engine.begin() as conn:
+                await conn.execute(text("INSERT INTO c (id, pid) VALUES (1, 999)"))
+    finally:
+        await engine.dispose()

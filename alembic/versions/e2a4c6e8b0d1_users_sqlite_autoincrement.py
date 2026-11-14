@@ -59,6 +59,39 @@ def _referencing_columns(conn: sa.Connection) -> list[tuple[str, str, str]]:
     return found
 
 
+def _user_reference_columns(conn: sa.Connection) -> list[tuple[str, str]]:
+    """物理的な外部キーは無いが、ユーザー id を持つ列（`*_by_id`）を (表, 列) で返す。
+
+    移行済みの旧スキーマには、`submitted_by_id` や `confirmed_by_id` のように外部キー制約の
+    無い列がある。これらも削除済みユーザーの id を覚えているので、採番の起点の計算に含める。
+    """
+    found: list[tuple[str, str]] = []
+    tables = [
+        r[0]
+        for r in conn.execute(
+            sa.text(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+        )
+    ]
+    for table in tables:
+        for col in conn.execute(sa.text(f"PRAGMA table_info({_quote(table)})")).mappings():
+            if str(col["name"]).endswith("_by_id"):
+                found.append((table, str(col["name"])))
+    return found
+
+
+def _existing_sequence(conn: sa.Connection) -> int:
+    """`sqlite_sequence` にすでにある users の値（無ければ 0）。"""
+    has = conn.execute(
+        sa.text("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sqlite_sequence'")
+    ).first()
+    if not has:
+        return 0
+    row = conn.execute(sa.text("SELECT seq FROM sqlite_sequence WHERE name='users'")).first()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
 def upgrade() -> None:
     conn = op.get_bind()
     if conn.dialect.name != "sqlite":
@@ -67,11 +100,19 @@ def upgrade() -> None:
     refs = _referencing_columns(conn)
     # 宙に浮いた子表の行を片付ける前に、子表が指している最大の id を控える。
     highest = conn.execute(sa.text("SELECT COALESCE(MAX(id), 0) FROM users")).scalar_one()
-    for table, column, _ in refs:
+    # 外部キーのある列に加え、外部キーの無い `*_by_id` 列、すでに採番済みの値（降格して
+    # 再度上げても下がらないように）も含める。
+    columns = {(t, c) for t, c, _ in refs} | set(_user_reference_columns(conn))
+    for table, column in sorted(columns):
+        col = _quote(column)
         top = conn.execute(
-            sa.text(f"SELECT COALESCE(MAX({_quote(column)}), 0) FROM {_quote(table)}")
+            sa.text(
+                f"SELECT COALESCE(MAX(CASE WHEN typeof({col}) = 'integer' THEN {col} END), 0) "
+                f"FROM {_quote(table)}"
+            )
         ).scalar_one()
         highest = max(highest, int(top))
+    highest = max(highest, _existing_sequence(conn))
     for table, column, on_delete in refs:
         t, c = _quote(table), _quote(column)
         orphan = f"{c} IS NOT NULL AND {c} NOT IN (SELECT id FROM users)"

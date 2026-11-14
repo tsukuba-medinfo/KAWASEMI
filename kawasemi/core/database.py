@@ -24,20 +24,25 @@ if not _is_sqlite:
 
 engine = create_async_engine(str(settings.database_url), **_engine_kwargs)
 
+
+def set_sqlite_pragmas(dbapi_conn: Any, _rec: Any = None) -> None:
+    """SQLite 接続ごとの PRAGMA。本番エンジンのリスナーで、テストからも直接使う。
+
+    WAL でリーダとライタの競合を減らし、busy_timeout でロック待ちを許容して
+    "database is locked" を緩和する。外部キーも強制する: SQLite は既定で強制しないので、
+    そのままだと ON DELETE CASCADE / SET NULL が効かず、ユーザーを削除してもセッション・
+    担当・リースの行が宙に浮く。（マイグレーションは別の接続で、この設定を受けない）
+    """
+    cursor = dbapi_conn.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA busy_timeout=5000")
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.close()
+
+
 if _is_sqlite:
-    # SQLite の同時書き込み耐性を上げる: WAL でリーダとライタの競合を減らし、
-    # busy_timeout でロック待ちを許容して "database is locked" を緩和する。
     # aiosqlite は sync_engine 経由で connect イベントを拾える。
-    @event.listens_for(engine.sync_engine, "connect")
-    def _set_sqlite_pragmas(dbapi_conn: Any, _rec: Any) -> None:
-        cursor = dbapi_conn.cursor()
-        cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.execute("PRAGMA busy_timeout=5000")
-        # SQLite は既定で外部キーを強制しない。強制しないと ON DELETE CASCADE / SET NULL が
-        # 効かず、ユーザーを削除してもセッション・担当・リースの行が宙に浮く。
-        # （マイグレーションは別の接続で、この設定を受けない）
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.close()
+    event.listen(engine.sync_engine, "connect", set_sqlite_pragmas)
 
 
 # 非同期セッションファクトリ
