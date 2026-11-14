@@ -54,7 +54,7 @@
                 document.body.removeChild(a);
                 setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
             }
-            // JSON のエラー（{"detail": ...}）は detail を、それ以外は本文をそのまま文字列で見せる。
+            // JSON のエラー（{"detail": ...} または {"message": ...}）は detail／message を、それ以外は本文をそのまま文字列で見せる。
             function showPlainText(ok, text) {
                 if (!text && ok) return;
                 var msg = text;
@@ -62,6 +62,7 @@
                     var obj = JSON.parse(text);
                     if (obj && typeof obj.detail === 'string') msg = obj.detail;
                     else if (obj && obj.detail != null) msg = JSON.stringify(obj.detail);
+                    else if (obj && typeof obj.message === 'string') msg = obj.message;
                 } catch (err) { /* 文字列のまま */ }
                 if (String(msg).length > 500) msg = String(msg).slice(0, 500) + '…';
                 window.alert((ok ? '' : 'エラー: ') + msg);
@@ -97,7 +98,7 @@
                         });
                     }
                     // HTML ページ（検証エラーの再表示等）だけを、サーバーが描いたものとして描き直す。
-                    if (type.indexOf('text/html') === 0) {
+                    if (/^\s*text\/html(\s|;|$)/i.test(type)) {
                         return res.text().then(function (html) { return { html: html }; });
                     }
                     // JSON やその他の本文は、保存された利用者データを含みうる。**HTML として扱わない**。

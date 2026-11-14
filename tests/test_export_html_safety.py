@@ -117,3 +117,36 @@ async def test_bulk_export_entries_have_no_markup_and_response_is_nosniff(
             for ch in "<>&":
                 assert ch not in body, name
             assert json.loads(body)["item"][0]["linkId"] == HOSTILE
+
+
+@pytest.mark.asyncio
+async def test_questionnaire_export_body_has_no_markup_and_is_nosniff(
+    admin_client: AsyncClient,
+    multi_role_user: User,
+    csrf_token: str,
+    db_session: AsyncSession,
+) -> None:
+    q = Questionnaire(
+        fhir_id="q-xss-export",
+        title="XSS テスト票",
+        status="active",
+        content={
+            "resourceType": "Questionnaire",
+            "id": "q-xss-export",
+            "item": [{"linkId": HOSTILE, "type": "string", "text": HOSTILE}],
+        },
+    )
+    db_session.add(q)
+    await db_session.commit()
+    await db_session.refresh(q)
+    _act_as_reviewer(admin_client, multi_role_user)
+    resp = await admin_client.post(
+        f"/api/v100/questionnaires/{q.id}/export",
+        headers={"X-CSRF-Token": csrf_token},
+    )
+    assert resp.status_code == 200
+    assert resp.headers["x-content-type-options"] == "nosniff"
+    assert resp.headers["content-disposition"].startswith("attachment")
+    for ch in "<>&":
+        assert ch not in resp.text
+    assert json.loads(resp.text)["item"][0]["linkId"] == HOSTILE

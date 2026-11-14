@@ -234,4 +234,5 @@ def test_fetched_bodies_are_only_written_as_html_for_html_responses() -> None:
     assert {p.name for p in writers} == {"base.html", "login.html"}
     for p in writers:
         text = p.read_text(encoding="utf-8")
-        assert "indexOf('text/html') === 0" in text, p.name
+        assert "indexOf('text/html')" not in text, f"{p.name}: 前方一致では text/htmlx も通る"
+        assert r"/^\s*text\/html(\s|;|$)/i.test(" in text, p.name

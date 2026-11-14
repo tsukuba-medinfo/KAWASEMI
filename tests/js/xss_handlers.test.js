@@ -355,6 +355,39 @@ test("text/html の応答（検証エラーの再表示等）は、従来どお�
   assert.strictEqual(w.downloads.length, 0);
 });
 
+test("text/htmlx のような似た種類は HTML として書かない", async () => {
+  for (const type of ["text/htmlx", "text/html-foo", "xtext/html", "application/text/html"]) {
+    const w = windowWithResponse(responseLike({ headers: { "Content-Type": type }, body: HOSTILE }));
+    await settle();
+    assert.strictEqual(w.writes.length, 0, type);
+    assert.strictEqual(w.document.querySelectorAll("img").length, 0, type);
+  }
+});
+
+test("text/html は大文字・前置の空白・パラメータ付きでも HTML ページとして扱う", async () => {
+  for (const type of ["TEXT/HTML", " text/html", "text/html;charset=utf-8", "text/html ; charset=utf-8"]) {
+    const w = windowWithResponse(responseLike({ headers: { "Content-Type": type }, body: "<p>ok</p>" }));
+    await settle();
+    assert.deepStrictEqual(w.writes, ["<p>ok</p>"], type);
+  }
+});
+
+test("message だけを持つ JSON のエラーも、本文の文字列として通知する（HTML にしない）", async () => {
+  const w = windowWithResponse(
+    responseLike({
+      ok: false,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: HOSTILE }),
+    })
+  );
+  await settle();
+  assert.strictEqual(w.writes.length, 0);
+  assert.strictEqual(w.document.querySelectorAll("img").length, 0);
+  assert.strictEqual(w.alerts.length, 1);
+  assert.ok(w.alerts[0].includes(HOSTILE), w.alerts[0]);
+  assert.ok(!w.alerts[0].includes('"message"'), w.alerts[0]);
+});
+
 test("attachment の text/html 応答はページに書かない（ダウンロードとして扱う）", async () => {
   const w = windowWithResponse(
     responseLike({

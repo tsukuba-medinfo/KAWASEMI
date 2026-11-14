@@ -93,6 +93,9 @@ kawasemi-indexer serve --index-dir var/resource_index
 - **Host の許可一覧**: `localhost` / `127.0.0.1` / `[::1]` だけを通す（DNS rebinding の対策。攻撃者の
   ドメインがループバックを指しても、その名前は Host で弾かれる）。ほかの名前で届けたいときは
   `--allowed-host <名前>`（繰り返し可）。`--host` に名前や個別の IP を渡したときはそれも通す。
+  Host の書式は厳密で、`host` か `host:port` だけを認める（ポートは数字のみで 65535 以下。`/` `?` `#` `@`、
+  空白・制御文字・ASCII 以外を含む値は 400）。末尾のドット、国際化ドメイン名、IPv6 のゾーン ID、正規形でない
+  IPv6 の書き方は `--allowed-host` に一致しない。許可する名前は、正規形の ASCII で書くこと。
 - **同一オリジンだけ**: `Origin` が Host と違う要求、`Sec-Fetch-Site` が same-origin / none 以外の要求は
   403。CORS のヘッダは返さない。
 - `/docs`・`/openapi.json` は出さない。

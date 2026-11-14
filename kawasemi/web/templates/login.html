@@ -80,7 +80,7 @@
             .then(response => {
                 if (response.redirected) {
                     window.location.href = response.url;
-                } else if ((response.headers.get('Content-Type') || '').toLowerCase().indexOf('text/html') === 0) {
+                } else if (/^\s*text\/html(\s|;|$)/i.test(response.headers.get('Content-Type') || '')) {
                     return response.text();
                 } else {
                     // JSON 等（レート制限・CSRF エラー）は HTML として書かない。本文も表示しない。

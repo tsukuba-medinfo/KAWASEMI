@@ -185,6 +185,7 @@ async def export_questionnaire(
         path=str(filepath),
         media_type="application/fhir+json",
         filename=filepath.name,
+        headers={"X-Content-Type-Options": "nosniff"},
     )
 
 
