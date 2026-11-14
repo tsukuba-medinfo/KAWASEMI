@@ -1166,7 +1166,11 @@ class DSLInterpreter:
         if rk is None or rk.status != ResolveStatus.FOUND or rk.value is None:
             status = rk.status.value if rk else "not_found"
             return None, {"used_key_type": str(kt), "status": status}, True
-        bind = apply_physical_format(rk.value, step.get("physical_format"))
+        try:
+            bind = apply_physical_format(rk.value, step.get("physical_format"))
+        except ValueError:
+            # 計画の physical_format が許容範囲外。値を作らず、鍵が解決できなかった扱いにする。
+            return None, {"used_key_type": str(kt), "status": "invalid_physical_format"}, True
         return (
             bind,
             {"used_key_type": str(kt), "value_masked": mask_value(bind), "status": "found"},

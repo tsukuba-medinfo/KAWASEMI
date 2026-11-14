@@ -279,8 +279,17 @@ READONLY_DATABASE_URL=postgresql+asyncpg://kawasemi_ro:...@postgres:5432/kawasem
 - **ファイルと FHIR の患者の範囲は、アプリが確かめます。** 次の形でなければ実行しません（`path_not_permitted`）。
   - ファイル: `path_pattern` のパス区間の1つが `{{patient_id}}`（`{{patient_id}}.txt` は可、
     `{{a}}{{patient_id}}` は不可）
-  - FHIR: `patient=` / `subject=`（小文字のとおり）の値が `{{patient_id}}`、または `/Patient/{{patient_id}}`
-    で始まるパス。符号化した `.` `/`（`%2e` など）、`..` の区間、`_include` / `_revinclude` /
+  - FHIR: 次の2つの形だけです。(1) パスがリソース型1つ（`/Observation`）で、**その型が持つ**
+    `patient=` / `subject=`（小文字のとおり）が**ちょうど1つ**あり、値が `{{patient_id}}`。型と名前の組は、
+    FHIR R4 の Patient コンパートメントのうち実際にその検索パラメータを持つ型の許可リスト
+    （`fetch_scope._FHIR_SEARCH_PATIENT_PARAMS`）にあるものだけで、`Patient?subject=...` や
+    `Practitioner?patient=...` のように、その型に無いパラメータは、未知のパラメータを無視するサーバーで
+    絞りが効かないので実行しません。許可リストに無い型（`Coverage` など）も実行しません。
+    (2) `/Patient/{{patient_id}}` で始まり、続くパスがリソース型か `$operation`（`/Patient/{{patient_id}}/$everything`）。
+    **`$operation` の名前は限定していません**（`$export` なども形としては通ります。患者の下で
+    サーバーが何を実装しているかは運用者が FHIR の資格情報の権限で絞ってください）。型レベルの
+    `$operation`（`/Patient/$everything?patient=...`）、`patient` / `subject` 系のパラメータの重複・修飾付き、
+    `_id` は実行しません。符号化した `.` `/`（`%2e` など）、`..` の区間、`_include` / `_revinclude` /
     `_has` / `_filter` / `_query` を含むクエリ、`#`・空白・制御文字（`#` 以降は HTTP クライアントが送らず、
     絞りの無い要求になる）、パスの `%`、検索パラメータ名の `%` や空白（符号化・
     前後の空白で別の名前にする形）を含むクエリは実行しません

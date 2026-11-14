@@ -167,10 +167,26 @@ async def test_the_executor_does_not_send_a_request_to_another_host(query: str) 
 
 
 @pytest.mark.asyncio
-async def test_a_host_suffix_query_is_sent_only_to_the_configured_host() -> None:
-    _, _, seen = await _run(".evil.example/x?patient={{patient_id}}", "https://fhir.example")
+async def test_a_host_suffix_query_is_sent_only_to_the_configured_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """患者の範囲の検査が通ってしまった場合でも、URL 組み立ての層が要求先を変えさせない。
 
-    assert [urlsplit(u).netloc for u in seen] == ["fhir.example"]
+    `.evil.example/x` は、リソース型でないので患者の範囲の検査が先に拒否する（それは
+    `test_program_sql_scope.py` が見る）。ここでは検査を**通す**ことで、検査が破れたときの
+    最後の線（`fhir_request_url`）を、executor を通して確かめる（以前は
+    `https://fhir.example.evil.example/x` へ認可ヘッダーごと送られた）。
+    """
+    from kawasemi.ai_input import executor as executor_module
+
+    monkeypatch.setattr(executor_module, "fhir_query_scopes_patient", lambda _q: True)
+
+    _, entry, seen = await _run(".evil.example/x?patient={{patient_id}}", "https://fhir.example")
+
+    assert {urlsplit(u).netloc for u in seen} <= {"fhir.example"}
+    # ホスト名の後ろに足した文字列は、パスとして設定のサーバーへ向かう
+    assert seen == ["https://fhir.example/.evil.example/x?patient=P1"]
+    assert entry.get("error") is None
 
 
 @pytest.mark.asyncio

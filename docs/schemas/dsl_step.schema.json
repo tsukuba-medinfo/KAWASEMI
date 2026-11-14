@@ -452,7 +452,27 @@
         "physical_format": {
           "anyOf": [
             {
-              "additionalProperties": true,
+              "additionalProperties": false,
+              "properties": {
+                "pad": {
+                  "maximum": 64,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "padchar": {
+                  "maxLength": 1,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "prefix": {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                "suffix": {
+                  "maxLength": 64,
+                  "type": "string"
+                }
+              },
               "type": "object"
             },
             {
@@ -918,7 +938,27 @@
         "physical_format": {
           "anyOf": [
             {
-              "additionalProperties": true,
+              "additionalProperties": false,
+              "properties": {
+                "pad": {
+                  "maximum": 64,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "padchar": {
+                  "maxLength": 1,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "prefix": {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                "suffix": {
+                  "maxLength": 64,
+                  "type": "string"
+                }
+              },
               "type": "object"
             },
             {
@@ -1384,7 +1424,27 @@
         "physical_format": {
           "anyOf": [
             {
-              "additionalProperties": true,
+              "additionalProperties": false,
+              "properties": {
+                "pad": {
+                  "maximum": 64,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "padchar": {
+                  "maxLength": 1,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "prefix": {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                "suffix": {
+                  "maxLength": 64,
+                  "type": "string"
+                }
+              },
               "type": "object"
             },
             {
@@ -1850,7 +1910,27 @@
         "physical_format": {
           "anyOf": [
             {
-              "additionalProperties": true,
+              "additionalProperties": false,
+              "properties": {
+                "pad": {
+                  "maximum": 64,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "padchar": {
+                  "maxLength": 1,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "prefix": {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                "suffix": {
+                  "maxLength": 64,
+                  "type": "string"
+                }
+              },
               "type": "object"
             },
             {
@@ -2316,7 +2396,27 @@
         "physical_format": {
           "anyOf": [
             {
-              "additionalProperties": true,
+              "additionalProperties": false,
+              "properties": {
+                "pad": {
+                  "maximum": 64,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "padchar": {
+                  "maxLength": 1,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "prefix": {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                "suffix": {
+                  "maxLength": 64,
+                  "type": "string"
+                }
+              },
               "type": "object"
             },
             {
@@ -2782,7 +2882,27 @@
         "physical_format": {
           "anyOf": [
             {
-              "additionalProperties": true,
+              "additionalProperties": false,
+              "properties": {
+                "pad": {
+                  "maximum": 64,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "padchar": {
+                  "maxLength": 1,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "prefix": {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                "suffix": {
+                  "maxLength": 64,
+                  "type": "string"
+                }
+              },
               "type": "object"
             },
             {
@@ -3248,7 +3368,27 @@
         "physical_format": {
           "anyOf": [
             {
-              "additionalProperties": true,
+              "additionalProperties": false,
+              "properties": {
+                "pad": {
+                  "maximum": 64,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "padchar": {
+                  "maxLength": 1,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "prefix": {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                "suffix": {
+                  "maxLength": 64,
+                  "type": "string"
+                }
+              },
               "type": "object"
             },
             {
@@ -3715,7 +3855,27 @@
         "physical_format": {
           "anyOf": [
             {
-              "additionalProperties": true,
+              "additionalProperties": false,
+              "properties": {
+                "pad": {
+                  "maximum": 64,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "padchar": {
+                  "maxLength": 1,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "prefix": {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                "suffix": {
+                  "maxLength": 64,
+                  "type": "string"
+                }
+              },
               "type": "object"
             },
             {
@@ -4181,7 +4341,27 @@
         "physical_format": {
           "anyOf": [
             {
-              "additionalProperties": true,
+              "additionalProperties": false,
+              "properties": {
+                "pad": {
+                  "maximum": 64,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "padchar": {
+                  "maxLength": 1,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "prefix": {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                "suffix": {
+                  "maxLength": 64,
+                  "type": "string"
+                }
+              },
               "type": "object"
             },
             {
@@ -4650,7 +4830,27 @@
         "physical_format": {
           "anyOf": [
             {
-              "additionalProperties": true,
+              "additionalProperties": false,
+              "properties": {
+                "pad": {
+                  "maximum": 64,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "padchar": {
+                  "maxLength": 1,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "prefix": {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                "suffix": {
+                  "maxLength": 64,
+                  "type": "string"
+                }
+              },
               "type": "object"
             },
             {
@@ -5116,7 +5316,27 @@
         "physical_format": {
           "anyOf": [
             {
-              "additionalProperties": true,
+              "additionalProperties": false,
+              "properties": {
+                "pad": {
+                  "maximum": 64,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "padchar": {
+                  "maxLength": 1,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "prefix": {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                "suffix": {
+                  "maxLength": 64,
+                  "type": "string"
+                }
+              },
               "type": "object"
             },
             {
@@ -5582,7 +5802,27 @@
         "physical_format": {
           "anyOf": [
             {
-              "additionalProperties": true,
+              "additionalProperties": false,
+              "properties": {
+                "pad": {
+                  "maximum": 64,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "padchar": {
+                  "maxLength": 1,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "prefix": {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                "suffix": {
+                  "maxLength": 64,
+                  "type": "string"
+                }
+              },
               "type": "object"
             },
             {
@@ -6048,7 +6288,27 @@
         "physical_format": {
           "anyOf": [
             {
-              "additionalProperties": true,
+              "additionalProperties": false,
+              "properties": {
+                "pad": {
+                  "maximum": 64,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "padchar": {
+                  "maxLength": 1,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "prefix": {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                "suffix": {
+                  "maxLength": 64,
+                  "type": "string"
+                }
+              },
               "type": "object"
             },
             {
@@ -6514,7 +6774,27 @@
         "physical_format": {
           "anyOf": [
             {
-              "additionalProperties": true,
+              "additionalProperties": false,
+              "properties": {
+                "pad": {
+                  "maximum": 64,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "padchar": {
+                  "maxLength": 1,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "prefix": {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                "suffix": {
+                  "maxLength": 64,
+                  "type": "string"
+                }
+              },
               "type": "object"
             },
             {
@@ -7339,7 +7619,27 @@
         "physical_format": {
           "anyOf": [
             {
-              "additionalProperties": true,
+              "additionalProperties": false,
+              "properties": {
+                "pad": {
+                  "maximum": 64,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "padchar": {
+                  "maxLength": 1,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "prefix": {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                "suffix": {
+                  "maxLength": 64,
+                  "type": "string"
+                }
+              },
               "type": "object"
             },
             {
@@ -7805,7 +8105,27 @@
         "physical_format": {
           "anyOf": [
             {
-              "additionalProperties": true,
+              "additionalProperties": false,
+              "properties": {
+                "pad": {
+                  "maximum": 64,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "padchar": {
+                  "maxLength": 1,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "prefix": {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                "suffix": {
+                  "maxLength": 64,
+                  "type": "string"
+                }
+              },
               "type": "object"
             },
             {
@@ -8271,7 +8591,27 @@
         "physical_format": {
           "anyOf": [
             {
-              "additionalProperties": true,
+              "additionalProperties": false,
+              "properties": {
+                "pad": {
+                  "maximum": 64,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "padchar": {
+                  "maxLength": 1,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "prefix": {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                "suffix": {
+                  "maxLength": 64,
+                  "type": "string"
+                }
+              },
               "type": "object"
             },
             {
@@ -8738,7 +9078,27 @@
         "physical_format": {
           "anyOf": [
             {
-              "additionalProperties": true,
+              "additionalProperties": false,
+              "properties": {
+                "pad": {
+                  "maximum": 64,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "padchar": {
+                  "maxLength": 1,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "prefix": {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                "suffix": {
+                  "maxLength": 64,
+                  "type": "string"
+                }
+              },
               "type": "object"
             },
             {
@@ -9204,7 +9564,27 @@
         "physical_format": {
           "anyOf": [
             {
-              "additionalProperties": true,
+              "additionalProperties": false,
+              "properties": {
+                "pad": {
+                  "maximum": 64,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "padchar": {
+                  "maxLength": 1,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "prefix": {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                "suffix": {
+                  "maxLength": 64,
+                  "type": "string"
+                }
+              },
               "type": "object"
             },
             {
@@ -9670,7 +10050,27 @@
         "physical_format": {
           "anyOf": [
             {
-              "additionalProperties": true,
+              "additionalProperties": false,
+              "properties": {
+                "pad": {
+                  "maximum": 64,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "padchar": {
+                  "maxLength": 1,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "prefix": {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                "suffix": {
+                  "maxLength": 64,
+                  "type": "string"
+                }
+              },
               "type": "object"
             },
             {
@@ -10136,7 +10536,27 @@
         "physical_format": {
           "anyOf": [
             {
-              "additionalProperties": true,
+              "additionalProperties": false,
+              "properties": {
+                "pad": {
+                  "maximum": 64,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "padchar": {
+                  "maxLength": 1,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "prefix": {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                "suffix": {
+                  "maxLength": 64,
+                  "type": "string"
+                }
+              },
               "type": "object"
             },
             {
@@ -10603,7 +11023,27 @@
         "physical_format": {
           "anyOf": [
             {
-              "additionalProperties": true,
+              "additionalProperties": false,
+              "properties": {
+                "pad": {
+                  "maximum": 64,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "padchar": {
+                  "maxLength": 1,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "prefix": {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                "suffix": {
+                  "maxLength": 64,
+                  "type": "string"
+                }
+              },
               "type": "object"
             },
             {

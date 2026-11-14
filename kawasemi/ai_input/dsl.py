@@ -20,6 +20,7 @@ from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any, TypeGuard
 
 from kawasemi.ai_input.models import MAX_SQL_LENGTH, OpType
+from kawasemi.ai_input.physical_format import physical_format_errors
 
 # 各 op が「人間補完なしで実行可能」になるために最低限必要なフィールド。
 # ここが欠けていて needs_input=false の場合は検証エラーにする。
@@ -68,7 +69,8 @@ AGGREGATE_FUNCS = ("count", "sum", "min", "max", "avg", "first")
 SELECT_PICKS = ("first", "last")
 
 # 1プログラムあたりの step 数上限（巨大プログラムによるメモリ消費を防ぐ）
-_MAX_STEPS = 256
+MAX_STEPS = 256
+_MAX_STEPS = MAX_STEPS
 
 
 # ---------------------------------------------------------------------------
@@ -1179,6 +1181,9 @@ def validate_program(program: dict[str, Any]) -> list[str]:
             seen_ids.add(sid)
 
         needs_input = bool(step.get("needs_input"))
+
+        for pf_error in physical_format_errors(step.get("physical_format")):
+            errors.append(f"{loc}: {pf_error}")
 
         def _check_param_ref(name: str, field: str) -> None:
             """パラメータ参照の健全性（前方参照のみ・自己参照禁止）を検査する。

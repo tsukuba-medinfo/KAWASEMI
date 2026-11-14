@@ -61,6 +61,9 @@ class _NodeIds:
 
     def __init__(self, steps: list[dict[str, Any]]) -> None:
         self._used: set[str] = set()
+        # 基底名ごとの「次に試す連番」。衝突のたびに2から数え直すと、同じ id の step が
+        # k 個あるだけで O(k^2) になる（認証済みの1リクエストでワーカーが止まる）。
+        self._next: dict[str, int] = {}
         self.per_step: list[str] = []
         self._by_step_id: dict[str, str] = {}
         self._missing: dict[str, str] = {}
@@ -75,10 +78,15 @@ class _NodeIds:
 
     def _claim(self, base: str) -> str:
         nid = base
-        n = 2
-        while nid in self._used:
+        n = self._next.get(base, 2)
+        if nid in self._used:
+            # `_used` は増える一方なので、`n` より小さい連番はこの基底名で使用済み。
+            # 別の step が `base__N` と同じ名前を明示していた場合だけ、先へ進む。
             nid = f"{base}__{n}"
-            n += 1
+            while nid in self._used:
+                n += 1
+                nid = f"{base}__{n}"
+            self._next[base] = n + 1
         self._used.add(nid)
         return nid
 
@@ -103,10 +111,13 @@ def _esc(text: Any, limit: int = 60) -> str:
     output/reasoning 由来テキスト中の生の `<`（例: 「値<10」）とが Mermaid の htmlLabels
     解釈で衝突して図が壊れるのを防ぐ（安全面は Jinja2 autoescape + Mermaid strict で別途担保）。
 
-    **限界**: Mermaid 独自のエンティティ記法（`#lt;` `#gt;` など）は触らない。XSS は成立しない
-    （`securityLevel` 既定 `strict` の DOMPurify がテキストとして着地させることを実測した）が、
-    出力に `#lt;img…#gt;` のような文字列があると、図の上では `<img…>` という字面に
-    **展開されて表示される**（元の字面にならない）。表示のみの差で、図は壊れない。
+    **Mermaid のディレクティブとエンティティを無害化する。** ラベルは設計者が書く step id /
+    reasoning や、患者データ・LLM 出力に由来する trace の output / error から作られる。
+    Mermaid は `%%{init: {...}}%%` を設定ディレクティブとして、ラベルの中でも読む
+    （`themeCSS` で図やページの見た目を変え、CSS から外部 URL を取りに行かせられる）。
+    そこで `%`（`%%` ディレクティブ・コメント）、`{` `}`（ディレクティブの本体）、`#`
+    （`#lt;` など Mermaid 独自のエンティティ記法）を全角へ置き換える。字面は読めるまま、
+    構文としては働かなくなる。
     """
     s = "" if text is None else str(text)
     s = (
@@ -115,6 +126,13 @@ def _esc(text: Any, limit: int = 60) -> str:
         .replace("|", "/")
         .replace("<", "＜")
         .replace(">", "＞")
+        .replace("%", "％")
+        .replace("{", "｛")
+        .replace("}", "｝")
+        .replace("#", "＃")
+        .replace(
+            "`", "｀"
+        )  # 先頭のバッククォートは Mermaid のマークダウン文字列として読まれ、字句エラーになる
     )
     if len(s) > limit:
         s = s[: max(1, limit - 3)] + "..."

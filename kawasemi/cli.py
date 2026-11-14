@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from kawasemi.core.auth import get_password_hash
 from kawasemi.core.config import settings
+from kawasemi.core.password_policy import password_policy_error
 from kawasemi.models import Base, Role, RoleType, User, UserRole
 
 if TYPE_CHECKING:
@@ -55,8 +56,13 @@ async def create_admin_user(
     email: str,
     password: str,
     full_name: str,
-) -> None:
-    """管理者ユーザーを作成する"""
+) -> bool:
+    """管理者ユーザーを作成する。作成できたら True、拒否したら False（呼び出し側が終了コードにする）。"""
+    policy_error = password_policy_error(password, username=username)
+    if policy_error:
+        print(f"エラー: {policy_error}")
+        return False
+
     session = await get_async_session()
 
     try:
@@ -70,14 +76,14 @@ async def create_admin_user(
 
         if existing_user:
             print(f"エラー: ユーザー名 '{username}' は既に使用されています")
-            return
+            return False
 
         result = await session.execute(select(User).where(User.email == email))
         existing_email = result.scalar_one_or_none()
 
         if existing_email:
             print(f"エラー: メールアドレス '{email}' は既に使用されています")
-            return
+            return False
 
         # ユーザー作成
         password_hash = get_password_hash(password)
@@ -105,6 +111,7 @@ async def create_admin_user(
         print(f"  メール: {email}")
         print(f"  氏名: {full_name}")
         print("  ロール: admin")
+        return True
 
     except Exception as e:
         await session.rollback()
@@ -697,7 +704,7 @@ def main() -> None:
                 print("エラー: パスワードが一致しません")
                 sys.exit(1)
 
-        asyncio.run(
+        created = asyncio.run(
             create_admin_user(
                 username=args.username,
                 email=args.email,
@@ -705,6 +712,9 @@ def main() -> None:
                 full_name=args.name,
             )
         )
+        if not created:
+            # パスワードの方針違反・重複などで作らなかった。スクリプトが失敗を検知できるようにする
+            sys.exit(1)
 
     elif args.command == "init_db":
         asyncio.run(init_db())

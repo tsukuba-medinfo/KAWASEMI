@@ -117,13 +117,20 @@ def _reset_login_rate_limit():
     **Limiter はプロセスに1つである**。`core/rate_limit.py` が
     その1つを持ち、`api/main.py` の `app.state.limiter` も各ルータもそれを使う。
     """
-    from kawasemi.core.login_throttle import login_throttle
+    from kawasemi.core.config import settings
+    from kawasemi.core.login_throttle import account_backoff, login_throttle
     from kawasemi.core.rate_limit import limiter
 
     limiter.reset()
     # (ユーザー名, IP) ごとの失敗カウントもプロセス内で共有される。テスト間へ持ち越さない
     login_throttle.clear()
+    account_backoff.clear()
+    # アカウント単位の遅延（試行が重なると秒単位で待たせる）は、既定ではテストを遅くするだけなので
+    # 切る。遅延そのものを確かめるテストは、自分で設定を戻す（tests/test_login_backoff.py）。
+    original = settings.login_backoff_base_seconds
+    settings.login_backoff_base_seconds = 0.0
     yield
+    settings.login_backoff_base_seconds = original
 
 
 @pytest.fixture(autouse=True)
