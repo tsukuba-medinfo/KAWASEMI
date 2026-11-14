@@ -645,7 +645,11 @@ def _derive_db(
             key_type=None if unscoped else payload.get("key_type"),
             patient_scoped=not unscoped,
             missing=(
-                "接続の種別（connections.yaml に未登録のため自アプリDB/外部DBを判定できない）",
+                "接続の種別（"
+                + (registry if registry is not None else get_registry()).unresolved_reason(
+                    connection_id
+                )
+                + "ため自アプリDB/外部DBを判定できない）",
             ),
         )
     if op == OpType.EXTERNAL_DB_EXTRACT and not connection_id:

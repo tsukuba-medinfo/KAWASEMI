@@ -203,41 +203,79 @@ READONLY_DATABASE_URL=postgresql+asyncpg://kawasemi_ro:...@postgres:5432/kawasem
 
   PostgreSQL の RLS の例です（**そのまま使わず、自分のスキーマと接続の経路に合わせて書き直してください**）。
 
-  > **注意（実機 PostgreSQL 17 で確認）**: 方針が `current_setting('app.patient_id', true)` を信頼するとき、
-  > その設定を**計画の SQL が書ける**と、境界になりません。`set_config` は SELECT から呼べるので、
-  > 読み取りロールが `SELECT set_config('app.patient_id', '他の患者', true)` を実行すれば、
-  > 同じトランザクションで他の患者の行が読めます。アプリが SQL の禁止語で `set_config` を拒否するのは
-  > 多層の一つで、字句の検査は境界ではありません。設定は、**計画の SQL が書けない経路**
-  > （接続を受け持つ信頼できる層）で入れ、読み取りロールからは `set_config` の実行権を外してください。
-  > アプリはこの設定を入れません。下の例は、その経路があるときに成り立つ形です。
+  > **まず、やってはいけない形（実機 PostgreSQL 17 で確認）**: 方針が
+  > `current_setting('app.patient_id', true)` のような**セッション設定**を信頼する形は、
+  > 読み取りロールがその設定を書ける限り、境界になりません。
+  > - `SELECT set_config('app.patient_id', '他の患者', true)` を実行すれば、他の患者の行が読めます。
+  >   `set_config` の実行権を読み取りロールから外せば、これは止まります。
+  > - しかし、**`SET LOCAL app.patient_id = '他の患者'`（素の `SET` 文）は、実行権の取り消しでは止まりません**。
+  >   カスタム設定（`app.` で始まる名前）は、誰でも変更できる種類だからです。
+  >   PostgreSQL 15 以降の `REVOKE SET ON PARAMETER app.patient_id` でも止まらないことを確かめました
+  >   （パラメータの権限は、管理者だけが変えられる設定にしか効きません）。
+  > - `RESET ROLE` / `SET ROLE` も同様で、特権ロールで接続して `SET LOCAL ROLE plan_reader` とする形は、
+  >   `RESET ROLE` で元のロールに戻れます。
+  >
+  > アプリは、`set_config` / `current_setting` / `pg_notify` と、`SET`・`RESET`・複数文を、SELECT 限定の
+  > 検査で拒否します。これは**多層防御の一つで、境界ではありません**（字句の検査は、これまでも
+  > 何度か回避されました）。上の形が成り立つのは、この検査が破られていない間だけです。
+
+  **検査が破られても成り立つ形（実機 PostgreSQL 17 で確認した例）**: 患者の絞りを、
+  読み取りロールが**書けない表**に置きます。読み取りロールは**そのロールで直接ログイン**し
+  （特権ロールから `SET ROLE` しない）、患者の設定は、**別の接続**で信頼できる層が行います。
 
   ```sql
-  -- 例: lab_results(patient_id, result_value, ...) を、現在の患者の行だけに絞る
+  -- 例: lab_results(patient_id, result_value, ...) を、接続ごとに決めた患者の行だけに絞る
+  CREATE ROLE plan_reader LOGIN NOBYPASSRLS;   -- 計画の SQL を流す接続が、直接ログインするロール。
+                                               -- 他のロールのメンバーにしない（SET ROLE の行き先を作らない）
+  CREATE ROLE conn_layer LOGIN;                -- 信頼できる層が、患者の設定を書くための接続ロール
+
+  -- 患者の設定表。読み取りロールは、自分の接続の行だけを読める。書けるのは信頼できる層だけ
+  CREATE SCHEMA ctl;
+  CREATE TABLE ctl.patient_ctx (backend_pid int PRIMARY KEY, patient_id text NOT NULL);
+  ALTER TABLE ctl.patient_ctx ENABLE ROW LEVEL SECURITY;
+  CREATE POLICY own_row ON ctl.patient_ctx FOR SELECT TO plan_reader
+    USING (backend_pid = pg_catalog.pg_backend_pid());
+  CREATE POLICY layer_all ON ctl.patient_ctx FOR ALL TO conn_layer USING (true) WITH CHECK (true);
+  GRANT USAGE ON SCHEMA ctl TO plan_reader, conn_layer;
+  GRANT SELECT ON ctl.patient_ctx TO plan_reader;
+  GRANT SELECT, INSERT, UPDATE, DELETE ON ctl.patient_ctx TO conn_layer;
+
+  -- 臨床データの表: 読み取りロールには、設定表が示す患者の行だけを見せる
   ALTER TABLE lab_results ENABLE ROW LEVEL SECURITY;
-  ALTER TABLE lab_results FORCE ROW LEVEL SECURITY;  -- 表の所有者にも効かせる
-  CREATE POLICY patient_scope ON lab_results
-    FOR SELECT
-    USING (patient_id = current_setting('app.patient_id', true));
-  -- 計画の SQL を実行するロール（表の所有者や BYPASSRLS を持つロールは使わない）
-  CREATE ROLE plan_reader NOBYPASSRLS;
+  ALTER TABLE lab_results FORCE ROW LEVEL SECURITY;      -- 表の所有者にも効かせる
+  CREATE POLICY patient_scope ON lab_results FOR SELECT TO plan_reader
+    USING (patient_id = (SELECT c.patient_id FROM ctl.patient_ctx c
+                          WHERE c.backend_pid = pg_catalog.pg_backend_pid()));
+  GRANT USAGE ON SCHEMA public TO plan_reader;
   GRANT SELECT ON lab_results TO plan_reader;
-  -- plan_reader から set_config の実行権を外す。設定を入れる側（信頼できる層）のロールだけに与える
-  REVOKE EXECUTE ON FUNCTION pg_catalog.set_config(text, text, boolean) FROM PUBLIC;
-  CREATE ROLE conn_layer LOGIN;                       -- 信頼できる層が使う接続ロール
-  GRANT plan_reader TO conn_layer;
-  GRANT EXECUTE ON FUNCTION pg_catalog.set_config(text, text, boolean) TO conn_layer;
-  -- 信頼できる層が、計画の SQL を流す直前に、同じトランザクションで行う:
-  --   BEGIN;
-  --   SELECT set_config('app.patient_id', '<認可された患者の ID>', true);
-  --   SET LOCAL ROLE plan_reader;   -- 以降の文は plan_reader として動く（設定が無ければ 0 行）
-  --   ... 計画の SELECT ...
-  --   COMMIT;
+
+  -- 読み取りロールに、表・関数・一時表を作らせない（設定表を隠す偽物を作らせない）
+  REVOKE ALL ON SCHEMA public FROM PUBLIC;
+  REVOKE TEMPORARY ON DATABASE mydb FROM PUBLIC;
+
+  -- 運用（信頼できる層）: 計画の SQL を流す接続の pg_backend_pid() を知り、別の接続で
+  --   INSERT INTO ctl.patient_ctx VALUES (<その pid>, '<認可された患者の ID>')
+  --     ON CONFLICT (backend_pid) DO UPDATE SET patient_id = EXCLUDED.patient_id;
+  -- を実行してから計画の SELECT を流し、終わったら必ず DELETE FROM ctl.patient_ctx WHERE backend_pid = <その pid>
+  -- を行う。設定が無い接続は 0 行になる。
   ```
 
-  `PUBLIC` からの `REVOKE` は、他のロール（アプリ本体や監視など）の `set_config` も止めます。
-  影響を確かめてから行い、PostgreSQL の更新のあとに権限が残っていることを確かめてください。
-  この形は、SELECT だけの SQL が `RESET ROLE` や `SET` を実行できないこと（アプリの検査）と、
-  `set_config` 以外に設定を書く関数を入れていないこと（拡張に注意）に依存します。
+  この形で、読み取りロールとして次を試して、他の患者の行が読めないことを確かめました:
+  `SET LOCAL app.patient_id`、`set_config(...)`、`RESET ROLE`、`SET ROLE conn_layer` / `SET ROLE <管理者>`
+  （権限が無く失敗）、設定表への `INSERT` / `UPDATE` / `DELETE`（失敗）、`search_path` を `pg_temp` 先頭にする、
+  一時表・一時関数・`public` への表や関数の作成（失敗）。
+
+  守る条件は次のとおりです。**アプリはこの経路を提供しません**。運用者が、接続の層（プロキシや接続プール、
+  計画を流す専用の部品）として用意します。
+  - 計画の SQL を流す接続は、`plan_reader` で直接ログインする（特権ロールからの `SET ROLE` にしない）。
+  - 設定は別の接続で書き、使い終わったら消す。接続プールで同じ接続を使い回すときは、要求ごとに上書きし、
+    終わりに消す（古い行が残ると、同じ pid の次の要求が前の患者を見る）。
+  - 表と関数は、スキーマ名つきで書く（上の例のとおり）。
+  - `plan_reader` に、ほかの表・ビュー・関数の `GRANT` を足さない。`PUBLIC` への `REVOKE` は、
+    アプリ本体や監視など他のロールにも影響するので、影響を確かめてから行い、PostgreSQL の更新のあとにも
+    権限が残っていることを確かめる。
+  - 接続の層を使わずに済ませるなら、**患者ごとのビューやアカウント**にして、計画の SQL が
+    別の患者の入口に届かない形にする（これも、アプリではなく運用者の設計です）。
 - **ファイルと FHIR の患者の範囲は、アプリが確かめます。** 次の形でなければ実行しません（`path_not_permitted`）。
   - ファイル: `path_pattern` のパス区間の1つが `{{patient_id}}`（`{{patient_id}}.txt` は可、
     `{{a}}{{patient_id}}` は不可）
@@ -268,8 +306,13 @@ LLM や索引が組んだ SELECT を発行します。アプリは、使える�
   `scope: external` の接続は、`external_db_extract` に使えません。起動（レジストリの読み込み）時に
   接続名つきで警告を出し、コンパイルは `external_db_extract` を作らず（不足として人の補完に回す）、
   実行時にも `path_not_permitted` で断ります。
-- **読み取り専用の違反と文タイムアウトによる取り消しは、投げ直しません**（待っても通らないため）。
-  接続断・デッドロックのような一時的なエラーだけを、10 秒待って最大 3 回投げ直します。
+- **読み取り専用の違反（SQLSTATE 25006）と取り消し（57014）、データ・整合性・未対応・構文/権限/未定義の誤り
+  （クラス 22・23・0A・42。表が無い 42P01 を含む）は、投げ直しません**（待っても通らないため）。
+  接続断・デッドロック・直列化の失敗・ロック待ちの失敗のような一時的なエラーと、分類できないエラーだけを、
+  10 秒待って最大 3 回投げ直します。注意点が 2 つあります。(1) 57014 は、文タイムアウトだけでなく、
+  管理者が `pg_cancel_backend` で取り消した場合にも付くので、その場合も投げ直しません。
+  (2) 外部 DB の表を作り直している最中の一時的な「表が無い」（42P01）も、投げ直さずに 1 回目で失敗します。
+  その項目は、再実行で取り直してください。
 - **接続アカウントは読み取り専用にする**。書き込み・DDL・関数やプロシージャの作成・実行の権限を与えません。
 - **抽出に要る表とビューにだけ `SELECT` を与える**。読み取り専用のアカウントでも、与えられた表は
   すべて読めます（たとえば `UNION` で別の表を読み足すことは、文字列検査が止めなくても権限が止める）。

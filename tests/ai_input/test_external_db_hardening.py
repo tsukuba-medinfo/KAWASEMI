@@ -130,7 +130,8 @@ def test_registry_reports_kindless_external_connection(tmp_path, caplog) -> None
     problems = registry.problems()
     assert any("'dwh_bad'" in p and "kind" in p for p in problems)
     assert any("'odd'" in p for p in problems)
-    assert any("'fhir_ext'" in p and "external_db_extract" in p for p in problems)
+    # 正当な非 DB の external 接続（fhir）は、secret_ref があっても警告しない
+    assert not any("'fhir_ext'" in p for p in problems)
     assert not any("'dwh_ok'" in p for p in problems)
     assert "接続レジストリの不備" in caplog.text and "dwh_bad" in caplog.text
     assert registry.is_external_db("dwh_ok") is True
@@ -151,3 +152,38 @@ def test_compiler_does_not_emit_external_db_extract_for_kindless_connection() ->
     assert resolve_db_op({"connection_id": "ok"}, registry) == OpType.EXTERNAL_DB_EXTRACT
     # 実行時に拒否される op を作らない（不足＝人の補完へ回す）
     assert resolve_db_op({"connection_id": "bad"}, registry) is None
+
+
+def test_shipped_registries_load_without_warnings() -> None:
+    """同梱のテンプレートと e2e 用の登録は、正しい書き方なので警告ゼロでなければならない。"""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    for rel in ("site.example/connections.yaml", "examples/e2e/connections.e2e.yaml"):
+        registry = ConnectionRegistry.load(root / rel)
+        assert registry.problems() == [], (rel, registry.problems())
+
+
+def test_gap_reason_distinguishes_unregistered_from_kindless() -> None:
+    from kawasemi.ai_input.resource_index.derive import derive_op_args
+
+    registry = ConnectionRegistry(
+        {"bad": {"scope": "external", "secret_ref": "x"}, "ok": {"kind": "db", "scope": "self"}}
+    )
+    assert "未登録" in registry.unresolved_reason("nope")
+    kindless = registry.unresolved_reason("bad")
+    assert "登録済み" in kindless and "kind" in kindless and "未登録" not in kindless
+
+    def gap(cid: str) -> str:
+        cand = {
+            "unit_id": "db:t.c",
+            "connection_id": cid,
+            "payload": {"db_qualified": "s.t", "physical_name": "c"},
+        }
+        derived = derive_op_args(cand, registry)
+        assert derived is not None
+        return " ".join(derived.missing)
+
+    assert "未登録" in gap("nope")
+    text = gap("bad")
+    assert "登録済み" in text and "未登録" not in text

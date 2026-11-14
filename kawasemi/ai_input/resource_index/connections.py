@@ -93,6 +93,19 @@ class ConnectionRegistry:
             return False
         return conn.get("kind") == KIND_DB and conn.get("scope") == SCOPE_EXTERNAL
 
+    def unresolved_reason(self, connection_id: str | None) -> str:
+        """DB 候補の接続を、自アプリDB/外部DBのどちらとも決められない理由（人に見せる文）。
+
+        未登録と、登録済みだが kind が無効（実行時の関門 kind: db かつ scope: external を
+        満たさない）を区別する。後者を「未登録」と書くと、直すべき場所を誤らせる。
+        """
+        conn = self.get(connection_id)
+        if conn is None:
+            return "connections.yaml に未登録"
+        if conn.get("kind") not in KINDS:
+            return "connections.yaml に登録済みだが kind が無効または未指定で、DB 接続には kind: db が必要"
+        return "接続の scope が解決できない"
+
     def problems(self) -> list[str]:
         """登録内容の不備（実行時に拒否される形）を、接続名つきの文で返す。
 
@@ -103,18 +116,18 @@ class ConnectionRegistry:
         for cid, conn in self._connections.items():
             kind, scope = conn.get("kind"), conn.get("scope")
             if kind not in KINDS:
+                note = (
+                    "scope: external の DB 接続なら kind: db を書いてください。"
+                    if scope == SCOPE_EXTERNAL
+                    else ""
+                )
                 found.append(
                     f"接続 {cid!r}: kind が不正または未指定です（{kind!r}。db / fhir / file のいずれか）。"
-                    "この接続は external_db_extract に使えません"
+                    f"この接続は external_db_extract に使えません。{note}"
                 )
             if scope is not None and scope not in SCOPES:
                 found.append(
                     f"接続 {cid!r}: scope が不正です（{scope!r}。self / external のいずれか）"
-                )
-            if scope == SCOPE_EXTERNAL and kind != KIND_DB and conn.get("secret_ref"):
-                found.append(
-                    f"接続 {cid!r}: scope: external で secret_ref がありますが kind: db ではありません。"
-                    "external_db_extract としては実行されません（DB なら kind: db を書いてください）"
                 )
         return found
 

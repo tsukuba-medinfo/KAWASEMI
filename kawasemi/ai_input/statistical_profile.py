@@ -309,7 +309,11 @@ async def generate_statistical_profile(
     op = resolve_db_op(candidate, registry)
     if op is None:
         return _not_applicable(
-            "接続の scope が解決できません（connections.yaml 未登録）",
+            "接続の scope が解決できません（"
+            + registry.unresolved_reason(
+                candidate.get("connection_id") or payload.get("connection_id")
+            )
+            + "）",
             source_category,
         )
 
