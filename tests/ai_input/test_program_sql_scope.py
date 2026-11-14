@@ -443,6 +443,27 @@ def test_path_needs_the_patient_key_as_a_whole_segment(pattern: str, expected: b
         ("Observation?patient={{patient_id}}", True),
         ("Patient/{{patient_id}}/$everything", True),
         ("subject-less", False),
+        # 再スキャン F9（2回目）: 型と患者パラメータの組。その型に無いパラメータは、未知のパラメータを
+        # 無視するサーバーで絞りが効かず全件を返す
+        ("/Patient?subject={{patient_id}}", False),
+        ("/Patient?patient={{patient_id}}", False),
+        ("/Practitioner?patient={{patient_id}}", False),
+        ("/Organization?subject={{patient_id}}", False),
+        ("/Coverage?patient={{patient_id}}", False),
+        ("/Location?subject={{patient_id}}", False),
+        ("/Medication?patient={{patient_id}}", False),
+        ("/AllergyIntolerance?subject={{patient_id}}", False),  # patient だけを持つ型
+        ("/Immunization?subject={{patient_id}}", False),
+        ("/observation?patient={{patient_id}}", False),  # 型名は大文字小文字のとおり
+        ("/Observation?subject={{patient_id}}", True),
+        ("/Encounter?subject={{patient_id}}&date=ge2020-01-01", True),
+        ("/Condition?patient={{patient_id}}&clinical-status=active", True),
+        ("/MedicationRequest?patient={{patient_id}}", True),
+        ("/AllergyIntolerance?patient={{patient_id}}", True),
+        ("/Immunization?patient={{patient_id}}", True),
+        ("/QuestionnaireResponse?subject={{patient_id}}", True),
+        # Patient 自身は、形 2（患者の下）だけ
+        ("/Patient/{{patient_id}}", True),
     ],
 )
 def test_fhir_query_needs_the_patient_param(query: str, expected: bool) -> None:

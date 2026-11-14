@@ -6,6 +6,7 @@ from typing import Any, Literal, get_args
 from pydantic import AliasChoices, BaseModel, Field, field_validator
 
 from kawasemi.ai_input.models import MAX_SQL_LENGTH
+from kawasemi.ai_input.physical_format import MAX_AFFIX_LENGTH, MAX_PAD
 from kawasemi.core.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -583,7 +584,26 @@ class DSLStep(BaseModel):
     # 患者キーへバインドする（executor._key_for_step）。未指定なら登録番号をそのまま
     # 使う（後方互換）。physical_format の対応キーは pad / padchar / prefix / suffix。
     key_type: str | None = None  # 例: mrn / fhir_patient_id
-    physical_format: dict[str, Any] | None = None  # 例: {"pad": 10}
+    # 例: {"pad": 10}。許す形は physical_format.py の規則（保存時の validate_program V-19 と適用時が
+    # 同じ規則を使う）。スキーマには同じ範囲を載せる。
+    physical_format: dict[str, Any] | None = Field(
+        default=None,
+        json_schema_extra={
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "pad": {"type": "integer", "minimum": 0, "maximum": MAX_PAD},
+                        "padchar": {"type": "string", "minLength": 1, "maxLength": 1},
+                        "prefix": {"type": "string", "maxLength": MAX_AFFIX_LENGTH},
+                        "suffix": {"type": "string", "maxLength": MAX_AFFIX_LENGTH},
+                    },
+                    "additionalProperties": False,
+                },
+                {"type": "null"},
+            ]
+        },
+    )
 
 
 class DSLParam(BaseModel):

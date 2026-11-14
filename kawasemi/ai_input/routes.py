@@ -13,6 +13,7 @@ import csv
 import hashlib
 import io
 import json
+import re
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
@@ -3936,6 +3937,13 @@ async def plan_graph(
             status_code=422,
             detail=f"step 数が上限（{MAX_STEPS}）を超えています: {len(payload.program.steps)}",
         )
+    # `op` は図のラベルに入る。語彙は英小文字と `_` だけなので、それ以外（先頭のバッククォートなど
+    # Mermaid の構文になりうる文字、空文字）は図にせず 422 にする。
+    bad_ops = [
+        st.op for st in payload.program.steps if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", st.op)
+    ]
+    if bad_ops:
+        raise HTTPException(status_code=422, detail=f"op が不正です: {bad_ops[0]!r}")
     await _get_questionnaire_or_404(questionnaire_id, db)
     return JSONResponse({"mermaid": program_to_mermaid(_program_dump(payload.program))})
 

@@ -130,6 +130,9 @@ def _esc(text: Any, limit: int = 60) -> str:
         .replace("{", "｛")
         .replace("}", "｝")
         .replace("#", "＃")
+        .replace(
+            "`", "｀"
+        )  # 先頭のバッククォートは Mermaid のマークダウン文字列として読まれ、字句エラーになる
     )
     if len(s) > limit:
         s = s[: max(1, limit - 3)] + "..."

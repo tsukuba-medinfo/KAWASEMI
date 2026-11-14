@@ -400,3 +400,35 @@ async def test_the_cli_refuses_a_weak_admin_password(capsys: pytest.CaptureFixtu
 
     out = capsys.readouterr().out
     assert "12文字以上" in out
+
+
+def test_the_cli_exits_non_zero_when_the_admin_password_is_refused(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """方針違反で作らなかったのに終了コード 0 だと、スクリプトが失敗を見落とす。"""
+    import sys
+
+    from kawasemi import cli
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "kawasemi",
+            "create_admin",
+            "-u",
+            "cliadmin2",
+            "-e",
+            "cliadmin2@example.com",
+            "-p",
+            "short",
+            "-n",
+            "CLI 管理者",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as raised:
+        cli.main()
+
+    assert raised.value.code == 1
+    assert "12文字以上" in capsys.readouterr().out

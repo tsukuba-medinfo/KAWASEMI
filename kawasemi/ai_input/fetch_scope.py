@@ -17,6 +17,74 @@ _PLACEHOLDER = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
 
 # FHIR の検索パラメータ名は大文字小文字を区別する（`Patient=` は別のパラメータ）
 _FHIR_PATIENT_PARAMS = {"patient", "subject"}
+# 形 1（資源の検索）で認める「リソース型 → 患者を絞る検索パラメータ名」。
+# FHIR R4 の Patient コンパートメントのうち、検索パラメータ `patient` / `subject` を**実際に持つ**型だけ。
+# 型と名前の組を固定する理由: `Patient?subject=...` や `Practitioner?patient=...` のように、その型に
+# 無い検索パラメータは、未知のパラメータを無視する（寛容な）サーバーで**絞りが効かず全件を返す**。
+# `Patient` 自身は形 2（`/Patient/{{patient_id}}`）だけで扱う。Coverage など患者を `patient` / `subject`
+# 以外（`beneficiary` など）で絞る型は、ここに載せない（認めない側に倒す）。
+_BOTH = frozenset({"patient", "subject"})
+_PATIENT_ONLY = frozenset({"patient"})
+_FHIR_SEARCH_PATIENT_PARAMS: dict[str, frozenset[str]] = {
+    **{
+        t: _BOTH
+        for t in (
+            "Account",
+            "CarePlan",
+            "CareTeam",
+            "ChargeItem",
+            "ClinicalImpression",
+            "Communication",
+            "CommunicationRequest",
+            "Composition",
+            "Condition",
+            "DeviceRequest",
+            "DeviceUseStatement",
+            "DiagnosticReport",
+            "DocumentReference",
+            "Encounter",
+            "Goal",
+            "ImagingStudy",
+            "Invoice",
+            "List",
+            "Media",
+            "MedicationAdministration",
+            "MedicationDispense",
+            "MedicationRequest",
+            "MedicationStatement",
+            "Observation",
+            "Procedure",
+            "QuestionnaireResponse",
+            "RiskAssessment",
+            "ServiceRequest",
+            "Specimen",
+        )
+    },
+    **{
+        t: _PATIENT_ONLY
+        for t in (
+            "AllergyIntolerance",
+            "AuditEvent",
+            "Claim",
+            "ClaimResponse",
+            "Consent",
+            "DetectedIssue",
+            "EpisodeOfCare",
+            "ExplanationOfBenefit",
+            "FamilyMemberHistory",
+            "Flag",
+            "Immunization",
+            "ImmunizationEvaluation",
+            "ImmunizationRecommendation",
+            "MeasureReport",
+            "MolecularSequence",
+            "NutritionOrder",
+            "Provenance",
+            "SupplyDelivery",
+            "VisionPrescription",
+        )
+    },
+}
 # 絞った結果に**ほかの資源を連れてくる・条件を差し替える**パラメータ
 _FHIR_WIDENING_PARAMS = ("_include", "_revinclude", "_has", "_filter", "_query")
 # FHIR の検索パラメータ名として許す字種（符号化・空白・記号は許さない）
@@ -43,12 +111,16 @@ def path_scopes_patient(pattern: str) -> bool:
 def fhir_query_scopes_patient(query: str) -> bool:
     """FHIR クエリが患者キーで絞る形か。**次の2つの形だけ**を認める。
 
-    1. **資源の検索**: パスがリソース型1つだけ（`/Observation`）で、検索パラメータ
+    1. **資源の検索**: パスがリソース型1つだけ（`/Observation`）で、その型が持つ検索パラメータ
        `patient` / `subject`（小文字のとおり）が**ちょうど1つ**あり、値が**ちょうど**
-       `{{patient_id}}`。
+       `{{patient_id}}`。**型と名前の組**は `_FHIR_SEARCH_PATIENT_PARAMS` の許可リストにあるものだけ
+       （`Patient?subject=...`、`Practitioner?patient=...` のように、その型に無いパラメータは、
+       寛容なサーバーで絞りが効かないので認めない。`Patient` は形 2 だけ）。
     2. **患者の下のパス**: `/Patient/{{patient_id}}`（`Patient` も大文字小文字のとおり）で始まり、
        続くパスはリソース型か `$operation`（`/Patient/{{patient_id}}/$everything`、
-       `/Patient/{{patient_id}}/Observation`）。
+       `/Patient/{{patient_id}}/Observation`）。`$operation` の名前は限定していない
+       （`$everything` 以外、たとえば `$export` も形としては通る。サーバーが患者の下で何を
+       実装しているかはアプリからは分からないので、運用者が FHIR の資格情報の権限で絞る）。
 
     次は、絞っていても認めない:
     - パスが型レベルの操作（`/Patient/$everything?patient=...`）。`patient` が入力パラメータでない
@@ -111,9 +183,11 @@ def fhir_query_scopes_patient(query: str) -> bool:
     # 形 1: リソース型1つの検索。型レベルの `$operation` は認めない。
     if len(segments) != 1 or not _RESOURCE_TYPE.fullmatch(segments[0]):
         return False
+    allowed_names = _FHIR_SEARCH_PATIENT_PARAMS.get(segments[0])
     return (
-        len(patient_params) == 1
-        and patient_params[0][0] in _FHIR_PATIENT_PARAMS
+        allowed_names is not None
+        and len(patient_params) == 1
+        and patient_params[0][0] in allowed_names
         and _whole(patient_params[0][1])
     )
 

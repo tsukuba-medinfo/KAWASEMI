@@ -127,6 +127,36 @@ async def test_plan_graph_refuses_a_program_over_the_step_cap(
     assert resp.status_code == 200
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op", ["`", "`x", "", "a b", "A", "x\n%%{init:{}}%%", "a" * 65])
+async def test_plan_graph_refuses_an_op_that_is_not_plain_vocabulary(
+    plan_editor: AsyncClient, csrf_token: str, db_session: AsyncSession, op: str
+) -> None:
+    q = Questionnaire(
+        fhir_id="q-rescan2-op",
+        title="op の検証",
+        status="active",
+        content={"resourceType": "Questionnaire", "id": "q-rescan2-op", "item": []},
+    )
+    db_session.add(q)
+    await db_session.commit()
+    await db_session.refresh(q)
+    url = f"/ai-input/questionnaires/{q.id}/plan/graph"
+
+    resp = await plan_editor.post(
+        url,
+        json={"program": {"steps": [{"op": op, "id": "s"}]}},
+        headers={"X-CSRF-Token": csrf_token},
+    )
+
+    assert resp.status_code == 422
+
+
+def test_esc_neutralizes_a_leading_backtick() -> None:
+    assert not _esc("`markdown string`").startswith("`")
+    assert "`" not in _esc("a`b")
+
+
 # --- F7: physical_format の上限 -----------------------------------------------------
 
 
