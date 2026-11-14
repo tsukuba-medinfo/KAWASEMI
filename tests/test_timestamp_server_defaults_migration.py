@@ -216,6 +216,7 @@ _KNOWN_MISSING_FOREIGN_KEYS = frozenset(
         "input_targets.subject_id",
         "questionnaire_responses.submitted_by_id",
         "questionnaire_responses.verified_by_id",
+        "questionnaire_responses.last_edited_by_id",
         # 後から増えた1件。`5476e155ca8a` が
         # 「物理FKを張らず index のみ付与する」と docstring に明記している。
         "system_locations.updated_by_id",

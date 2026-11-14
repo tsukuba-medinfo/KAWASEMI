@@ -49,8 +49,9 @@ class VerificationAction:
     VERIFIED = "verified"  # 検証者が承認
     REJECTED = "rejected"  # 検証者が差戻し
     RESUBMITTED = "resubmitted"  # 差戻し後に収集者が再編集・再提出
+    EDITED = "edited"  # 収集者が回答を編集（職務分離の判定に使う）
 
-    ALL = [VERIFIED, REJECTED, RESUBMITTED]
+    ALL = [VERIFIED, REJECTED, RESUBMITTED, EDITED]
 
 
 class QuestionnaireResponse(Base, TimestampMixin):
@@ -94,6 +95,10 @@ class QuestionnaireResponse(Base, TimestampMixin):
     submitted_by_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    # 最後に編集したユーザ。SoD は提出者に加えて編集者にも及ぶ（編集してから検証、を防ぐ）。
+    last_edited_by_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     # 検証状態（unverified / verified / rejected）。FHIR status とは独立。
     verification_status: Mapped[str] = mapped_column(
         String(32),
@@ -117,6 +122,7 @@ class QuestionnaireResponse(Base, TimestampMixin):
     )
     submitted_by: Mapped[User | None] = relationship("User", foreign_keys=[submitted_by_id])
     verified_by: Mapped[User | None] = relationship("User", foreign_keys=[verified_by_id])
+    last_edited_by: Mapped[User | None] = relationship("User", foreign_keys=[last_edited_by_id])
     verification_logs: Mapped[list[ResponseVerificationLog]] = relationship(
         "ResponseVerificationLog",
         back_populates="questionnaire_response",
@@ -144,7 +150,9 @@ class ResponseVerificationLog(Base, TimestampMixin):
     actor_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
-    action: Mapped[str] = mapped_column(String(32), nullable=False)  # verified/rejected/resubmitted
+    action: Mapped[str] = mapped_column(
+        String(32), nullable=False
+    )  # verified/rejected/resubmitted/edited
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     questionnaire_response: Mapped[QuestionnaireResponse] = relationship(

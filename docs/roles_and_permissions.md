@@ -187,15 +187,20 @@ manual 縮退の提案・承認・確定操作の分離も同じ（[manual 縮�
 
 | 操作 | 実装 | 弾く条件 |
 |---|---|---|
-| 回答の verify / reject | `web/routes.py: verify_response` / `reject_response` | `response.submitted_by_id == current_user.id`（**提出者だけを見る**） |
+| 回答の verify / reject | `web/routes.py: verify_response` / `reject_response` | 提出者（`submitted_by_id`）、最後の編集者（`last_edited_by_id`）、または編集の監査ログ（`action=edited`）に残る編集者のいずれかが `current_user`。**編集してから検証、は止まる** |
 | check モードの確定（`/datasets/{id}/check/{target_id}/confirm`） | `web/dataset_routes.py: confirm_check` | 収集者だけが入れる。自分が有効なリースを持つ AIドラフト対象でなければ確定できない（欠損を埋める人が確定も行うので、閲覧・検証者のチェックの流れと、その自己検証の分岐は無い） |
 | 所在の確からしさの判定 | `ai_input/routes.py` | 作成者と判定者が同一なら `is_self_assessment=True` を記録（止めない） |
 | 管理者と患者データ | `require_roles` / `user_can_access_patient` | 管理者は回答・入力対象・データセット・設計の画面に入れない。患者スコープの全許可も無い |
 
 - **止まらない経路が1つ残っている**（以前からの既知。4役割へ畳んだときも変えていない）。A が `collector` として
   autofill 本番を実行し（`executed_by_id=A`）、B が提出した回答（`submitted_by_id=B`）は、
-  **A が `reviewer` も保有していれば検証できる**。`verify_response` は提出者しか見ないので、
-  autofill の実行者との同一性は止まらない。
+  **A が `reviewer` も保有していれば検証できる**。`verify_response` は提出者と編集者を見るが、
+  autofill の実行者との同一性は見ない。
+- 回答の編集は毎回、`response_verification_logs` に `edited`（差戻し後の再編集は加えて `resubmitted`）を
+  追記し、`questionnaire_responses.last_edited_by_id` を更新する。
+- 検証済み（施錠）の確認と書き込みは原子的に行う。編集は `verification_status != verified` を条件にした
+  UPDATE で、割り込んだ検証があれば 409 で拒否する。verify / reject も、読んだ時点の状態のままであることを
+  条件にし、PostgreSQL では行ロック（`SELECT ... FOR UPDATE`）で読む。
 - 1人の利用者に `collector` と `reviewer` を同時に付与すると、自己検証禁止は上表の判定だけで効く。
   監査の厳しい用途では、同じ人に収集者と閲覧・検証者を同時に付与しない運用で担保する。
 - 管理者はアカウントと役割の付与を持つので、**自分に設計者や収集者を付与できる**。これは
