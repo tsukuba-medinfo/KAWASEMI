@@ -19,8 +19,7 @@ from collections.abc import Callable, Iterable
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any, TypeGuard
 
-from kawasemi.ai_input.models import OpType
-from kawasemi.ai_input.schemas import MAX_SQL_LENGTH
+from kawasemi.ai_input.models import MAX_SQL_LENGTH, OpType
 
 # 各 op が「人間補完なしで実行可能」になるために最低限必要なフィールド。
 # ここが欠けていて needs_input=false の場合は検証エラーにする。

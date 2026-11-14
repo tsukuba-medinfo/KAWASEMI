@@ -5,6 +5,7 @@ from typing import Any, Literal, get_args
 
 from pydantic import AliasChoices, BaseModel, Field, field_validator
 
+from kawasemi.ai_input.models import MAX_SQL_LENGTH
 from kawasemi.core.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -13,11 +14,6 @@ logger = get_logger(__name__)
 # patient_id が FHIR クエリ構築時に受けている制約（executor._op_fhir の
 # `re.fullmatch(r"[A-Za-z0-9._-]{1,64}", patient_id)`）と揃える。
 _STUDY_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
-
-# 計画のステップに書ける SQL の長さの上限（文字数）。SQL の検査（`dsl.is_select_only_sql`）は
-# 正規表現と字句解析で全文を読むので、無制限だと長い入力で処理時間が伸びる。生成・索引由来の
-# SQL は数百〜数千文字で、これを超える正当な用途は無い。スキーマと検査の両方で同じ値を使う。
-MAX_SQL_LENGTH = 20_000
 
 
 def validate_study_id(value: str) -> str:
