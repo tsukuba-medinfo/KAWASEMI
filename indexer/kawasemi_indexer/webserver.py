@@ -18,7 +18,8 @@ from __future__ import annotations
 
 import hmac
 import ipaddress
-from collections.abc import Callable, Iterable
+import re
+from collections.abc import Callable, Iterable, Mapping
 from typing import TYPE_CHECKING, Any, TypeVar
 from urllib.parse import urlsplit
 
@@ -66,15 +67,51 @@ def is_loopback_bind(host: str) -> bool:
         return False
 
 
+_HOST_LABEL_RE = re.compile(r"^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$")
+_HOST_IPV6_RE = re.compile(r"^\[[0-9a-f:.]+\]$")
+_HOST_PORT_RE = re.compile(r"^[0-9]{1,5}$")
+
+
 def _host_name(header: str) -> str:
-    """Host ヘッダからポートを除いた名前を返す（`[::1]:8000` → `[::1]`）。"""
+    """Host ヘッダからポートを除いた名前を返す（`[::1]:8000` → `[::1]`）。
+
+    形が正しくない値は空文字列（どの許可リストにも入らない）にする。`host` か `host:port`
+    だけを認め、ポートは数字だけ。`/` `?` `#` `@`・空白・制御文字・ASCII 以外を含む値は
+    すべて拒否する。Host ヘッダは URL の組み立てにも使われるので（`localhost:8000?` が
+    パスを空にした、再スキャン F3）、検査の前にここで落とす。
+    """
     h = header.strip().lower()
+    if not h or not h.isascii() or not h.isprintable() or any(c in h for c in " /?#@\\"):
+        return ""
     if h.startswith("["):
         end = h.find("]")
-        return h[: end + 1] if end != -1 else h
-    if h.count(":") == 1:
-        return h.rsplit(":", 1)[0]
-    return h
+        if end == -1:
+            return ""
+        name, rest = h[: end + 1], h[end + 1 :]
+        if not _HOST_IPV6_RE.match(name):
+            return ""
+    else:
+        name, sep, port = h.partition(":")
+        rest = sep + port
+        if not _HOST_LABEL_RE.match(name):
+            return ""
+    if rest:
+        if not rest.startswith(":") or not _HOST_PORT_RE.match(rest[1:]) or int(rest[1:]) > 65535:
+            return ""
+    return name
+
+
+# トークン無しで届くパス。診断 UI の HTML だけ（API はすべてトークンを要する）。
+_PUBLIC_PATHS = frozenset({"/"})
+
+
+def _route_path(scope: Mapping[str, Any]) -> str:
+    """ルーティングに使われるパス（root_path の接頭辞を除く）。Host ヘッダには依存しない。"""
+    path = str(scope.get("path", ""))
+    root = str(scope.get("root_path", "")).rstrip("/")
+    if root and path.startswith(root):
+        path = path[len(root) :]
+    return path
 
 
 def allowed_host_names(bind_host: str | None, extra: Iterable[str] = ()) -> frozenset[str]:
@@ -166,7 +203,10 @@ def create_app(
             return JSONResponse({"detail": "別オリジンからの要求は受け付けません"}, status_code=403)
         if request.headers.get("sec-fetch-site", "same-origin") not in ("same-origin", "none"):
             return JSONResponse({"detail": "別オリジンからの要求は受け付けません"}, status_code=403)
-        if expected is not None and request.url.path.startswith("/api/"):
+        # 認証の要否は、Host から組み立てられる request.url ではなく、ルーティングに使われる
+        # scope のパスで決める。公開するのは `/` だけで、それ以外は（存在しないパスも）
+        # トークンを要する（失敗時に閉じる）。
+        if expected is not None and _route_path(request.scope) not in _PUBLIC_PATHS:
             auth = request.headers.get("authorization", "")
             scheme, _, given = auth.partition(" ")
             if scheme.lower() != "bearer" or not hmac.compare_digest(

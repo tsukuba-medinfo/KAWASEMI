@@ -32,6 +32,40 @@
                 var m = document.querySelector('meta[name="csrf-token"]');
                 return m ? m.content : '';
             }
+            // Content-Disposition のファイル名（パス区切りを落とす）。無ければ download。
+            function filenameOf(disposition) {
+                var m = /filename\*\s*=\s*UTF-8''([^;]+)/i.exec(disposition)
+                    || /filename\s*=\s*"?([^";]+)"?/i.exec(disposition);
+                var name = 'download';
+                if (m) {
+                    try { name = decodeURIComponent(m[1]); } catch (err) { name = m[1]; }
+                }
+                name = name.replace(/[\\/]/g, '_').replace(/[\u0000-\u001f]/g, '');
+                return name || 'download';
+            }
+            function saveBlob(blob, name) {
+                var url = URL.createObjectURL(blob);
+                var a = document.createElement('a');
+                a.href = url;
+                a.download = name;
+                a.style.display = 'none';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+            }
+            // JSON のエラー（{"detail": ...}）は detail を、それ以外は本文をそのまま文字列で見せる。
+            function showPlainText(ok, text) {
+                if (!text && ok) return;
+                var msg = text;
+                try {
+                    var obj = JSON.parse(text);
+                    if (obj && typeof obj.detail === 'string') msg = obj.detail;
+                    else if (obj && obj.detail != null) msg = JSON.stringify(obj.detail);
+                } catch (err) { /* 文字列のまま */ }
+                if (String(msg).length > 500) msg = String(msg).slice(0, 500) + '…';
+                window.alert((ok ? '' : 'エラー: ') + msg);
+            }
             // バブリングで登録し、フォームの onsubmit（confirm 確認・入力検証）が先に走る。
             // onsubmit が return false / preventDefault した場合は defaultPrevented を尊重して
             // 送信しない（削除確認のキャンセルで削除が走る等の回帰を防ぐ）。
@@ -53,11 +87,29 @@
                     credentials: 'same-origin'
                 }).then(function (res) {
                     if (res.redirected) { window.location.href = res.url; return null; }
-                    return res.text();
-                }).then(function (html) {
-                    if (html != null) {
+                    var disposition = res.headers.get('Content-Disposition') || '';
+                    var type = (res.headers.get('Content-Type') || '').toLowerCase();
+                    // ダウンロード（エクスポート等）はブラウザに保存させる。ページには一切書かない。
+                    if (/^\s*attachment/i.test(disposition)) {
+                        return res.blob().then(function (blob) {
+                            saveBlob(blob, filenameOf(disposition));
+                            return null;
+                        });
+                    }
+                    // HTML ページ（検証エラーの再表示等）だけを、サーバーが描いたものとして描き直す。
+                    if (type.indexOf('text/html') === 0) {
+                        return res.text().then(function (html) { return { html: html }; });
+                    }
+                    // JSON やその他の本文は、保存された利用者データを含みうる。**HTML として扱わない**。
+                    // 文字列として通知するだけにする（document.write しない）。
+                    return res.text().then(function (text) {
+                        showPlainText(res.ok, text);
+                        return null;
+                    });
+                }).then(function (page) {
+                    if (page != null) {
                         document.open();
-                        document.write(html);
+                        document.write(page.html);
                         document.close();
                         // document.write 後は DOMContentLoaded が再発火しないため明示的に通知し、
                         // 再描画ページ（検証エラー再表示等）のクライアント初期化を動かす。
