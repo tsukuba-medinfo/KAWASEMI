@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from kawasemi.core.config import settings
+from kawasemi.core.url_redaction import MAX_TEXT_LEN, TRUNCATED, strip_userinfo
 
 # PHI/秘匿値のマスク対象キー（小文字・完全一致で構造化フィールドを、
 # "key=value"/"key: value"/'"key":"value"' 形式でテキストをマスクする）。
@@ -41,11 +42,6 @@ _KV_PATTERN = re.compile(
     r"(\"[^\"]*\"|'[^']*'|[^\s,;&)}\]]+)"
 )
 
-
-# 伏せ処理に掛ける文字数の上限。これを超える分は捨てる（巨大な文字列で処理時間が伸びるのを
-# 防ぐ。捨てるので、上限の先にある値が漏れることもない）。
-_MAX_REDACT_LEN = 64 * 1024
-_TRUNCATED = "…[truncated]"
 
 # SQLAlchemy の DBAPIError 文字列にある "[parameters: (...)]" に続く束縛値。
 # 位置指定のタプルにはキーが無く、キー名の照合では伏せられないので、セグメントごと取り除く。
@@ -82,124 +78,25 @@ def _strip_sqlalchemy_parameters(text: str) -> str:
     return "".join(out)
 
 
-# URL の資格情報。`scheme://user:pw@host` の userinfo と、クエリ文字列の秘匿値。運用者が URL に
-# 埋め込んだ資格情報を、どの呼び出し箇所のログ・例外の文面からも伏せる（個別の呼び出し側が
-# 表示用 URL を作る一次対策の、二重防御）。
-_URL_RE = re.compile(r"(?i)\b[a-z][a-z0-9+.\-]*://[^\s\'\"<>]+")
-# 標準の userinfo（`/` `?` `#` を含まない）。パスワードに `/` を含む不正な形は、ポート番号に
-# 見える `数字/` で始まるもの（`host:8080/x?e=a@b`）を除いて、できる範囲で扱う。
-_USERINFO = re.compile(
-    r"^([a-z][a-z0-9+.\-]*://)(?:[^/?#\s]*@|[^\s/@?#]+:(?!\d+[/?#])[^\s@]*?/[^\s@]*@)", re.I
-)
-_SENSITIVE_QUERY_NAMES = (
-    "access_token",
-    "refresh_token",
-    "id_token",
-    "token",
-    "api_key",
-    "apikey",
-    "api-key",
-    "key",
-    "secret",
-    "client_secret",
-    "password",
-    "passwd",
-    "pwd",
-    "sig",
-    "signature",
-    "auth",
-    "authorization",
-    "auth_code",
-    "authorization_code",
-    "oauth_code",
-    "sas",
-)
-_QUERY_SECRET = re.compile(
-    r"(?i)([?&;](?:" + "|".join(re.escape(n) for n in _SENSITIVE_QUERY_NAMES) + r")=)[^&#\s]*"
-)
-# `user:pw@host/...` / `//user:pw@host/...`（スキームなし）。文字列全体が URL のときだけ使う。
-_SCHEMELESS_USERINFO = re.compile(r"^(?://)?[^/?#\s@]+:[^/?#\s]*@")
+def redact_log_text(text: str) -> str:
+    """ログの文面から、秘匿値・PHI・資格情報を**ベストエフォートで**取り除く（線形時間）。
 
-
-def _redact_one_url(url: str) -> str:
-    url = _USERINFO.sub(lambda m: m.group(1) + "", url)
-    return _QUERY_SECRET.sub(lambda m: m.group(1) + _REDACTED, url)
-
-
-def redact_urls(text: str, *, whole_url: bool = False) -> str:
-    """文字列中の URL から資格情報（userinfo・クエリの秘匿値）を取り除く。
-
-    whole_url=True のときは、文字列全体を 1 つの URL として扱う（スキームなしの
-    `user:pw@host/x` や、相対 URL のクエリの秘匿値も取り除く）。
+    取り除くもの: SQLAlchemy の `[parameters: ...]`、URL の userinfo、機微なキーの値
+    （`token=...` など）。**ドライバが文面に載せる行の値（`DETAIL: Key (col)=(value)`）は
+    取り除かない**: その形は多様で、パターンの列挙は必ず取りこぼすため、evidence・DB・API の
+    応答へは構造化した要約（`summarize_exception`）だけを出し、生の文面はログにだけ残す。
+    ログは機微な情報として扱う（アクセス制御・保存期間。docs/DEPLOYMENT.md）。
+    掛ける長さは `MAX_TEXT_LEN` までで、超えた分は捨てる。
     """
-    text = _URL_RE.sub(lambda m: _redact_one_url(m.group(0)), text)
-    if whole_url:
-        text = _SCHEMELESS_USERINFO.sub("", text)
-        text = _QUERY_SECRET.sub(lambda m: m.group(1) + _REDACTED, text)
-    return text
-
-
-# PostgreSQL・asyncpg・SQLite などのドライバが、エラー文に行や束縛の値を載せる形。
-# hide_parameters では隠れない（[parameters: ...] の外にある）ので、値だけを伏せ、
-# エラーの種類・列名・SQLSTATE は残す（原因の切り分けに要る）。ベストエフォートで、
-# 珍しい形のドライバ文面まで保証するものではない（DB ロールの権限が境界）。
-_DRIVER_ECHOES: tuple[tuple[re.Pattern[str], str], ...] = (
-    # Key (email)=(a@b) already exists. / キー (email)=(a@b) はすでに存在します。
-    (
-        re.compile(r"((?:Key|キー)\s*\([^()]*\)\s*=\s*)\(.*?\)(?=\s|[.。]|$)", re.IGNORECASE),
-        r"\1(" + _REDACTED + ")",
-    ),
-    # Failing row contains (1, x, ...). / 失敗した行は(1, x, ...)を含みます。
-    (
-        re.compile(r"(Failing row contains\s*)\(.*\)", re.IGNORECASE),
-        r"\1(" + _REDACTED + ")",
-    ),
-    (re.compile(r"(失敗した行は\s*)\(.*\)"), r"\1(" + _REDACTED + ")"),
-    # asyncpg: invalid input for query argument $1: 'value' (...)
-    (
-        re.compile(
-            r"(invalid input for query argument\s*\$\d+:\s*)('(?:[^'\\]|\\.)*'|\"[^\"]*\"|\S+)",
-            re.IGNORECASE,
-        ),
-        r"\1'" + _REDACTED + "'",
-    ),
-    # invalid input syntax for type integer: "value" / "integer"型の入力構文が不正です: "value"
-    (
-        re.compile(r"(invalid input syntax for[^:\n]*:\s*)\"[^\"\n]*\"", re.IGNORECASE),
-        r'\1"' + _REDACTED + '"',
-    ),
-    (re.compile(r"(入力構文が不正です:\s*)\"[^\"\n]*\""), r'\1"' + _REDACTED + '"'),
-    # Python/SQLite の型変換エラー。
-    (
-        re.compile(
-            r"(could not convert string to \w+:\s*|invalid literal for \w+\(\) with base \d+:\s*)"
-            r"'[^'\n]*'",
-            re.IGNORECASE,
-        ),
-        r"\1'" + _REDACTED + "'",
-    ),
-)
-
-
-def redact_exception_text(text: str) -> str:
-    """例外・ログの文面から、秘匿値・PHI・資格情報をできる範囲で取り除く。
-
-    取り除くもの: SQLAlchemy の `[parameters: ...]`、ドライバが載せる行・束縛の値
-    （`DETAIL: Key (col)=(value)` など）、URL の userinfo とクエリの秘匿値、機微なキーの値。
-    ベストエフォートであり、珍しいドライバ文面まで保証しない。境界は DB ロールの権限である。
-    evidence・DB・API の応答に載せる例外文字列と、ログの両方で使う。
-    """
-    if len(text) > _MAX_REDACT_LEN:
-        text = text[:_MAX_REDACT_LEN] + _TRUNCATED
-    text = redact_urls(text)
+    if len(text) > MAX_TEXT_LEN:
+        text = text[:MAX_TEXT_LEN] + TRUNCATED
+    text = strip_userinfo(text)
     text = _strip_sqlalchemy_parameters(text)
-    for pattern, repl in _DRIVER_ECHOES:
-        text = pattern.sub(repl, text)
     return _KV_PATTERN.sub(lambda m: m.group(1) + _REDACTED, text)
 
 
 def _redact_text(text: str) -> str:
-    return redact_exception_text(text)
+    return redact_log_text(text)
 
 
 def _redact_value(value: object) -> object:
@@ -296,6 +193,14 @@ class TextFormatter(logging.Formatter):
         super().__init__(fmt=fmt, datefmt="%Y-%m-%d %H:%M:%S")
 
 
+def attach_redaction_to_uvicorn() -> None:
+    """uvicorn のハンドラ（`uvicorn`・`uvicorn.error`・`uvicorn.access`）に伏せ字フィルタを付ける。"""
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        for handler in logging.getLogger(name).handlers:
+            if not any(isinstance(f, PHIRedactionFilter) for f in handler.filters):
+                handler.addFilter(PHIRedactionFilter())
+
+
 def setup_logging() -> None:
     """ロギングのセットアップ"""
     # ルートロガーの取得
@@ -318,10 +223,13 @@ def setup_logging() -> None:
 
     console_handler.setFormatter(formatter)
     # PHI/秘匿値のマスク。root へ伝播し独自ハンドラを持たないロガー
-    # （アプリ全般・sqlalchemy.engine 等）の全レコードに適用される。独自ハンドラ＋
-    # propagate=False の uvicorn 系はこの経路を通らない点に留意（アクセスログは別管理）。
+    # （アプリ全般・sqlalchemy.engine 等）の全レコードに適用される。
     console_handler.addFilter(PHIRedactionFilter())
     logger.addHandler(console_handler)
+    # uvicorn は独自のハンドラ＋propagate=False なので、上の経路を通らない（未処理の例外の
+    # トレースバックが `uvicorn.error` に出る）。uvicorn は、アプリを読み込む前にロギングを
+    # 設定するので、ここで、そのハンドラにも同じフィルタを付ける。
+    attach_redaction_to_uvicorn()
 
     # Uvicorn や SQLAlchemy のログレベル調整
     logging.getLogger("uvicorn").setLevel(logging.INFO)

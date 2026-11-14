@@ -93,11 +93,14 @@ async def _fail(client: FHIRClient) -> FHIRServerException:
 
 
 def test_redact_url_helper() -> None:
+    """表示用の URL は scheme・host・port・path だけ（userinfo・クエリ・フラグメントは落とす）。"""
     assert redact_url("https://a:b@h/x") == "https://h/x"
     assert redact_url("https://a:p@ss@h/x") == "https://h/x"  # パスワード中の @
-    assert redact_url("see https://u:p@h/x and http://h2/y") == "see https://h/x and http://h2/y"
     assert redact_url("https://h/x") == "https://h/x"
-    assert redact_url("no url here") == "no url here"
+    assert redact_url("https://h:8443/x?token=1#frag") == "https://h:8443/x"
+    assert redact_url("https://[::1]:8080/fhir/Patient") == "https://[::1]:8080/fhir/Patient"
+    assert redact_url("no url here") == "<unparseable url>"
+    assert redact_url("") == "<unparseable url>"
 
 
 @pytest.mark.asyncio
@@ -162,15 +165,50 @@ def test_log_filter_masks_userinfo_in_any_log_message() -> None:
     assert "fhir.example/fhir/Patient/P1" in record.getMessage()
 
 
-def test_redact_url_masks_query_secrets_and_scheme_less_userinfo() -> None:
-    assert redact_url("https://h.example/fhir/Patient/1?access_token=TKN") == (
-        "https://h.example/fhir/Patient/1?access_token=***REDACTED***"
+@pytest.mark.parametrize(
+    "query",
+    [
+        "access_token=SECRET1",
+        "X-Amz-Signature=SECRET1",
+        "X-Amz-Security-Token=SECRET1",
+        "jwt=SECRET1",
+        "accessToken=SECRET1",
+        "ACCESS-TOKEN=SECRET1",
+        "api%5Fkey=SECRET1",
+        "token[]=SECRET1",
+        "sig=SECRET1&se=2030",
+        "x=1&session=SECRET1",
+        "private_token=SECRET1",
+        "code=SECRET1",
+    ],
+)
+def test_redact_url_drops_the_whole_query_without_listing_secret_names(query: str) -> None:
+    """秘匿値の名前を列挙しない: クエリは名前に関わらず丸ごと落とす。"""
+    assert redact_url(f"https://h.example/fhir/Patient/1?{query}") == (
+        "https://h.example/fhir/Patient/1"
     )
-    assert redact_url("Patient/1?api_key=K&_count=2") == "Patient/1?api_key=***REDACTED***&_count=2"
+    assert "SECRET1" not in redact_url(f"https://h.example/fhir/Patient/1#{query}")
+    assert "SECRET1" not in redact_url(f"https://h.example/p?{query}#{query}")
+
+
+def test_redact_url_scheme_less_nested_and_odd_forms() -> None:
     assert redact_url("user:pw@h.example/fhir") == "h.example/fhir"
-    assert redact_url("//user:pw@h.example/fhir") == "h.example/fhir"
-    url = "https://example.com:8080?email=a@b.com"
-    assert redact_url(url) == url  # userinfo の無い URL は崩さない
+    assert redact_url("//user:pw@h.example/fhir") == "//h.example/fhir"
+    # 入れ子の URL（クエリの中）は、クエリごと落ちる
+    assert redact_url("https://h/x?u=http://a:b@h2/") == "https://h/x"
+    # パスワードに `/` を含む不正な形も、最後の `@` までを userinfo として落とす（安全側）
+    assert "p/ss" not in redact_url("https://user:p/ss@host/x")
+    # 権限部が `?` で終わる形（`@` はクエリにある）。userinfo ではないので host は残る
+    assert redact_url("https://example.com:8080?email=a@b.com") == "https://example.com:8080"
+
+
+def test_redact_url_is_linear_on_huge_input() -> None:
+    import time
+
+    start = time.perf_counter()
+    redact_url("http://" + "a:" * 1_500_000)
+    redact_url("https://" + "a@" * 1_500_000)
+    assert time.perf_counter() - start < 1.0
 
 
 @pytest.mark.asyncio
@@ -183,3 +221,4 @@ async def test_query_token_in_the_base_url_does_not_reach_the_api_details(
     exc = await _fail(client)
     assert "QTOKEN" not in repr(exc.details) + exc.message + logs.text
     assert "fhir.example" in str(exc.details["url"])
+    assert "?" not in str(exc.details["url"])

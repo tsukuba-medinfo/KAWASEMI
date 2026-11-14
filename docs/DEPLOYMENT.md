@@ -419,21 +419,36 @@ docker-compose exec postgres pg_dump -U kawasemi kawasemi > backup-$(date +%Y%m%
 
 ### ログの管理
 
-アプリのログは、出力前に、秘匿値・PHI・資格情報をベストエフォートで伏せます
-（`kawasemi/core/logging_config.py` の `PHIRedactionFilter`・`redact_exception_text`）。
+**ログは機微な情報として扱ってください**（閲覧権限の制限・保存期間・持ち出しの管理）。アプリは
+ログから秘匿値をベストエフォートで伏せますが、保証ではありません。
 
-- 伏せるもの: SQLAlchemy の `[parameters: ...]` の束縛値、ドライバが例外の文面に載せる行・束縛の値
-  （`DETAIL: Key (col)=(value)`、`invalid input for query argument $1: 'value'`、型変換エラーの
-  `"value"`、`Failing row contains (...)` など。エラーの種類・列名・制約名は残します）、URL の
-  userinfo（`user:pw@`）とクエリの秘匿値（`access_token=` `api_key=` など）、`password`・`token`・
-  `jti` などのキーの値。同じ処理を、evidence・trace・DB・API の応答に載せる例外の文面にも使います。
+保証すること（**永続・返却される先には、ドライバの文面を出さない**）:
+
+- evidence・trace・DB（`InputExecution.error_summary`、バッチの `error_summary`、来歴の error）・API の
+  応答・SSE の `error` 行へ出す例外の文面は、**構造化した要約**だけです（`summarize_exception`、
+  `kawasemi/core/exception_summary.py`）。内容は、例外の型名、SQLSTATE（`23505` など）、ドライバが
+  構造化して持つ名前（制約名・列名・表名）、HTTP の例外の接続先（userinfo・クエリを除いた URL）と
+  ステータスです。**ドライバの文面（`DETAIL: Key (col)=(value)`、型変換エラーの値、`Token "x" is
+  invalid` など）は含めません。** 文面を正規表現で伏せる方式は、メッセージの形（数百種あります）の
+  取りこぼしが避けられないので採りません。こちらで文面を書いた例外（`ParamError` など）だけ、その文面を
+  出します。
+- 表示用の URL（FHIR の接続先など。ログと API の応答）は、scheme・host・port・path だけです。
+  userinfo・クエリ・フラグメントは、秘匿値の名前を問わず、落とします。
+
+ベストエフォートであること（**サーバのログの生の文面**）:
+
+- 完全な例外（トレースバック）は、原因の切り分けのため、サーバのログ（`logger.exception` の形）に残ります。
+  出力前に `PHIRedactionFilter`（`kawasemi/core/logging_config.py`）が、SQLAlchemy の
+  `[parameters: ...]` の束縛値、URL の userinfo、`password`・`token`・`jti` などのキーの値を伏せます。
+  線形時間の実装で、掛ける長さは 64 KiB までです（超えた分は捨てます）。
 - DB エンジンは `hide_parameters=True` で作ります（例外の文字列に束縛値を入れない）。
-- **これは多層防御の一つで、保証ではありません。** 珍しいドライバの文面に、行の値が残ることが
-  あります。`[SQL: ...]` の文は伏せません（文に直接書かれたリテラルは残ります）。ログ・evidence に
-  実患者の値を出さないための境界は、計画の SQL を流す DB ロールの権限と、ログの閲覧権限です。
-- フィルタは、アプリのコンソールハンドラに付きます。`uvicorn` 系は別のハンドラを持ち、この経路を
-  通りません（アクセスログは別に管理してください）。
-
+- **ドライバが例外の文面に載せる行の値（`DETAIL: Key (col)=(value)` など）は、ログのフィルタでは伏せ
+  ません。** `uvicorn` が出す未処理の例外のトレースバックにも、同じ文面が載りえます。`[SQL: ...]` の文も
+  伏せません（文に直接書かれたリテラルは残ります）。ログに実患者の値を出さないための境界は、計画の
+  SQL を流す DB ロールの権限と、**ログの閲覧権限・保存期間**です。
+- フィルタは、アプリのコンソールハンドラと、`uvicorn`・`uvicorn.error`・`uvicorn.access` のハンドラに付きます
+  （uvicorn は独自のハンドラを持つので、アプリの起動時に付けます。`--log-config` で uvicorn のロギングを
+  独自に設定する場合は、そのハンドラにも `PHIRedactionFilter` を付けてください）。
 
 ```bash
 # ログの確認

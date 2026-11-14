@@ -105,6 +105,7 @@ from kawasemi.core.deps import (
     RequireMetricsViewer,
     require_roles,
 )
+from kawasemi.core.exception_summary import summarize_exception
 from kawasemi.core.exceptions import AIServiceException, ResourceNotFoundException
 from kawasemi.core.lease import extend_leases_for_patient
 from kawasemi.core.logging_config import get_logger
@@ -4352,10 +4353,10 @@ async def execute_autofill(
             questionnaire_content=questionnaire.content,
         )
     except Exception as e:
-        logger.error(f"AI自動入力実行エラー: questionnaire_id={questionnaire_id}: {e}")
+        logger.error(f"AI自動入力実行エラー: questionnaire_id={questionnaire_id}", exc_info=e)
         prefill_data, evidence = {}, {}
         status = ExecutionStatus.FAILED
-        error_summary = str(e)
+        error_summary = summarize_exception(e)
 
     if prefill_data and len(prefill_data) < len(plans):
         status = ExecutionStatus.PARTIAL
@@ -4516,10 +4517,12 @@ async def execute_autofill_stream(
                     evidence[link_id] = item_ev
                 yield _line(ev)
         except Exception as e:  # noqa: BLE001
-            logger.error(f"AI自動入力(stream)実行エラー: questionnaire_id={questionnaire_id}: {e}")
+            logger.error(
+                f"AI自動入力(stream)実行エラー: questionnaire_id={questionnaire_id}", exc_info=e
+            )
             status = ExecutionStatus.FAILED
-            error_summary = str(e)
-            yield _line({"type": "error", "message": str(e)})
+            error_summary = summarize_exception(e)
+            yield _line({"type": "error", "message": error_summary})
 
         if status != ExecutionStatus.FAILED and prefill_data and len(prefill_data) < len(plans):
             status = ExecutionStatus.PARTIAL

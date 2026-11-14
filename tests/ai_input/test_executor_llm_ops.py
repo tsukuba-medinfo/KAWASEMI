@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from kawasemi.ai_input import executor as executor_mod
 from kawasemi.ai_input.compiler import COMPILE_SYSTEM_PROMPT
+from kawasemi.ai_input.dsl import ParamError
 from kawasemi.ai_input.executor import (
     _EXTRACT_INSTRUCTION,
     _JUDGE_INSTRUCTION,
@@ -569,8 +570,10 @@ def test_exc_msg_falls_back_to_type_name_for_empty_message() -> None:
     """str(e) が空になる例外（httpx.ReadTimeout 等）でも型名が残る。"""
     assert str(TimeoutError()) == ""  # 前提: メッセージ無し例外は str が空
     assert _exc_msg(TimeoutError()) == "TimeoutError"
-    # 非空メッセージは型名を前置して保持する
-    assert _exc_msg(ValueError("boom")) == "ValueError: boom"
+    # 標準・第三者の例外は、文面を出さず型名だけにする（文面に値が載りうるため）
+    assert _exc_msg(ValueError("boom")) == "ValueError"
+    # こちらで文面を書いた例外（ParamError など）は、その文面を型名つきで出す
+    assert _exc_msg(ParamError("パラメータ x が未指定")) == "ParamError: パラメータ x が未指定"
 
 
 @pytest.mark.asyncio

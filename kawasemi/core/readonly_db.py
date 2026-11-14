@@ -97,9 +97,13 @@ UNCONFIGURED_PRODUCTION_WARNING = (
 class ReadOnlySessionUnavailableError(RuntimeError):
     """プログラム SQL を読み取り専用ロールで実行する手段が用意できない（production）。"""
 
+    kawasemi_authored = True
+
 
 class ProgramSqlDeniedError(RuntimeError):
     """プログラム SQL が、読むことを許されていない表に触れた（ポリシー拒否）。"""
+
+    kawasemi_authored = True
 
 
 _CATALOG_SCHEMAS = {"pg_catalog", "information_schema"}

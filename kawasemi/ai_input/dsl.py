@@ -524,6 +524,9 @@ _PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 class ParamError(ValueError):
     """パラメータの解決・サニタイズに失敗した（呼び出し側は当該 step を失敗させる）"""
 
+    # 文面はこちらで書いたもの（`summarize_exception` がそのまま出す）
+    kawasemi_authored = True
+
 
 def _assert_no_traversal(rendered: str, what: str) -> None:
     """組み立て後の文字列に上位参照・区切りの異常が現れていないか再検査する。

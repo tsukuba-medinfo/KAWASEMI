@@ -195,6 +195,8 @@ def fhir_query_scopes_patient(query: str) -> bool:
 class FhirUrlError(ValueError):
     """FHIR のクエリから、設定したサーバー以外を指す URL ができてしまう。"""
 
+    kawasemi_authored = True
+
 
 def fhir_request_url(base_url: str, query_path: str) -> str:
     """設定の FHIR サーバーの URL と、描画済みのクエリから、要求する URL を作る（F21）。

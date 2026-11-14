@@ -283,7 +283,9 @@ async def test_run_batch_job_fatal_error_marks_failed(
     job = await _get_job(job_id)
     assert job.status == BatchJobStatus.FAILED
     assert job.processed == 0  # 1件目の InputExecution 生成で破棄され processed まで到達しない
-    assert job.error_summary and "fatal boom" in job.error_summary
+    # 保存するのは構造化した要約（型名）。例外の文面は DB に入れない
+    assert job.error_summary == "RuntimeError"
+    assert "fatal boom" not in job.error_summary
     assert sink and sink[0].closed is True  # finally で interpreter.aclose() される
 
 

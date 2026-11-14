@@ -21,6 +21,7 @@ from pydantic import BaseModel, ValidationError
 from kawasemi.ai_input.llm_provider import DEFAULT_PROVIDER, endpoint_of, provider_of
 from kawasemi.ai_input.model_options import load_model_options
 from kawasemi.core.config import settings
+from kawasemi.core.exception_summary import summarize_exception
 from kawasemi.core.exceptions import AIServiceException
 from kawasemi.core.logging_config import get_logger
 
@@ -476,8 +477,8 @@ async def chat_json(
         raise
     except Exception as e:
         # httpx.ReadTimeout 等は str(e) が空になり原因が無言化するため型名で補う
-        detail = str(e) or type(e).__name__
-        logger.error(f"Ollama API呼び出しエラー（{label}）: {detail}")
+        detail = summarize_exception(e)
+        logger.error(f"Ollama API呼び出しエラー（{label}）: {detail}", exc_info=e)
         _record(None, detail)
         raise AIServiceException(
             message=f"{label}に失敗しました: {detail}",

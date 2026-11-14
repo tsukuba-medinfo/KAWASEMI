@@ -16,6 +16,7 @@ from kawasemi.core.authz import user_can_access_patient
 from kawasemi.core.config import settings
 from kawasemi.core.database import get_db
 from kawasemi.core.deps import RequireCollector, get_current_user_optional, require_roles
+from kawasemi.core.exception_summary import summarize_exception
 from kawasemi.core.exceptions import (
     FHIRServerException,
     QuestionnaireNotFoundException,
@@ -29,7 +30,7 @@ from kawasemi.core.lease import (
     require_leased_target,
     valid_lease_clause,
 )
-from kawasemi.core.logging_config import get_logger, redact_exception_text
+from kawasemi.core.logging_config import get_logger
 from kawasemi.models.input_target import InputTarget
 from kawasemi.models.questionnaire import Questionnaire
 from kawasemi.models.questionnaire_response import (
@@ -294,13 +295,13 @@ async def create_questionnaire(
         )
 
     except Exception as e:
-        logger.error(f"Questionnaire登録エラー: {e}")
+        logger.error("Questionnaire登録エラー", exc_info=e)
         return templates.TemplateResponse(
             "questionnaire_edit.html",
             {
                 "request": request,
                 "questionnaire": None,
-                "error": redact_exception_text(f"登録に失敗しました: {e}"),
+                "error": f"登録に失敗しました: {summarize_exception(e)}",
             },
         )
 
@@ -416,13 +417,13 @@ async def update_questionnaire(
         )
 
     except Exception as e:
-        logger.error(f"Questionnaire更新エラー: {e}")
+        logger.error("Questionnaire更新エラー", exc_info=e)
         return templates.TemplateResponse(
             "questionnaire_edit.html",
             {
                 "request": request,
                 "questionnaire": questionnaire,
-                "error": redact_exception_text(f"更新に失敗しました: {e}"),
+                "error": f"更新に失敗しました: {summarize_exception(e)}",
             },
         )
 
@@ -558,7 +559,7 @@ async def create_valueset(
         # url 重複（unique 制約）や FHIR 検証失敗など。詳細はログに残し、
         # 画面には内部情報を出さない汎用文言を返す。
         await db.rollback()
-        logger.error(f"ValueSet登録エラー: {e}")
+        logger.error("ValueSet登録エラー", exc_info=e)
         return templates.TemplateResponse(
             "valueset_edit.html",
             {
@@ -695,7 +696,7 @@ async def update_valueset(
         # refresh で属性を再取得してから再描画する。入力は resource_json で保持。
         await db.rollback()
         await db.refresh(valueset)
-        logger.error(f"ValueSet更新エラー: {e}")
+        logger.error("ValueSet更新エラー", exc_info=e)
         return templates.TemplateResponse(
             "valueset_edit.html",
             {
@@ -1129,7 +1130,7 @@ async def update_response(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"QuestionnaireResponse更新エラー: {e}")
+        logger.error("QuestionnaireResponse更新エラー", exc_info=e)
 
         # フィールドを再生成
         fields = []
@@ -1148,7 +1149,7 @@ async def update_response(
                 "response": response_obj,
                 "questionnaire": questionnaire,
                 "fields": fields,
-                "error": redact_exception_text(f"更新に失敗しました: {e}"),
+                "error": f"更新に失敗しました: {summarize_exception(e)}",
             },
         )
 

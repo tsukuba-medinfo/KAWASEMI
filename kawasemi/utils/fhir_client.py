@@ -7,20 +7,22 @@ from typing import Any, cast
 import httpx
 
 from kawasemi.core.config import settings
+from kawasemi.core.exception_summary import summarize_exception
 from kawasemi.core.exceptions import FHIRServerException
-from kawasemi.core.logging_config import get_logger, redact_urls
+from kawasemi.core.logging_config import get_logger
+from kawasemi.core.url_redaction import display_url
 
 logger = get_logger(__name__)
 
 
-def redact_url(text: str) -> str:
-    """URL（またはそれを含む文字列）から資格情報を取り除く。
+def redact_url(url: str) -> str:
+    """表示用の URL（scheme・host・port・path だけ）。userinfo・クエリ・フラグメントを落とす。
 
-    取り除くもの: `scheme://user:pw@host` の userinfo（スキームなしの `user:pw@host`、
-    `//user:pw@host` も）と、クエリ文字列の秘匿値（`access_token=` `api_key=` など）。
-    ログと、API の応答に返す例外の details に使う。
+    ログと、API の応答に返す例外の details に使う。**秘匿値の名前を列挙しない**（`X-Amz-Signature`、
+    `jwt`、`accessToken` …は必ず取りこぼす）ので、クエリを丸ごと落とす。解釈できないものは
+    `<unparseable url>`。
     """
-    return redact_urls(text, whole_url=True)
+    return display_url(url)
 
 
 class FHIRClient:
@@ -207,7 +209,7 @@ class FHIRClient:
                     logger.error(f"FHIRサーバ応答のJSONパースに失敗しました: {shown}")
                     raise FHIRServerException(
                         message="FHIRサーバ応答のJSONパースに失敗しました",
-                        details={"url": shown, "error": redact_url(str(e))},
+                        details={"url": shown, "error": summarize_exception(e)},
                     )
                 return cast(dict[str, Any], data)
 
@@ -215,7 +217,7 @@ class FHIRClient:
             logger.error(f"FHIRサーバへの接続がタイムアウトしました: {shown}")
             raise FHIRServerException(
                 message="FHIRサーバへの接続がタイムアウトしました",
-                details={"url": shown, "error": redact_url(str(e))},
+                details={"url": shown, "error": summarize_exception(e)},
             )
         except httpx.HTTPStatusError as e:
             logger.error(f"FHIRサーバエラー: {e.response.status_code} - {shown}")
@@ -224,10 +226,10 @@ class FHIRClient:
                 details={"url": shown, "status_code": e.response.status_code},
             )
         except httpx.RequestError as e:
-            logger.error(f"FHIRサーバへの接続に失敗しました: {shown} - {redact_url(str(e))}")
+            logger.error(f"FHIRサーバへの接続に失敗しました: {shown} - {summarize_exception(e)}")
             raise FHIRServerException(
                 message="FHIRサーバへの接続に失敗しました",
-                details={"url": shown, "error": redact_url(str(e))},
+                details={"url": shown, "error": summarize_exception(e)},
             )
 
 

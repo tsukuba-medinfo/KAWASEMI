@@ -24,6 +24,7 @@ from sqlalchemy.orm import selectinload
 from kawasemi.ai_input.executor import DSLInterpreter, program_snapshot
 from kawasemi.ai_input.models import ExecutionStatus, InputExecution, InputPlan, PlanStatus
 from kawasemi.core.database import AsyncSessionLocal
+from kawasemi.core.exception_summary import summarize_exception
 from kawasemi.core.lease import free_clause, utcnow
 from kawasemi.core.logging_config import get_logger
 from kawasemi.models.batch_job import BatchJob, BatchJobStatus
@@ -124,11 +125,12 @@ async def run_batch_job(job_id: int) -> None:
                     )
                 except Exception as e:  # noqa: BLE001
                     logger.warning(
-                        f"バッチ1件の実行失敗: job={job_id} patient={target.patient_id}: {e}"
+                        f"バッチ1件の実行失敗: job={job_id} patient={target.patient_id}",
+                        exc_info=e,
                     )
                     prefill_data, evidence = {}, {}
                     status = ExecutionStatus.FAILED
-                    error_summary = str(e)
+                    error_summary = summarize_exception(e)
 
                 # autofill（execute_autofill）と同じ判定にする: 例外のときだけ FAILED とし、
                 # 値が 0 件でも（決定的に「該当なし」のことがある）失敗とはしない。空ドラフトを
@@ -200,9 +202,9 @@ async def run_batch_job(job_id: int) -> None:
                 job.status = BatchJobStatus.COMPLETED
 
         except Exception as e:  # noqa: BLE001
-            logger.error(f"バッチジョブが致命的エラーで停止: id={job_id}: {e}")
+            logger.error(f"バッチジョブが致命的エラーで停止: id={job_id}", exc_info=e)
             job.status = BatchJobStatus.FAILED
-            job.error_summary = str(e)
+            job.error_summary = summarize_exception(e)
         finally:
             await interpreter.aclose()
 

@@ -117,3 +117,34 @@ def test_engines_hide_parameters() -> None:
     from kawasemi.core.database import engine
 
     assert engine.sync_engine.hide_parameters is True
+
+
+def test_setup_logging_attaches_the_filter_to_uvicorn_handlers() -> None:
+    """uvicorn は独自のハンドラ＋propagate=False で、ルートの伏せ字を通らない。そのハンドラにも付ける。
+
+    未処理の例外のトレースバック（束縛値を含みうる）は `uvicorn.error` に出る。
+    """
+    import io
+
+    from kawasemi.core.logging_config import attach_redaction_to_uvicorn
+
+    sink = io.StringIO()
+    handler = logging.StreamHandler(sink)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    uv = logging.getLogger("uvicorn")
+    old_handlers, old_propagate = list(uv.handlers), uv.propagate
+    uv.handlers[:] = [handler]
+    uv.propagate = False
+    try:
+        attach_redaction_to_uvicorn()
+        attach_redaction_to_uvicorn()  # 2 回呼んでも二重に付かない
+        assert sum(isinstance(f, PHIRedactionFilter) for f in handler.filters) == 1
+        try:
+            raise RuntimeError("boom\n[parameters: ('phi@example.org',)]")
+        except RuntimeError:
+            logging.getLogger("uvicorn.error").error("Exception in ASGI application", exc_info=True)
+    finally:
+        uv.handlers[:] = old_handlers
+        uv.propagate = old_propagate
+    assert "phi@example.org" not in sink.getvalue()
+    assert "Exception in ASGI application" in sink.getvalue()
