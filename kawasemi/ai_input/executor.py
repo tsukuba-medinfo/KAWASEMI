@@ -60,6 +60,7 @@ from kawasemi.ai_input.llm_provider import model_digest_of, provider_of
 from kawasemi.ai_input.models import FailureCode, InputPlan, OpType
 from kawasemi.ai_input.resource_index.connections import get_registry
 from kawasemi.core.config import settings
+from kawasemi.core.exception_summary import safe_message, summarize_exception
 from kawasemi.core.exceptions import FHIRServerException
 from kawasemi.core.logging_config import get_logger
 from kawasemi.core.readonly_db import (
@@ -75,8 +76,8 @@ from kawasemi.utils.fhir_client import FHIRClient
 logger = get_logger(__name__)
 
 
-def _exc_msg(e: BaseException) -> str:
-    """例外を非空のメッセージへ整形する。
+def _raw_exc_msg(e: BaseException) -> str:
+    """例外を非空のメッセージへ整形する（伏せ処理なし。分類の照合専用で、外へ出さない）。
 
     httpx.ReadTimeout など一部の例外は ``str(e)`` が空文字列になり、evidence の
     error やログが無言になって原因究明が困難になる。メッセージが空な
@@ -86,6 +87,18 @@ def _exc_msg(e: BaseException) -> str:
     if msg:
         return f"{type(e).__name__}: {msg}"
     return type(e).__name__
+
+
+def _exc_msg(e: BaseException) -> str:
+    """evidence・trace・DB・API の応答へ出す例外の文面（構造化した要約。ドライバの文面は含めない）。
+
+    ドライバの例外は、行や束縛の値（`DETAIL: Key (col)=(value)`、`invalid input for query
+    argument $1: 'value'`、`Token "x" is invalid` など）を文面に載せうる。**文面を伏せる方式は、
+    形の取りこぼしが出る**ので採らず、型名・SQLSTATE・制約名や列名（ドライバが構造化して持つ名前）
+    だけを出す（`summarize_exception`）。こちらで文面を書いた例外（`ParamError` など）は、その文面を
+    出す。完全な例外はサーバのログ（`logger.exception`）に残る。
+    """
+    return summarize_exception(e)
 
 
 # 例外メッセージから FailureCode を推定するパターン。
@@ -136,7 +149,7 @@ def classify_exception(e: BaseException, default: str = FailureCode.UNCLASSIFIED
         return FailureCode.TIMEOUT
     if isinstance(e, ConnectionError):
         return FailureCode.SOURCE_UNAVAILABLE
-    msg = _exc_msg(e).lower()
+    msg = _raw_exc_msg(e).lower()
     if any(p in msg for p in _TIMEOUT_PATTERNS):
         return FailureCode.TIMEOUT
     if any(p in msg for p in _SCHEMA_PATTERNS):
@@ -646,6 +659,14 @@ def resolve_fhir_path(data: dict[str, Any], fhir_path: str) -> Any:
 class PathOutsideRootError(ValueError):
     """展開後パスが接続ルート配下に収まらない（または接続ルートが無い）。"""
 
+    kawasemi_authored = True
+
+
+class StepConfigError(ValueError):
+    """step の設定・入力ファイルの形が不正（列名が無い・PDF が上限超過など）。文面はこちらで書いたもの。"""
+
+    kawasemi_authored = True
+
 
 def _reject_path(connection_id: str | None, rel: object, reason: str) -> PathOutsideRootError:
     """パス拒否をログへ残してから例外を作る。
@@ -868,7 +889,7 @@ class DSLInterpreter:
         """DSN に対する AsyncEngine を取得（生成済みなら再利用）。"""
         engine = self._external_engines.get(dsn)
         if engine is None:
-            engine = create_async_engine(dsn, pool_pre_ping=True)
+            engine = create_async_engine(dsn, pool_pre_ping=True, hide_parameters=True)
             self._external_engines[dsn] = engine
         return engine
 
@@ -946,7 +967,9 @@ class DSLInterpreter:
                     prefill_data[plan.link_id] = item_ev["value"]
                 evidence[plan.link_id] = item_ev
             except Exception as e:  # noqa: BLE001
-                logger.warning(f"プログラム実行失敗 (linkId={plan.link_id}): {_exc_msg(e)}")
+                logger.warning(
+                    f"プログラム実行失敗 (linkId={plan.link_id}): {_exc_msg(e)}", exc_info=e
+                )
                 evidence[plan.link_id] = {
                     "trace": [],
                     "value": None,
@@ -1031,7 +1054,9 @@ class DSLInterpreter:
                     ),
                 }
             except Exception as e:  # noqa: BLE001
-                logger.warning(f"プログラム実行失敗 (linkId={plan.link_id}): {_exc_msg(e)}")
+                logger.warning(
+                    f"プログラム実行失敗 (linkId={plan.link_id}): {_exc_msg(e)}", exc_info=e
+                )
                 yield {
                     **base,
                     "value": None,
@@ -1460,7 +1485,7 @@ class DSLInterpreter:
                         step, bind_value, fhir_cache, base, context=context, binder=binder
                     )
             except Exception as e:  # noqa: BLE001
-                logger.warning(f"step実行エラー (op={op}, id={sid}): {_exc_msg(e)}")
+                logger.warning(f"step実行エラー (op={op}, id={sid}): {_exc_msg(e)}", exc_info=e)
                 return None, self._mask_key_inputs(
                     {
                         **base,
@@ -1493,7 +1518,7 @@ class DSLInterpreter:
             if op == OpType.AGGREGATE:
                 return self._op_aggregate(step, context, base)
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"step実行エラー (op={op}, id={sid}): {_exc_msg(e)}")
+            logger.warning(f"step実行エラー (op={op}, id={sid}): {_exc_msg(e)}", exc_info=e)
             return None, {
                 **base,
                 "output": None,
@@ -1577,7 +1602,7 @@ class DSLInterpreter:
             return self._sql_denied(base, rendered, binds, patient_id, e)
         except ReadOnlySessionUnavailableError as e:
             # フェイルクローズ。**読めないことを失敗として記録する**（黙って読み書きで実行しない）
-            logger.error(f"プログラム SQL を実行しませんでした: {_exc_msg(e)}")
+            logger.error(f"プログラム SQL を実行しませんでした: {_exc_msg(e)}", exc_info=e)
             return None, {
                 **base,
                 "output": None,
@@ -1795,7 +1820,7 @@ class DSLInterpreter:
             return None, {
                 **base,
                 "output": None,
-                "error": str(e),
+                "error": safe_message(e),
                 "failure_code": FailureCode.PATH_NOT_PERMITTED,
             }
 
@@ -1884,7 +1909,7 @@ class DSLInterpreter:
             # リソース枯渇防止: ページ数・合計バイト数に上限を設け、
             # 巨大PDFで OOM / 過大ペイロード → タイムアウトになるのを防ぐ。
             if page_count > settings.vision_pdf_max_pages:
-                raise ValueError(
+                raise StepConfigError(
                     f"PDFページ数が上限({settings.vision_pdf_max_pages})を超えています: {page_count}ページ"
                 )
             total_bytes = 0
@@ -1896,7 +1921,7 @@ class DSLInterpreter:
                 data = buf.getvalue()
                 total_bytes += len(data)
                 if total_bytes > settings.vision_pdf_max_bytes:
-                    raise ValueError(
+                    raise StepConfigError(
                         f"PDF画像の合計サイズが上限({settings.vision_pdf_max_bytes}バイト)を超えています"
                     )
                 images.append(data)
@@ -2012,7 +2037,7 @@ class DSLInterpreter:
                 **base,
                 "inputs": {"connection_id": connection_id},
                 "output": None,
-                "error": str(e),
+                "error": safe_message(e),
                 "failure_code": FailureCode.PATH_NOT_PERMITTED,
             }
 
@@ -2044,7 +2069,7 @@ class DSLInterpreter:
                 **base,
                 "inputs": inputs,
                 "output": None,
-                "error": f"CSVデコード失敗（UTF-8として読めません）: {e}",
+                "error": f"CSVデコード失敗（UTF-8として読めません。位置 {e.start}）",
                 "failure_code": FailureCode.SCHEMA_MISMATCH,
             }
 
@@ -2062,16 +2087,16 @@ class DSLInterpreter:
 
         def col_index(col: Any) -> int:
             if isinstance(col, bool) or not isinstance(col, (str, int)):
-                raise ValueError(f"列指定が不正です（列名str/列indexint）: {col!r}")
+                raise StepConfigError(f"列指定が不正です（列名str/列indexint）: {col!r}")
             if isinstance(col, int):
                 return col
             if col in dup_names:
-                raise ValueError(
+                raise StepConfigError(
                     f"列名がヘッダ内で重複しています（列indexで指定してください）: {col!r}"
                 )
             if col in name_to_idx:
                 return name_to_idx[col]
-            raise ValueError(f"列名が見つかりません: {col!r}（header={header}）")
+            raise StepConfigError(f"列名が見つかりません: {col!r}（header={header}）")
 
         # 解決後の match 条件（どの条件で絞ったかは監査に必須）。
         # プログラム本文（inputs["match"]）は "{{form_code}}" のようなテンプレートなので、
@@ -2084,7 +2109,7 @@ class DSLInterpreter:
             ]
             for cond in step.get("match") or []:
                 if not isinstance(cond, dict):
-                    raise ValueError(f"match 要素は辞書にしてください: {cond!r}")
+                    raise StepConfigError(f"match 要素は辞書にしてください: {cond!r}")
                 # {{param}} 展開は**プログラム本文のテンプレートにだけ**効かせる。
                 # 以前は展開が無く、{{param}} はリテラル "{{param}}" の
                 # まま CSV セルと比較され、一致せず静かに NOT_FOUND_FOR_PATIENT に

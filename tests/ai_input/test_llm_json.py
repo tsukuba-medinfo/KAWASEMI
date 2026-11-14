@@ -239,7 +239,8 @@ async def test_recorder_captures_api_error():
 
     assert len(got) == 1
     assert got[0].raw_output is None
-    assert "connection refused" in got[0].error
+    # 来歴へ残すのは構造化した要約（型名）。例外の文面は載せない（サーバのログには全文が残る）
+    assert got[0].error == "RuntimeError"
     assert got[0].system_prompt == "s"
     assert got[0].user_message == "u"
 

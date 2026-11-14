@@ -133,7 +133,9 @@ async def test_giving_up_returns_a_failed_trace_with_the_real_error(
     assert output is None
     assert flaky.connects == db_retry.RETRY_MAX_ATTEMPTS
     assert trace["attempts"] == db_retry.RETRY_MAX_ATTEMPTS
-    assert "Login timeout expired" in trace["error"]
+    # ドライバの文面（"Login timeout expired" など）は出さず、型名だけ。分類は元の文面で行う
+    assert trace["error"] == "OperationalError"
+    assert "Login timeout expired" not in trace["error"]
     assert trace["failure_code"] == FailureCode.TIMEOUT
     assert trace["output"] is None
 
@@ -190,7 +192,8 @@ async def test_the_raw_patient_key_is_masked_in_the_error_of_a_failed_fetch(
     finally:
         await interp.aclose()
     assert output is None
-    assert "boom for" in trace["error"]
+    assert trace["error"] == "OperationalError"
+    assert "boom for" not in trace["error"]
     assert "REG-12345" not in trace["error"], trace["error"]
     assert "REG-12345" not in str(trace.get("inputs"))
 

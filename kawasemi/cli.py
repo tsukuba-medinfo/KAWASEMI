@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 async def get_async_session() -> AsyncSession:
     """非同期セッションを取得"""
-    engine = create_async_engine(settings.database_url, echo=False)
+    engine = create_async_engine(settings.database_url, echo=False, hide_parameters=True)
     async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     return async_session()
 
@@ -180,7 +180,10 @@ async def check_schema() -> None:
     from kawasemi.core.schema_check import inspect_schema_async
 
     drift = await inspect_schema_async(engine)
-    print(f"接続先: {settings.database_url}")
+    from sqlalchemy.engine import make_url
+
+    # パスワードは表示しない
+    print(f"接続先: {make_url(str(settings.database_url)).render_as_string(hide_password=True)}")
     # 読み取り専用ロールの欠けは警告に留める（終了コードは変えない。スキーマの食い違いではない）
     readonly_warning = readonly_route_warning(engine.dialect.name)
     if readonly_warning:

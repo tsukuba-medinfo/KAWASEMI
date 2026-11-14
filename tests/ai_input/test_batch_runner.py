@@ -283,7 +283,9 @@ async def test_run_batch_job_fatal_error_marks_failed(
     job = await _get_job(job_id)
     assert job.status == BatchJobStatus.FAILED
     assert job.processed == 0  # 1件目の InputExecution 生成で破棄され processed まで到達しない
-    assert job.error_summary and "fatal boom" in job.error_summary
+    # 保存するのは構造化した要約（型名）。例外の文面は DB に入れない
+    assert job.error_summary == "RuntimeError"
+    assert "fatal boom" not in job.error_summary
     assert sink and sink[0].closed is True  # finally で interpreter.aclose() される
 
 
@@ -331,3 +333,28 @@ async def test_run_batch_job_rejects_values_that_do_not_fit_the_answer_type(
         ).scalar_one()
     assert ex.prefill_data == {}
     assert ex.evidence["d"]["failure_code"] == FailureCode.ANSWER_TYPE_MISMATCH
+
+
+async def test_run_batch_job_per_target_error_summary_is_structural(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """1 件ごとの失敗の `error_summary` は、ドライバ風の文面（DETAIL・行の値）を含まない。"""
+    job_id = await _seed(db_session, patients=["p1"], plan_link_ids=["a"])
+    monkeypatch.setattr(batch_mod, "AsyncSessionLocal", TestSessionLocal)
+    monkeypatch.setattr(
+        batch_mod,
+        "DSLInterpreter",
+        _fake_interpreter(
+            raise_exc=RuntimeError("DETAIL:  Key (email)=(phi@example.org) already exists.")
+        ),
+    )
+
+    await batch_mod.run_batch_job(job_id)
+
+    async with TestSessionLocal() as v:
+        ex = (
+            await v.execute(select(InputExecution).where(InputExecution.batch_job_id == job_id))
+        ).scalar_one()
+    assert ex.status == ExecutionStatus.FAILED
+    assert ex.error_summary == "RuntimeError"
+    assert "phi@example.org" not in (ex.error_summary or "")

@@ -2,9 +2,14 @@
 
 from typing import Any
 
+from kawasemi.core.exception_summary import summarize_exception
+
 
 class KawasemiBaseException(Exception):
     """KAWASEMI 共通基底例外クラス"""
+
+    # 文面をこちらで書いた例外。`summarize_exception` は、この型の文面だけをそのまま出す。
+    kawasemi_authored = True
 
     def __init__(self, message: str, error_code: str | None = None, details: Any = None):
         self.message = message
@@ -47,7 +52,11 @@ class DatabaseException(KawasemiBaseException):
         super().__init__(
             message=message,
             error_code="DATABASE_ERROR",
-            details={"original_error": str(original_error)},
+            details={
+                "original_error": (
+                    summarize_exception(original_error) if original_error is not None else None
+                )
+            },
         )
 
 

@@ -419,6 +419,43 @@ docker-compose exec postgres pg_dump -U kawasemi kawasemi > backup-$(date +%Y%m%
 
 ### ログの管理
 
+**ログは機微な情報として扱ってください**（閲覧権限の制限・保存期間・持ち出しの管理）。アプリは
+ログから秘匿値をベストエフォートで伏せますが、保証ではありません。
+
+保証すること（**永続・返却される先には、ドライバの文面を出さない**）:
+
+- evidence・trace・DB（`InputExecution.error_summary`、バッチの `error_summary`、来歴の error）・API の
+  応答・SSE の `error` 行へ出す例外の文面は、**構造化した要約**だけです（`summarize_exception`、
+  `kawasemi/core/exception_summary.py`）。内容は、例外の型名、SQLSTATE（`23505` など）、ドライバが
+  構造化して持つ名前（制約名・列名・表名）、HTTP の例外の接続先（scheme・host・port だけ。userinfo・
+  path・クエリは含めません。FHIR の path には患者 ID が入るためです）とステータスです。**ドライバの文面（`DETAIL: Key (col)=(value)`、型変換エラーの値、`Token "x" is
+  invalid` など）は含めません。** 文面を正規表現で伏せる方式は、メッセージの形（数百種あります）の
+  取りこぼしが避けられないので採りません。こちらで文面を書いた例外（`ParamError` など）だけ、その文面を
+  出します。
+- 表示用の URL（FHIR の接続先など。ログと FHIR 例外の `details.url`）は、scheme・host・port・path
+  だけです。userinfo・クエリ・フラグメントは、秘匿値の名前を問わず、落とします。**path は残る**ので、
+  FHIR の読み取りでは `/Patient/<id>` のように、いま操作している患者の ID が `details.url` とログに
+  載りえます（evidence と `error_summary` の要約には、path を含めません）。
+
+ベストエフォートであること（**サーバのログの生の文面**）:
+
+- 完全な例外（トレースバック）は、原因の切り分けのため、サーバのログ（`logger.exception` の形）に残ります。
+  出力前に `PHIRedactionFilter`（`kawasemi/core/logging_config.py`）が、SQLAlchemy の
+  `[parameters: ...]` の束縛値、URL の userinfo、`password`・`token`・`jti` などのキーの値を伏せます。
+  線形時間の実装で、掛ける長さは 64 KiB までです（超えた分は捨てます）。
+- DB エンジンは `hide_parameters=True` で作ります（例外の文字列に束縛値を入れない）。
+- **生のログでは、次の形は伏せません**（ベストエフォートの範囲外）: `Authorization: Bearer <token>`
+  （`Bearer` の語だけが伏せられ、トークンは残ります）、ハイフンつなぎの `api-key: x`・`X-API-Key=x`、
+  スキームのない `user:pw@host/x`・`//user:pw@host/x`（`://` を目印にするため）。これらを含むログを
+  出す設定（外部ライブラリのデバッグログなど）にしないでください。
+- **ドライバが例外の文面に載せる行の値（`DETAIL: Key (col)=(value)` など）は、ログのフィルタでは伏せ
+  ません。** `uvicorn` が出す未処理の例外のトレースバックにも、同じ文面が載りえます。`[SQL: ...]` の文も
+  伏せません（文に直接書かれたリテラルは残ります）。ログに実患者の値を出さないための境界は、計画の
+  SQL を流す DB ロールの権限と、**ログの閲覧権限・保存期間**です。
+- フィルタは、アプリのコンソールハンドラと、`uvicorn`・`uvicorn.error`・`uvicorn.access` のハンドラに付きます
+  （uvicorn は独自のハンドラを持つので、アプリの起動時に付けます。`--log-config` で uvicorn のロギングを
+  独自に設定する場合は、そのハンドラにも `PHIRedactionFilter` を付けてください）。
+
 ```bash
 # ログの確認
 docker-compose logs -f kawasemi

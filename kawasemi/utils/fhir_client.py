@@ -7,10 +7,22 @@ from typing import Any, cast
 import httpx
 
 from kawasemi.core.config import settings
+from kawasemi.core.exception_summary import summarize_exception
 from kawasemi.core.exceptions import FHIRServerException
 from kawasemi.core.logging_config import get_logger
+from kawasemi.core.url_redaction import display_url
 
 logger = get_logger(__name__)
+
+
+def redact_url(url: str) -> str:
+    """表示用の URL（scheme・host・port・path だけ）。userinfo・クエリ・フラグメントを落とす。
+
+    ログと、API の応答に返す例外の details に使う。**秘匿値の名前を列挙しない**（`X-Amz-Signature`、
+    `jwt`、`accessToken` …は必ず取りこぼす）ので、クエリを丸ごと落とす。解釈できないものは
+    `<unparseable url>`。
+    """
+    return display_url(url)
 
 
 class FHIRClient:
@@ -158,6 +170,8 @@ class FHIRClient:
         Raises:
             FHIRServerException: FHIRサーバエラー
         """
+        # ログと例外の details には、userinfo を除いた表示用の URL だけを使う。
+        shown = redact_url(url)
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.get(
@@ -169,21 +183,21 @@ class FHIRClient:
                 if response.status_code == 404:
                     raise FHIRServerException(
                         message="リソースが見つかりません",
-                        details={"url": url, "status_code": 404},
+                        details={"url": shown, "status_code": 404},
                     )
 
                 # 認証・認可失敗。原因切り分けのため専用メッセージにする。
                 if response.status_code in (401, 403):
                     logger.error(
                         f"FHIRサーバ認証エラー: {response.status_code} "
-                        f"(fhir_auth_mode={self._auth_mode}) - {url}"
+                        f"(fhir_auth_mode={self._auth_mode}) - {shown}"
                     )
                     raise FHIRServerException(
                         message=(
                             f"FHIRサーバの認証・認可に失敗しました（ステータス: "
                             f"{response.status_code}）。fhir_auth_mode と認証情報を確認してください。"
                         ),
-                        details={"url": url, "status_code": response.status_code},
+                        details={"url": shown, "status_code": response.status_code},
                     )
 
                 response.raise_for_status()
@@ -192,30 +206,30 @@ class FHIRClient:
                 try:
                     data = response.json()
                 except ValueError as e:
-                    logger.error(f"FHIRサーバ応答のJSONパースに失敗しました: {url}")
+                    logger.error(f"FHIRサーバ応答のJSONパースに失敗しました: {shown}")
                     raise FHIRServerException(
                         message="FHIRサーバ応答のJSONパースに失敗しました",
-                        details={"url": url, "error": str(e)},
+                        details={"url": shown, "error": summarize_exception(e)},
                     )
                 return cast(dict[str, Any], data)
 
         except httpx.TimeoutException as e:
-            logger.error(f"FHIRサーバへの接続がタイムアウトしました: {url}")
+            logger.error(f"FHIRサーバへの接続がタイムアウトしました: {shown}")
             raise FHIRServerException(
                 message="FHIRサーバへの接続がタイムアウトしました",
-                details={"url": url, "error": str(e)},
+                details={"url": shown, "error": summarize_exception(e)},
             )
         except httpx.HTTPStatusError as e:
-            logger.error(f"FHIRサーバエラー: {e.response.status_code} - {url}")
+            logger.error(f"FHIRサーバエラー: {e.response.status_code} - {shown}")
             raise FHIRServerException(
                 message=f"FHIRサーバエラー（ステータス: {e.response.status_code}）",
-                details={"url": url, "status_code": e.response.status_code},
+                details={"url": shown, "status_code": e.response.status_code},
             )
         except httpx.RequestError as e:
-            logger.error(f"FHIRサーバへの接続に失敗しました: {url} - {e}")
+            logger.error(f"FHIRサーバへの接続に失敗しました: {shown} - {summarize_exception(e)}")
             raise FHIRServerException(
                 message="FHIRサーバへの接続に失敗しました",
-                details={"url": url, "error": str(e)},
+                details={"url": shown, "error": summarize_exception(e)},
             )
 
 

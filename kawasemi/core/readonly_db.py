@@ -97,9 +97,13 @@ UNCONFIGURED_PRODUCTION_WARNING = (
 class ReadOnlySessionUnavailableError(RuntimeError):
     """プログラム SQL を読み取り専用ロールで実行する手段が用意できない（production）。"""
 
+    kawasemi_authored = True
+
 
 class ProgramSqlDeniedError(RuntimeError):
     """プログラム SQL が、読むことを許されていない表に触れた（ポリシー拒否）。"""
+
+    kawasemi_authored = True
 
 
 _CATALOG_SCHEMAS = {"pg_catalog", "information_schema"}
@@ -336,7 +340,7 @@ def get_readonly_engine() -> AsyncEngine | None:
         return None
     engine = _readonly_engines.get(url)
     if engine is None:
-        engine = create_async_engine(url, pool_pre_ping=True)
+        engine = create_async_engine(url, pool_pre_ping=True, hide_parameters=True)
         _readonly_engines[url] = engine
     return engine
 

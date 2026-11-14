@@ -17,6 +17,8 @@ _is_sqlite = str(settings.database_url).startswith("sqlite")
 _engine_kwargs: dict[str, Any] = {
     "echo": settings.debug,  # デバッグモードでSQLをログ出力
     "pool_pre_ping": True,  # 接続の健全性チェック
+    # 例外文字列の [parameters: ...] にバインド値（資格情報のハッシュ・PHI）を入れない。
+    "hide_parameters": True,
 }
 if not _is_sqlite:
     _engine_kwargs["pool_size"] = 5  # 接続プールサイズ

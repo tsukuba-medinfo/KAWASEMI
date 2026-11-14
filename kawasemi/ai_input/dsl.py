@@ -524,6 +524,9 @@ _PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 class ParamError(ValueError):
     """パラメータの解決・サニタイズに失敗した（呼び出し側は当該 step を失敗させる）"""
 
+    # 文面はこちらで書いたもの（`summarize_exception` がそのまま出す）
+    kawasemi_authored = True
+
 
 def _assert_no_traversal(rendered: str, what: str) -> None:
     """組み立て後の文字列に上位参照・区切りの異常が現れていないか再検査する。
@@ -941,6 +944,13 @@ _ALLOWED_UNARYOPS: dict[type[ast.unaryop], Callable[[float], float]] = {
 }
 
 
+class ExprError(ValueError):
+    """算術式（`safe_arith`）の構文・評価の失敗（`ValueError` のままなので、既存の捕捉は変わらない）"""
+
+    # 文面は固定の文言と、式の構文要素の型名だけ（データの値は入れない）。evidence にそのまま出る
+    kawasemi_authored = True
+
+
 def safe_arith(formula: str, value: float) -> float:
     """`value` を含む算術式を安全に評価する（+,-,*,/,% と括弧・数値のみ）
 
@@ -961,11 +971,12 @@ def safe_arith(formula: str, value: float) -> float:
             return _ALLOWED_BINOPS[type(n.op)](_eval(n.left), _eval(n.right))
         if isinstance(n, ast.UnaryOp) and type(n.op) in _ALLOWED_UNARYOPS:
             return _ALLOWED_UNARYOPS[type(n.op)](_eval(n.operand))
-        raise ValueError(f"許可されない式要素: {ast.dump(n)}")
+        # `ast.dump` は使わない: `value` を実データの数値に置き換えた式なので、定数に値が載る
+        raise ExprError(f"許可されない式要素: {type(n).__name__}")
 
     result = _eval(node)
     if not math.isfinite(result):
-        raise ValueError("式の評価結果が非有限（inf/nan）です")
+        raise ExprError("式の評価結果が非有限（inf/nan）です")
     return result
 
 

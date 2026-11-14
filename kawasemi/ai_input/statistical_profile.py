@@ -67,6 +67,7 @@ from kawasemi.ai_input.resource_index.derive import (
     has_physical_identifiers,
     resolve_db_op,
 )
+from kawasemi.core.exception_summary import safe_message
 from kawasemi.core.logging_config import get_logger
 from kawasemi.core.readonly_db import (
     ProgramSqlDeniedError,
@@ -364,7 +365,7 @@ async def generate_statistical_profile(
                     f"外部DB接続が解決できません（connection_id={connection_id!r}）",
                     source_category,
                 )
-            engine = create_async_engine(dsn, pool_pre_ping=True)
+            engine = create_async_engine(dsn, pool_pre_ping=True, hide_parameters=True)
 
             async def _read() -> tuple[int, list[_GroupedRow]]:
                 # **接続の取得ごと投げ直す。** 同じ `AsyncConnection` を使い回して投げ直すと、
@@ -390,13 +391,13 @@ async def generate_statistical_profile(
     except ProgramSqlDeniedError as e:
         # 読ませない表（アプリ自身の表・カタログ）を指す候補は集計しない
         logger.warning(f"統計プロファイルの集計を拒否しました: {e}")
-        return _not_applicable(str(e), source_category)
+        return _not_applicable(safe_message(e), source_category)
     except ReadOnlySessionUnavailableError as e:
         # フェイルクローズ（production で読み取り専用ロールが無い）。黙って読み書きで実行しない
         logger.error(f"統計プロファイルの集計を実行しませんでした: {e}")
-        return _not_applicable(str(e), source_category)
+        return _not_applicable(safe_message(e), source_category)
     except SQLAlchemyError as e:
-        logger.warning(f"統計プロファイル生成に失敗: table={table} column={column} error={e}")
+        logger.warning(f"統計プロファイル生成に失敗: table={table} column={column}", exc_info=e)
         return _not_applicable(
             "集計クエリの実行に失敗しました（表・カラムが実在しない可能性があります）",
             source_category,

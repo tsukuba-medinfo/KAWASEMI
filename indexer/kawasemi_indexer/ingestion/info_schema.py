@@ -71,7 +71,7 @@ def reflect_snapshot(
 
     スキーマ定義のみ（データ行は読まない）。
     """
-    engine = create_engine(to_sync_dsn(dsn))
+    engine = create_engine(to_sync_dsn(dsn), hide_parameters=True)
     try:
         return _reflect(engine, connection_id=connection_id, db_group=db_group, schema=schema)
     finally:
@@ -122,7 +122,7 @@ def _reflect(
 def reflect_catalog(dsn: str, schemas: list[str]) -> dict[str, set[str]]:
     """候補スキーマごとの表名一覧から `表名 → スキーマ集合` を作る（表名だけ。行は読まない）。"""
     out: dict[str, set[str]] = {}
-    engine = create_engine(to_sync_dsn(dsn))
+    engine = create_engine(to_sync_dsn(dsn), hide_parameters=True)
     try:
         insp = inspect(engine)
         for s in schemas:
@@ -175,7 +175,7 @@ def read_master_codes(
         refs.setdefault(master_id, []).append((fk_tbl.db_qualified, fk_col))
 
     entries: list[CodeEntry] = []
-    engine = create_engine(to_sync_dsn(dsn))
+    engine = create_engine(to_sync_dsn(dsn), hide_parameters=True)
     try:
         with engine.connect() as conn:
             for table_id in targets:
