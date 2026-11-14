@@ -39,6 +39,9 @@ logger = get_logger(__name__)
 
 SCOPE_SELF = "self"
 SCOPE_EXTERNAL = "external"
+KIND_DB = "db"
+KINDS = frozenset({"db", "fhir", "file"})
+SCOPES = frozenset({SCOPE_SELF, SCOPE_EXTERNAL})
 
 
 def resolve_secret(ref: str | None) -> str | None:
@@ -78,6 +81,42 @@ class ConnectionRegistry:
             return None
         scope = conn.get("scope")
         return str(scope) if scope is not None else None
+
+    def is_external_db(self, connection_id: str | None) -> bool:
+        """`external_db_extract` に使える接続か（`kind: db` かつ `scope: external`）。
+
+        実行時の関門（executor）と、コンパイラの op の選択が同じ判定を使う。
+        `kind` を省いた `scope: external` の接続は、ここで False になり、実行時に拒否される。
+        """
+        conn = self.get(connection_id)
+        if not conn:
+            return False
+        return conn.get("kind") == KIND_DB and conn.get("scope") == SCOPE_EXTERNAL
+
+    def problems(self) -> list[str]:
+        """登録内容の不備（実行時に拒否される形）を、接続名つきの文で返す。
+
+        読み込み時に警告する。`scope: external` の DB 接続が `kind: db` を省くと、
+        コンパイルは通るのに `external_db_extract` が実行時に `path_not_permitted` になる。
+        """
+        found: list[str] = []
+        for cid, conn in self._connections.items():
+            kind, scope = conn.get("kind"), conn.get("scope")
+            if kind not in KINDS:
+                found.append(
+                    f"接続 {cid!r}: kind が不正または未指定です（{kind!r}。db / fhir / file のいずれか）。"
+                    "この接続は external_db_extract に使えません"
+                )
+            if scope is not None and scope not in SCOPES:
+                found.append(
+                    f"接続 {cid!r}: scope が不正です（{scope!r}。self / external のいずれか）"
+                )
+            if scope == SCOPE_EXTERNAL and kind != KIND_DB and conn.get("secret_ref"):
+                found.append(
+                    f"接続 {cid!r}: scope: external で secret_ref がありますが kind: db ではありません。"
+                    "external_db_extract としては実行されません（DB なら kind: db を書いてください）"
+                )
+        return found
 
     def dsn_of(self, connection_id: str | None) -> str | None:
         """db 接続の DSN（SQLAlchemy URL）を secret_ref から解決する。
@@ -150,6 +189,8 @@ class ConnectionRegistry:
             return cls()
         registry._connections = {str(k): (v or {}) for k, v in conns.items()}
         logger.info(f"接続レジストリ読み込み完了: {len(registry._connections)}件 ({p})")
+        for problem in registry.problems():
+            logger.warning(f"接続レジストリの不備: {problem}（{p}）")
         return registry
 
 

@@ -242,6 +242,14 @@ def test_bind_names_are_counted_like_sqlalchemy_text() -> None:
         "SELECT lo_from_bytea(0, 'x')",
         "SELECT lo_unlink(1)",
         "SELECT 1nextval('seq')",
+        # RLS の方針が信頼する設定を、計画の SQL が書き換える・読む（実機 PostgreSQL で再現）。
+        # 多層の一つで境界ではない（DEPLOYMENT.md）
+        "SELECT set_config('app.patient_id', 'P2', true)",
+        "SELECT pg_catalog.set_config('app.patient_id', 'P2', true)",
+        "SELECT \"set_config\"('app.patient_id', 'P2', true)",
+        "SELECT SET_CONFIG('role', 'x', false)",
+        "SELECT current_setting('app.patient_id', true)",
+        "SELECT pg_notify('c', 'p')",
     ],
 )
 def test_forbidden_words_with_numeric_prefix_and_state_changing_functions(sql: str) -> None:

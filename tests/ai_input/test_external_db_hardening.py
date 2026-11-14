@@ -108,3 +108,46 @@ async def test_select_still_works_and_pooled_connection_is_writable_again(
             await conn.execute(text("INSERT INTO labs (pid, val) VALUES ('REG-3', 'z')"))
     finally:
         await interp.aclose()
+
+
+# --- 接続レジストリ: kind を省いた external は読み込み時に見える ---------------------------
+
+
+def test_registry_reports_kindless_external_connection(tmp_path, caplog) -> None:
+    import logging
+
+    cfg = tmp_path / "connections.yaml"
+    cfg.write_text(
+        "connections:\n"
+        "  dwh_ok:   {kind: db, scope: external, secret_ref: env:X}\n"
+        "  dwh_bad:  {scope: external, secret_ref: env:X}\n"
+        "  odd:      {kind: sql, scope: external}\n"
+        "  fhir_ext: {kind: fhir, scope: external, secret_ref: env:Y}\n",
+        encoding="utf-8",
+    )
+    with caplog.at_level(logging.WARNING):
+        registry = ConnectionRegistry.load(cfg)
+    problems = registry.problems()
+    assert any("'dwh_bad'" in p and "kind" in p for p in problems)
+    assert any("'odd'" in p for p in problems)
+    assert any("'fhir_ext'" in p and "external_db_extract" in p for p in problems)
+    assert not any("'dwh_ok'" in p for p in problems)
+    assert "接続レジストリの不備" in caplog.text and "dwh_bad" in caplog.text
+    assert registry.is_external_db("dwh_ok") is True
+    for cid in ("dwh_bad", "odd", "fhir_ext", "missing", None):
+        assert registry.is_external_db(cid) is False
+
+
+def test_compiler_does_not_emit_external_db_extract_for_kindless_connection() -> None:
+    from kawasemi.ai_input.models import OpType
+    from kawasemi.ai_input.resource_index.derive import resolve_db_op
+
+    registry = ConnectionRegistry(
+        {
+            "ok": {"kind": "db", "scope": "external", "secret_ref": "x"},
+            "bad": {"scope": "external", "secret_ref": "x"},
+        }
+    )
+    assert resolve_db_op({"connection_id": "ok"}, registry) == OpType.EXTERNAL_DB_EXTRACT
+    # 実行時に拒否される op を作らない（不足＝人の補完へ回す）
+    assert resolve_db_op({"connection_id": "bad"}, registry) is None

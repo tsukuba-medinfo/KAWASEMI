@@ -166,14 +166,15 @@ jobs:
       - name: 実スキーマとモデル宣言の照合
         run: uv run kawasemi check_schema
 
-      # プログラム SQL（sql_extract）の読み取り専用実行を PostgreSQL 実機で見る。
+      # プログラム SQL（sql_extract）と外部DB抽出（external_db_extract）の読み取り専用実行・
+      # 文タイムアウト・接続状態の復元を PostgreSQL 実機で見る（どちらも自分の一時オブジェクトだけ作る）。
       # 他のジョブは SQLite なので、このテストはここでしか skip されない。
       - name: プログラム SQL の読み取り専用（PostgreSQL）
         env:
           KAWASEMI_TEST_POSTGRES_URL: postgresql+asyncpg://kawasemi:kawasemi@localhost:5432/kawasemi
         run: |
           uv sync --extra dev
-          uv run pytest tests/ai_input/test_program_sql_readonly_postgres.py -v --tb=short
+          uv run pytest tests/ai_input/test_program_sql_readonly_postgres.py tests/ai_input/test_external_db_postgres.py -v --tb=short -rs
 
       # 取得プラン・手順書の保存の同時実行（行ロック・楽観的排他・同時の新規作成）と、
       # AI 生成（compile / recompile）の途中で確認された行を上書きしないこと。

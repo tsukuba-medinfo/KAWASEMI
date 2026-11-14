@@ -175,7 +175,7 @@ READONLY_DATABASE_URL=postgresql+asyncpg://kawasemi_ro:...@postgres:5432/kawasem
   計画の関数ノード（名前が `pg_` で始まるもの）と出力式で見つけて実行しません。`generate_series`・`unnest`・
   `jsonb_array_elements` のような組み込みの集合を返す関数は拒否しません。計画の文字列の走査はリテラルの中身も
   見るので、`'pg_x('` を含む定数は誤って拒否します（安全側）。これは追加の層で、ロールの権限の代わりではありません。
-  **名前が `pg_` で始まらないカタログ関数は拒否しません**: `current_setting`・`version()`・`has_table_privilege`・`to_regclass`・`set_config`・`inet_server_addr`・`txid_current` のような、名前が `pg_` で始まらないカタログ関数は拒否しません（設定の開示などは防げません。境界はロールの権限です）。
+  **名前が `pg_` で始まらないカタログ関数は、この計画の検査では拒否しません**: `version()`・`has_table_privilege`・`to_regclass`・`inet_server_addr`・`txid_current` のような関数です（設定の開示などは防げません。境界はロールの権限です）。`set_config`・`current_setting`・`pg_notify` は、SELECT 限定の検査の禁止語（字句の層）が拒否しますが、これは多層の一つで境界ではありません（下の RLS の注意を参照）。
   **表を読む関数**（`query_to_xml`・`table_to_xml`・`database_to_xml` は `pg_catalog` の組み込み関数で、
   ユーザー定義ではありません。`dblink` は拡張です）は計画に実表として出ないので、この検査では捕まえません。
   これらは SELECT 限定の検査の禁止語の一覧（補助の層）に頼ります。拒否は**名前**で決まります: `users`・`roles`・`datasets`・`subjects` など
@@ -189,17 +189,27 @@ READONLY_DATABASE_URL=postgresql+asyncpg://kawasemi_ro:...@postgres:5432/kawasem
   （結合・導出表・定数の作り方でいくつもすり抜けられ、閉じ切れないため）。したがって、
   臨床データを持つデータベースでは、次を運用者が整えてください。
   - (a) **最小権限の読み取り専用アカウント**: 計画が読む表・ビューにだけ `GRANT SELECT` を与える。
-    アプリ自身の表（認証・回答・実行記録）はアプリ側でも読めませんが（上の F8/F9）、
-    臨床データの表の範囲は `READONLY_DATABASE_URL` のロール（外部 DB なら接続アカウント）の `GRANT` が決めます
+    アプリ自身の表（認証・回答・実行記録）を読めないのは、**`sql_extract`（アプリ DB）の経路だけ**です
+    （上の F8/F9）。`external_db_extract`（外部 DB）は表を検査しないので、外部 DB の表の範囲は
+    接続アカウントの `GRANT` だけが決めます。アプリ DB の臨床データの表も、
+    `READONLY_DATABASE_URL` のロールの `GRANT` が決めます
   - (b) **患者ごとに絞るビュー、または行レベルセキュリティ（RLS）**: 参照の入口を、
     現在の患者の行だけが見える形にする。PostgreSQL の一例を下に示す。
-    アプリは、トランザクションごとの患者設定を入れる仕組みを提供していません。
-    RLS を使うなら、読み取りに使う接続でその設定を運用者の側で入れる必要があります
+    **アプリは、患者の設定を入れる仕組みを提供しません。** 設定する経路は運用者が用意します。
+    **計画の SQL が書き換えられる設定は境界ではありません**（下の例の注意）
   - (c) **運用**: 設計者が自分の SQL 計画を確定でき、`TRIAL_RUN_PATIENT_IDS` の患者への試行実行もできます。
     実患者を含むデータベースに対しては、設計者に確定と試行を任せない運用（確定は別の人、試行は
     検証用のデータだけ）にしてください
 
-  PostgreSQL の RLS の例です（**そのまま使わず、自分のスキーマに合わせて書き直してください**）。
+  PostgreSQL の RLS の例です（**そのまま使わず、自分のスキーマと接続の経路に合わせて書き直してください**）。
+
+  > **注意（実機 PostgreSQL 17 で確認）**: 方針が `current_setting('app.patient_id', true)` を信頼するとき、
+  > その設定を**計画の SQL が書ける**と、境界になりません。`set_config` は SELECT から呼べるので、
+  > 読み取りロールが `SELECT set_config('app.patient_id', '他の患者', true)` を実行すれば、
+  > 同じトランザクションで他の患者の行が読めます。アプリが SQL の禁止語で `set_config` を拒否するのは
+  > 多層の一つで、字句の検査は境界ではありません。設定は、**計画の SQL が書けない経路**
+  > （接続を受け持つ信頼できる層）で入れ、読み取りロールからは `set_config` の実行権を外してください。
+  > アプリはこの設定を入れません。下の例は、その経路があるときに成り立つ形です。
 
   ```sql
   -- 例: lab_results(patient_id, result_value, ...) を、現在の患者の行だけに絞る
@@ -208,12 +218,26 @@ READONLY_DATABASE_URL=postgresql+asyncpg://kawasemi_ro:...@postgres:5432/kawasem
   CREATE POLICY patient_scope ON lab_results
     FOR SELECT
     USING (patient_id = current_setting('app.patient_id', true));
-  -- 読み取り専用ロール（表の所有者や BYPASSRLS を持つロールは使わない）
-  CREATE ROLE plan_reader LOGIN PASSWORD '...' NOBYPASSRLS;
+  -- 計画の SQL を実行するロール（表の所有者や BYPASSRLS を持つロールは使わない）
+  CREATE ROLE plan_reader NOBYPASSRLS;
   GRANT SELECT ON lab_results TO plan_reader;
-  -- 読み取りの直前、同じトランザクションで患者を設定する（設定が無ければ 0 行になる）
+  -- plan_reader から set_config の実行権を外す。設定を入れる側（信頼できる層）のロールだけに与える
+  REVOKE EXECUTE ON FUNCTION pg_catalog.set_config(text, text, boolean) FROM PUBLIC;
+  CREATE ROLE conn_layer LOGIN;                       -- 信頼できる層が使う接続ロール
+  GRANT plan_reader TO conn_layer;
+  GRANT EXECUTE ON FUNCTION pg_catalog.set_config(text, text, boolean) TO conn_layer;
+  -- 信頼できる層が、計画の SQL を流す直前に、同じトランザクションで行う:
+  --   BEGIN;
   --   SELECT set_config('app.patient_id', '<認可された患者の ID>', true);
+  --   SET LOCAL ROLE plan_reader;   -- 以降の文は plan_reader として動く（設定が無ければ 0 行）
+  --   ... 計画の SELECT ...
+  --   COMMIT;
   ```
+
+  `PUBLIC` からの `REVOKE` は、他のロール（アプリ本体や監視など）の `set_config` も止めます。
+  影響を確かめてから行い、PostgreSQL の更新のあとに権限が残っていることを確かめてください。
+  この形は、SELECT だけの SQL が `RESET ROLE` や `SET` を実行できないこと（アプリの検査）と、
+  `set_config` 以外に設定を書く関数を入れていないこと（拡張に注意）に依存します。
 - **ファイルと FHIR の患者の範囲は、アプリが確かめます。** 次の形でなければ実行しません（`path_not_permitted`）。
   - ファイル: `path_pattern` のパス区間の1つが `{{patient_id}}`（`{{patient_id}}.txt` は可、
     `{{a}}{{patient_id}}` は不可）
@@ -240,6 +264,12 @@ LLM や索引が組んだ SELECT を発行します。アプリは、使える�
 補助の層で、境界ではありません（`docs/dsl_specification.md` §6.3）。また、**どの患者の行を返すかは
 アプリが保証しません**（上の「SQL を認可された患者に絞ることは…」）。次を必ず守ってください。
 
+- **`connections.yaml` の DB 接続には `kind: db` と `scope: external` の両方を書く**。`kind` を省いた
+  `scope: external` の接続は、`external_db_extract` に使えません。起動（レジストリの読み込み）時に
+  接続名つきで警告を出し、コンパイルは `external_db_extract` を作らず（不足として人の補完に回す）、
+  実行時にも `path_not_permitted` で断ります。
+- **読み取り専用の違反と文タイムアウトによる取り消しは、投げ直しません**（待っても通らないため）。
+  接続断・デッドロックのような一時的なエラーだけを、10 秒待って最大 3 回投げ直します。
 - **接続アカウントは読み取り専用にする**。書き込み・DDL・関数やプロシージャの作成・実行の権限を与えません。
 - **抽出に要る表とビューにだけ `SELECT` を与える**。読み取り専用のアカウントでも、与えられた表は
   すべて読めます（たとえば `UNION` で別の表を読み足すことは、文字列検査が止めなくても権限が止める）。

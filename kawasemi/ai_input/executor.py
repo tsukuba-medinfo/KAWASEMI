@@ -1654,7 +1654,7 @@ class DSLInterpreter:
 
         registry = get_registry()
         declared = registry.get(connection_id) or {}
-        if declared and (declared.get("kind") != "db" or declared.get("scope") != "external"):
+        if declared and not registry.is_external_db(connection_id):
             # 計画の作者が選べるのは「外部 DB」の接続だけ。fhir/file 接続や自アプリ DB
             # （scope: self）の DSN/secret_ref をここで開かせない
             return None, {
