@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import JSON, DateTime, ForeignKey, String, Text
+from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from kawasemi.models.base import Base, TimestampMixin
@@ -98,6 +98,11 @@ class QuestionnaireResponse(Base, TimestampMixin):
     # 最後に編集したユーザ。SoD は提出者に加えて編集者にも及ぶ（編集してから検証、を防ぐ）。
     last_edited_by_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    # 編集のたびに +1 する版番号。検証・差戻し・編集は、読んだ時点の版のままであることを
+    # 書き込みの条件にする（状態が変わらない編集の割り込みを、どの DB でも弾く）。
+    edit_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
     )
     # 検証状態（unverified / verified / rejected）。FHIR status とは独立。
     verification_status: Mapped[str] = mapped_column(

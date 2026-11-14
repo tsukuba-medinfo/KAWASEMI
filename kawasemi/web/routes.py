@@ -843,12 +843,12 @@ async def show_response(
             )
 
     # 検証ワークフローの表示・操作可否。
-    # 検証者は、未検証/差戻しの回答を verify/reject できる。ただし自分が提出した回答は
-    # 検証できない（SoD）。検証済は施錠（編集不可）。
+    # 検証者は、未検証/差戻しの回答を verify/reject できる。ただし自分が提出または編集した
+    # 回答は検証できない（SoD。verify/reject と同じ判定）。検証済は施錠（編集不可）。
     can_verify = (
         current_user.active_role == "reviewer"
         and response.verification_status != VerificationStatus.VERIFIED
-        and response.submitted_by_id != current_user.id
+        and not await _touched_response(db, response, current_user.id)
     )
     can_edit = (
         current_user.active_role == "collector"
@@ -1053,7 +1053,10 @@ async def update_response(
 
         was_rejected = response_obj.verification_status == VerificationStatus.REJECTED
 
+        loaded_status = response_obj.verification_status
+        loaded_version = response_obj.edit_version
         values: dict[str, Any] = {
+            "edit_version": QuestionnaireResponse.edit_version + 1,
             "content": resource,
             "status": metadata.get("status"),
             "subject": metadata.get("subject"),
@@ -1068,19 +1071,26 @@ async def update_response(
             values["rejection_reason"] = None
             values["status"] = "amended"
 
-        # 検証済み（施錠）でないことを書き込みの条件に含める（確認と書き込みを原子的にする）。
+        # 読んだ時点の状態・版のままであることを書き込みの条件にする（確認と書き込みを
+        # 原子的にする）。検証・差戻し・別の編集が割り込んでいれば 0 行になり、書き込まない。
+        # 状態が「検証済みでない」だけだと、差戻しの割り込み（was_rejected の判定がずれる）や
+        # 別の編集の上書きを許してしまう。
         written = await db.execute(
             update(QuestionnaireResponse)
             .where(
                 QuestionnaireResponse.id == response_obj.id,
-                QuestionnaireResponse.verification_status != VerificationStatus.VERIFIED,
+                QuestionnaireResponse.verification_status == loaded_status,
+                QuestionnaireResponse.edit_version == loaded_version,
             )
             .values(**values)
             .execution_options(synchronize_session=False)
         )
         if written.rowcount != 1:  # type: ignore[attr-defined]
             await db.rollback()
-            raise HTTPException(status_code=409, detail="検証済みの回答は編集できません（施錠）")
+            raise HTTPException(
+                status_code=409,
+                detail="回答が検証・差戻し・編集により変わりました。再読み込みしてください",
+            )
         # 編集は全て監査ログに残す（誰が・いつ編集したか）。
         db.add(
             ResponseVerificationLog(
@@ -1165,12 +1175,14 @@ async def verify_response(
     if response_obj.verification_status == VerificationStatus.VERIFIED:
         raise HTTPException(status_code=400, detail="既に検証済みです")
 
-    # 読んだ時点の状態のままであることを書き込みの条件にする（割り込む編集・検証を弾く）。
+    # 読んだ時点の状態・版のままであることを書き込みの条件にする（割り込む編集・検証を弾く）。
+    # 状態が変わらない編集（版だけ進む）も、版の条件で弾く。
     written = await db.execute(
         update(QuestionnaireResponse)
         .where(
             QuestionnaireResponse.id == response_obj.id,
             QuestionnaireResponse.verification_status == response_obj.verification_status,
+            QuestionnaireResponse.edit_version == response_obj.edit_version,
         )
         .values(
             verification_status=VerificationStatus.VERIFIED,
@@ -1238,6 +1250,7 @@ async def reject_response(
         .where(
             QuestionnaireResponse.id == response_obj.id,
             QuestionnaireResponse.verification_status == response_obj.verification_status,
+            QuestionnaireResponse.edit_version == response_obj.edit_version,
         )
         .values(
             verification_status=VerificationStatus.REJECTED,

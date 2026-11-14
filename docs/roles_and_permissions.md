@@ -197,10 +197,18 @@ manual 縮退の提案・承認・確定操作の分離も同じ（[manual 縮�
   **A が `reviewer` も保有していれば検証できる**。`verify_response` は提出者と編集者を見るが、
   autofill の実行者との同一性は見ない。
 - 回答の編集は毎回、`response_verification_logs` に `edited`（差戻し後の再編集は加えて `resubmitted`）を
-  追記し、`questionnaire_responses.last_edited_by_id` を更新する。
-- 検証済み（施錠）の確認と書き込みは原子的に行う。編集は `verification_status != verified` を条件にした
-  UPDATE で、割り込んだ検証があれば 409 で拒否する。verify / reject も、読んだ時点の状態のままであることを
-  条件にし、PostgreSQL では行ロック（`SELECT ... FOR UPDATE`）で読む。
+  追記し、`questionnaire_responses.last_edited_by_id` を更新し、`edit_version` を +1 する。
+  この移行（`f3b5d7e9a1c4`）より前の編集は、記録が無い。移行は、`author` が `User/<id>` で
+  提出者と違い、実在するユーザーなら、その人を `last_edited_by_id` に写す（保守的な推定）。
+  推定できない過去の編集は、監査ログにも残っていないので判定できない。
+- 検証済み（施錠）の確認と書き込みの原子性は、2段で保証する。
+  - **全ての DB**: 編集・verify・reject の書き込みは、読んだ時点の `verification_status` と
+    `edit_version` のままであることを `WHERE` に含めた UPDATE で行う。割り込んだ検証・差戻し・
+    別の編集があれば 0 行になり、409 で拒否する（書き込まない）。状態が変わらない編集でも、
+    版が進むので、検証の書き込みは弾かれる。ロックの効かない SQLite でも、ここで守る。
+  - **PostgreSQL**: さらに、読み取りを行ロック（`SELECT ... FOR UPDATE`）で行う。競合する要求は
+    ロックを待ち、新しい状態を読んでから判定する（409 になる代わりに、403 などの通常の拒否になる）。
+    `tests/test_response_race_postgres.py` が、実際の PostgreSQL でこれを確かめる。
 - 1人の利用者に `collector` と `reviewer` を同時に付与すると、自己検証禁止は上表の判定だけで効く。
   監査の厳しい用途では、同じ人に収集者と閲覧・検証者を同時に付与しない運用で担保する。
 - 管理者はアカウントと役割の付与を持つので、**自分に設計者や収集者を付与できる**。これは

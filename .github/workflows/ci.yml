@@ -193,3 +193,7 @@ jobs:
         env:
           KAWASEMI_TEST_POSTGRES_URL: postgresql+asyncpg://kawasemi:kawasemi@localhost:5432/kawasemi
         run: uv run pytest tests/test_session_revocation_postgres.py -v --tb=short -rs
+      - name: 回答の編集・検証・差戻しの同時実行（PostgreSQL）
+        env:
+          KAWASEMI_TEST_POSTGRES_URL: postgresql+asyncpg://kawasemi:kawasemi@localhost:5432/kawasemi
+        run: uv run pytest tests/test_response_race_postgres.py -v --tb=short -rs
