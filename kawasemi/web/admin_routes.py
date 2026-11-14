@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, Form, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from fastapi_csrf_protect import CsrfProtect
-from sqlalchemy import select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -16,6 +16,9 @@ from kawasemi.core.deps import require_roles
 from kawasemi.core.logging_config import get_logger
 from kawasemi.core.sessions import revoke_user_sessions
 from kawasemi.models.auth_event import AuthEvent, AuthEventAction
+from kawasemi.models.case_assignment import CaseAssignment
+from kawasemi.models.input_target import InputTarget
+from kawasemi.models.refresh_token import RefreshToken
 from kawasemi.models.role import Role
 from kawasemi.models.user import User, UserRole
 from kawasemi.web.template_globals import register_template_globals
@@ -305,6 +308,17 @@ async def delete_user(
     user = result.scalar_one_or_none()
 
     if user:
+        # 削除の前に、そのユーザーが持つセッション・担当・リースを片付ける。
+        # 外部キーの ON DELETE は DB 側で強制されない構成（SQLite の既定）があり、
+        # 行が残ると削除済みユーザーのトークンが生き続ける
+        await revoke_user_sessions(db, user)
+        await db.execute(delete(RefreshToken).where(RefreshToken.user_id == user_id))
+        await db.execute(
+            update(InputTarget)
+            .where(InputTarget.started_by_id == user_id)
+            .values(started_by_id=None, lease_expires_at=None)
+        )
+        await db.execute(delete(CaseAssignment).where(CaseAssignment.assigned_to_id == user_id))
         await db.delete(user)
         await db.commit()
         logger.info(f"ユーザーを削除しました: id={user_id}")

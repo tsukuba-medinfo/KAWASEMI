@@ -33,6 +33,10 @@ if _is_sqlite:
         cursor = dbapi_conn.cursor()
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute("PRAGMA busy_timeout=5000")
+        # SQLite は既定で外部キーを強制しない。強制しないと ON DELETE CASCADE / SET NULL が
+        # 効かず、ユーザーを削除してもセッション・担当・リースの行が宙に浮く。
+        # （マイグレーションは別の接続で、この設定を受けない）
+        cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()
 
 

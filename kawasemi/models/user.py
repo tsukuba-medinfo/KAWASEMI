@@ -16,6 +16,10 @@ class User(Base, TimestampMixin):
     """ユーザーモデル"""
 
     __tablename__ = "users"
+    # SQLite で削除済みの id を再利用させない（トークンは数値の sub で本人を引くので、
+    # 再利用されると削除済みユーザーのトークンが新しいアカウントのものとして通る）。
+    # PostgreSQL では無視される（シーケンスは元から再利用しない）。
+    __table_args__ = {"sqlite_autoincrement": True}
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     username: Mapped[str] = mapped_column(String(50), unique=True, index=True, nullable=False)

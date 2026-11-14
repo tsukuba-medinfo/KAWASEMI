@@ -993,9 +993,12 @@ async def update_response(
     form_data = await request.form()
 
     try:
-        # メタデータの更新
-        subject = form_data.get("subject") or None
-        author = form_data.get("author") or None
+        # 患者（subject）は保存済みの値を保つ。クライアントが送る値は使わない:
+        # 認可（`_user_can_access_response`）は保存済みの患者に対してだけなので、
+        # 書き換えを許すと担当外の患者へ回答を付け替えられる。作成者（author）も
+        # 認証したユーザーにサーバー側で固定する（REST の作成と同じ）。
+        subject = response_obj.subject
+        author = f"User/{current_user.id}"
         status = str(form_data.get("status") or "completed")
 
         # 回答データの構築（チェックボックスは bool 化）
