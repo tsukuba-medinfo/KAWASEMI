@@ -123,7 +123,9 @@ async def test_op_external_db_success_returns_value(tmp_path, monkeypatch) -> No
     conn.close()
 
     dsn = f"sqlite+aiosqlite:///{db_file}"
-    registry = ConnectionRegistry({"labs_db": {"scope": "external", "secret_ref": dsn}})
+    registry = ConnectionRegistry(
+        {"labs_db": {"kind": "db", "scope": "external", "secret_ref": dsn}}
+    )
     monkeypatch.setattr(executor_mod, "get_registry", lambda: registry)
 
     interp = DSLInterpreter()

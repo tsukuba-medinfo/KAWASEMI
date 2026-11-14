@@ -76,3 +76,49 @@ def test_no_auth_is_refused_off_loopback(monkeypatch, capsys):
     rc = cli.cmd_serve(_args(host="0.0.0.0", no_auth=True))
     assert rc == 1
     assert "--no-auth" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("host", "expected"),
+    [
+        ("127.0.0.1", "http://127.0.0.1:8000/"),
+        ("localhost", "http://localhost:8000/"),
+        ("0.0.0.0", "http://localhost:8000/"),
+        ("::", "http://localhost:8000/"),
+        ("::1", "http://[::1]:8000/"),
+        ("diag.example.org", "http://diag.example.org:8000/"),
+    ],
+)
+def test_browser_url_is_always_openable(host, expected):
+    assert cli._browser_url(host, 8000) == expected
+
+
+def test_wildcard_bind_prints_a_usable_url_and_keeps_host_allowlist(monkeypatch, capsys):
+    pytest.importorskip("fastapi")
+    uvicorn = pytest.importorskip("uvicorn")
+
+    class _Store:
+        def is_searchable(self, _m):
+            return True
+
+    import kawasemi_indexer.store as store_mod
+
+    monkeypatch.setattr(store_mod, "get_store", lambda _d: _Store())
+    captured = {}
+
+    def _create_app(**kw):
+        captured.update(kw)
+        return object()
+
+    import kawasemi_indexer.webserver as ws
+
+    monkeypatch.setattr(ws, "create_app", _create_app)
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: None)
+    rc = cli.cmd_serve(_args(host="0.0.0.0", token_file=None))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "http://localhost:8000/#token=" in out
+    assert "http://0.0.0.0" not in out
+    assert "--allowed-host" in out
+    # Host の許可リストは緩めない（bind 先の名前と、明示した名前だけ）
+    assert captured["allowed_hosts"] == ["0.0.0.0"]

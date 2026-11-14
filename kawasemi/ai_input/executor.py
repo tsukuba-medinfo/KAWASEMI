@@ -68,6 +68,7 @@ from kawasemi.core.readonly_db import (
     assert_relations_permitted,
     is_authorizer_denial,
     readonly_program_sql,
+    readonly_transaction,
 )
 from kawasemi.utils.fhir_client import FHIRClient
 
@@ -821,9 +822,10 @@ def apply_transform(value: Any, rule: dict[str, Any] | None) -> Any:
 #
 # **SQL（`sql_extract` / `external_db_extract`）は、アプリでは患者に絞らない。** SQL の構造を
 # 読んで絞り込みを保証する方法は、結合・導出表・定数の作り方でいくつもすり抜けられ、
-# 検査を重ねても閉じ切れなかったので採らない。SQL の境界は DB 側で、読める表の制限
-# （`kawasemi.core.readonly_db`。F8/F9）と、行レベルセキュリティ（PostgreSQL の RLS を
-# トランザクションごとの患者設定で絞る。今後の対応）に置く（docs/DEPLOYMENT.md）。
+# 検査を重ねても閉じ切れなかったので採らない。患者の範囲を DB 側で保証するのは運用者の責任で、
+# 最小権限の読み取り専用アカウント、患者ごとのビュー、行レベルセキュリティ（PostgreSQL の RLS の
+# 例は docs/DEPLOYMENT.md）を整える。アプリが掛けるのは、読める表の制限
+# （`kawasemi.core.readonly_db`。F8/F9）だけである。
 # プランに書かれた `unit_id` は、どの op でも免除の根拠にしない。
 
 
@@ -1650,7 +1652,23 @@ class DSLInterpreter:
                 "failure_code": FailureCode.UNCLASSIFIED,
             }
 
-        dsn = get_registry().dsn_of(connection_id)
+        registry = get_registry()
+        declared = registry.get(connection_id) or {}
+        if declared and (declared.get("kind") != "db" or declared.get("scope") != "external"):
+            # 計画の作者が選べるのは「外部 DB」の接続だけ。fhir/file 接続や自アプリ DB
+            # （scope: self）の DSN/secret_ref をここで開かせない
+            return None, {
+                **base,
+                "inputs": {"connection_id": connection_id},
+                "output": None,
+                "error": (
+                    f"external_db_extract に使えない接続です（connection_id={connection_id!r} は "
+                    "kind: db かつ scope: external ではありません）"
+                ),
+                "failure_code": FailureCode.PATH_NOT_PERMITTED,
+            }
+
+        dsn = registry.dsn_of(connection_id)
         if not dsn:
             return None, {
                 **base,
@@ -1679,7 +1697,10 @@ class DSLInterpreter:
 
         async def _read() -> list[Any]:
             # 接続の取得ごとやり直す（壊れた接続を使い回さない。statistical_profile と同じ）
-            async with engine.connect() as conn:
+            # 読み取り専用トランザクション＋文タイムアウトの中で実行し、抜けるときに必ず
+            # ロールバックする（`readonly_db` と同じ。未対応の方言は SET TRANSACTION READ ONLY
+            # が通らずに失敗する＝閉じる側へ倒れる）
+            async with readonly_transaction(engine) as conn:
                 result = await conn.execute(text(rendered), binds)
                 return list(result.fetchall())
 

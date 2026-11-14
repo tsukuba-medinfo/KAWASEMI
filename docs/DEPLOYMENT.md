@@ -182,16 +182,38 @@ READONLY_DATABASE_URL=postgresql+asyncpg://kawasemi_ro:...@postgres:5432/kawasem
   アプリの表と同じ名前の表は、どのスキーマにあっても読めません（臨床データの表にそれらの名前を付けないでください）。そちらは SELECT 限定の検査の禁止語の一覧
   （補助の層）と、上のロールの権限（境界）に頼ります。PostgreSQL・SQLite 以外の DB は表を検査
   できないので、プログラム SQL を実行しません。
-- **SQL の患者の範囲は、アプリでは保証していません（F7 の SQL 部分は閉じていません）。**
+- **SQL を認可された患者に絞ることは、運用者がデータベース側で行う責任です。アプリは保証しません。**
   `sql_extract` と `external_db_extract` の SQL は、`:patient_id` で絞る形を要求しません。
-  設計者が保存した SQL が `WHERE` を省けば、認可を通った1人の実行でも、読める表の全患者の行を
-  返します。SQL の構造を読んで絞り込みを保証する方法は、結合・導出表・定数の作り方でいくつも
-  すり抜けられるため採っていません。SQL の境界は DB 側にあります。
-  - (a) **読める表を絞る**（上の F8/F9）。アプリ自身の表（認証・回答・実行記録）は読めません。
-    臨床データの表は、読める範囲を `READONLY_DATABASE_URL` のロールの `GRANT` で必要な表だけにしてください
-  - (b) **行レベルセキュリティ**（PostgreSQL の RLS を、トランザクションごとの患者設定
-    〔`set_config('app.patient_id', ..., true)` など〕で絞る）が、今後の対応です。実装するまでは、
-    設計者ロールに実患者データの実行権限を持たせない運用（試行は `TRIAL_RUN_PATIENT_IDS` の患者だけ）で補ってください
+  設計者が保存した SQL が `WHERE` を省けば、認可を通った1人の実行でも、そのアカウントが読める
+  表の全患者の行を返します。アプリは SQL の構造を読んで患者の範囲を保証しません
+  （結合・導出表・定数の作り方でいくつもすり抜けられ、閉じ切れないため）。したがって、
+  臨床データを持つデータベースでは、次を運用者が整えてください。
+  - (a) **最小権限の読み取り専用アカウント**: 計画が読む表・ビューにだけ `GRANT SELECT` を与える。
+    アプリ自身の表（認証・回答・実行記録）はアプリ側でも読めませんが（上の F8/F9）、
+    臨床データの表の範囲は `READONLY_DATABASE_URL` のロール（外部 DB なら接続アカウント）の `GRANT` が決めます
+  - (b) **患者ごとに絞るビュー、または行レベルセキュリティ（RLS）**: 参照の入口を、
+    現在の患者の行だけが見える形にする。PostgreSQL の一例を下に示す。
+    アプリは、トランザクションごとの患者設定を入れる仕組みを提供していません。
+    RLS を使うなら、読み取りに使う接続でその設定を運用者の側で入れる必要があります
+  - (c) **運用**: 設計者が自分の SQL 計画を確定でき、`TRIAL_RUN_PATIENT_IDS` の患者への試行実行もできます。
+    実患者を含むデータベースに対しては、設計者に確定と試行を任せない運用（確定は別の人、試行は
+    検証用のデータだけ）にしてください
+
+  PostgreSQL の RLS の例です（**そのまま使わず、自分のスキーマに合わせて書き直してください**）。
+
+  ```sql
+  -- 例: lab_results(patient_id, result_value, ...) を、現在の患者の行だけに絞る
+  ALTER TABLE lab_results ENABLE ROW LEVEL SECURITY;
+  ALTER TABLE lab_results FORCE ROW LEVEL SECURITY;  -- 表の所有者にも効かせる
+  CREATE POLICY patient_scope ON lab_results
+    FOR SELECT
+    USING (patient_id = current_setting('app.patient_id', true));
+  -- 読み取り専用ロール（表の所有者や BYPASSRLS を持つロールは使わない）
+  CREATE ROLE plan_reader LOGIN PASSWORD '...' NOBYPASSRLS;
+  GRANT SELECT ON lab_results TO plan_reader;
+  -- 読み取りの直前、同じトランザクションで患者を設定する（設定が無ければ 0 行になる）
+  --   SELECT set_config('app.patient_id', '<認可された患者の ID>', true);
+  ```
 - **ファイルと FHIR の患者の範囲は、アプリが確かめます。** 次の形でなければ実行しません（`path_not_permitted`）。
   - ファイル: `path_pattern` のパス区間の1つが `{{patient_id}}`（`{{patient_id}}.txt` は可、
     `{{a}}{{patient_id}}` は不可）
@@ -210,16 +232,20 @@ READONLY_DATABASE_URL=postgresql+asyncpg://kawasemi_ro:...@postgres:5432/kawasem
 ### 外部DBの接続アカウント（connections.yaml）
 
 DSL の `external_db_extract` は、接続レジストリ（`connections.yaml`）に登録した外部DB（DWH など）へ、
-LLM や索引が組んだ SELECT を発行します。コードは外部DBの接続を読み取り専用にしません。
-**書き込みを止める境界は、接続に使うアカウントの権限です。** SELECT 限定の文字列検査は補助の層で、
-境界ではありません（`docs/dsl_specification.md` §6.3）。次を必ず守ってください。
+LLM や索引が組んだ SELECT を発行します。アプリは、使える接続を `kind: db` かつ `scope: external` の
+ものに限り（fhir・file・自アプリ DB の接続は拒否します）、抽出を**読み取り専用トランザクション**の中で
+実行し（PostgreSQL は `READ ONLY` と `statement_timeout`〔`READONLY_STATEMENT_TIMEOUT_SECONDS`〕、SQLite は
+`query_only`、ほかの方言は `SET TRANSACTION READ ONLY`。通らない方言は失敗します）、終了時に必ずロールバックします。
+これは追加の層です。**書き込みを止める境界は、接続に使うアカウントの権限です。** SELECT 限定の文字列検査も
+補助の層で、境界ではありません（`docs/dsl_specification.md` §6.3）。また、**どの患者の行を返すかは
+アプリが保証しません**（上の「SQL を認可された患者に絞ることは…」）。次を必ず守ってください。
 
 - **接続アカウントは読み取り専用にする**。書き込み・DDL・関数やプロシージャの作成・実行の権限を与えません。
 - **抽出に要る表とビューにだけ `SELECT` を与える**。読み取り専用のアカウントでも、与えられた表は
   すべて読めます（たとえば `UNION` で別の表を読み足すことは、文字列検査が止めなくても権限が止める）。
   スキーマ全体への `GRANT SELECT` は避け、患者情報以外の機微な表（認証情報など）は含めないでください。
-- **DB 側で文の実行時間の上限を掛ける**。外部DBへの SQL には、アプリからは `statement_timeout` を
-  掛けません。アカウントに設定してください。
+- **DB 側で文の実行時間の上限も掛ける**。アプリが掛ける上限は PostgreSQL だけです。アカウントにも
+  設定してください（アプリの上限とは独立の、境界側の設定です）。
 
 PostgreSQL の例:
 

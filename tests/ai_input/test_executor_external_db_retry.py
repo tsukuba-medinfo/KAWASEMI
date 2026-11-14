@@ -39,6 +39,8 @@ class _FlakyEngine:
         kind: type[Exception] = OperationalError,
     ) -> None:
         self._real = real
+        # 読み取り専用トランザクションが方言を見るので、本物のエンジンのものを見せる
+        self.dialect = real.dialect
         self._left = fail_times
         self._message = message
         self._kind = kind
@@ -61,7 +63,9 @@ def interp_and_engine(tmp_path, monkeypatch):  # noqa: ANN001, ANN201
     conn.commit()
     conn.close()
     dsn = f"sqlite+aiosqlite:///{db_file}"
-    registry = ConnectionRegistry({"labs_db": {"scope": "external", "secret_ref": dsn}})
+    registry = ConnectionRegistry(
+        {"labs_db": {"kind": "db", "scope": "external", "secret_ref": dsn}}
+    )
     monkeypatch.setattr(executor_mod, "get_registry", lambda: registry)
     monkeypatch.setattr(db_retry, "RETRY_WAIT_SECONDS", 0.0)
     interp = DSLInterpreter()

@@ -557,7 +557,7 @@ LLM op の入力が使えるかの判定（§8.4）は、これに加えて空�
   PostgreSQL では加えて、トランザクションの先頭で `statement_timeout` を `SET LOCAL` 相当で掛け（`READONLY_STATEMENT_TIMEOUT_SECONDS`、既定 60 秒、0 で無効）、ロールバックの後で `pg_advisory_unlock_all()` を呼ぶ。後始末に失敗した接続はプールへ返さずに破棄する。
   統計プロファイルの自アプリ DB の集計も同じ経路を通る。
 - **読める表**: アプリ自身の表（`Base.metadata` の全表と `alembic_version`）、SQLite のスキーマ表と `pragma_*`、PostgreSQL の `pg_catalog` と `information_schema` は読めない。SQLite は接続の authorizer が文の準備時に、PostgreSQL は `EXPLAIN (VERBOSE, FORMAT JSON)` の計画に出る実表を実行の前に調べる（名前が `pg_` で始まる関数ノードと `pg_*` 関数の呼び出しも拒否する。`generate_series` などの組み込みの集合を返す関数は拒否しない。名前が `pg_` で始まらないカタログ関数（`current_setting`、`version()`、`has_table_privilege`、`to_regclass`、`set_config`、`inet_server_addr`、`txid_current` など）は拒否せず、境界はロールの権限である。表を読む関数（`query_to_xml` / `table_to_xml` / `database_to_xml` は `pg_catalog` の組み込み関数、`dblink` は拡張）は計画に出ないので、この検査の対象外で、SELECT 限定の検査の禁止語に頼る。拒否は名前で決まり、アプリの表と同じ名前の表はどのスキーマにあっても読めない）。PostgreSQL と SQLite 以外の方言は表を検査できないので実行しない。拒否は `path_not_permitted`。
-- **患者の範囲**: SQL は、アプリでは患者に絞らない。`:patient_id` で絞る形を要求せず、設計者が書いた SQL が `WHERE` を省けば、読める表の全患者の行を返しうる。SQL の構造を読んで絞り込みを保証することはしない（すり抜けを閉じ切れない）。境界は DB 側で、上の「読める表」の制限と、行レベルセキュリティ（PostgreSQL の RLS をトランザクションごとの患者設定で絞る。今後の対応）に置く（`docs/DEPLOYMENT.md`）。プランに書かれた `unit_id` は、どの op でも免除の根拠にしない。
+- **患者の範囲**: SQL は、アプリでは患者に絞らない。`:patient_id` で絞る形を要求せず、設計者が書いた SQL が `WHERE` を省けば、読める表の全患者の行を返しうる。SQL の構造を読んで絞り込みを保証することはしない（すり抜けを閉じ切れない）。**患者の範囲を DB 側で保証するのは運用者の責任**で、最小権限の読み取り専用アカウント（必要な表・ビューにだけ `GRANT`）、患者ごとに絞るビュー、または行レベルセキュリティ（PostgreSQL の RLS の例は `docs/DEPLOYMENT.md`）を整える。設計者による SQL 計画の自己確定と、実患者を含む DB への試行実行は、その整備なしには避ける。アプリが保証するのは、上の「読める表」の制限（アプリ自身の表とカタログ）だけである。プランに書かれた `unit_id` は、どの op でも免除の根拠にしない。
 - **バインド**: SQL に現れる `:name` は params か組み込みパラメータで解決する。`:patient_id` は SQL に書かれていなくても常に渡される。
 - **患者キー**: `key_type` が無ければ登録番号（anchor）をそのまま `:patient_id` にバインドする（§7）。
 - **失敗**: SELECT 限定違反、パラメータの解決やサニタイズの失敗は `unclassified`。読めない表は `path_not_permitted`。0行は `not_found_for_patient`。例外は `classify_exception` で分類する。
@@ -589,10 +589,12 @@ FHIR サーバから取得する。
 - **患者の範囲**: `sql_extract` と同じく、SQL を患者に絞ることはアプリでは確かめない（§5.1）。外部 DB の表はアカウントの権限が決めるので、表の限定も掛けない。
 
 - **意味**: `connection_id`（空なら旧名 `connection`）で DSN を解決し、`sql_extract` と同じ展開、再検査、バインドで実行する。
-- **読み取り専用**: コードは外部 DB の接続を読み取り専用にせず、文の実行時間の上限も掛けない。安全の境界は接続のアカウントの権限であり、運用で次を満たさなければならない（[DEPLOYMENT.md](DEPLOYMENT.md) の「外部DBの接続アカウント（connections.yaml）」）。
+- **使える接続**: `connection_id` が指す登録項目は `kind: db` かつ `scope: external` でなければならない。fhir・file の接続や `scope: self` の接続は `path_not_permitted` で拒否し、DSN も開かない。
+- **読み取り専用（追加の層）**: 抽出は読み取り専用トランザクションの中で実行し、終了時にロールバックする（PostgreSQL は `READ ONLY` と `statement_timeout`〔`READONLY_STATEMENT_TIMEOUT_SECONDS`〕、SQLite は `query_only`、ほかの方言は `SET TRANSACTION READ ONLY` で、通らなければ失敗する）。ただし安全の境界は接続のアカウントの権限であり、運用で次を満たさなければならない（[DEPLOYMENT.md](DEPLOYMENT.md) の「外部DBの接続アカウント（connections.yaml）」）。
   - 接続のアカウントは読み取り専用にする（書き込み、DDL、関数の作成と実行の権限を与えない）。
   - 参照権限（`SELECT`）は抽出に要る表とビューにだけ与える。読み取り専用のアカウントでも、与えられた表はすべて読める（たとえば `UNION` による別の表の読み足しは、文字列検査ではなく権限が止める）。
-  - DB の側で文の実行時間の上限を掛ける（PostgreSQL なら `ALTER ROLE … SET statement_timeout`）。
+  - DB の側でも文の実行時間の上限を掛ける（PostgreSQL なら `ALTER ROLE … SET statement_timeout`）。
+  - 認可された患者の行だけを返す仕組み（患者ごとのビュー、RLS）は、運用者が DB 側に整える（アプリは保証しない。§6.3）。
 
   SELECT 限定の文字列検査（§6.3）は補助の層で、境界ではない。
 - **失敗**: DSN を解決できなければ `source_unavailable`。そのほかは `sql_extract` と同じ。
