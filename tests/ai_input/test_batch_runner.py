@@ -333,3 +333,28 @@ async def test_run_batch_job_rejects_values_that_do_not_fit_the_answer_type(
         ).scalar_one()
     assert ex.prefill_data == {}
     assert ex.evidence["d"]["failure_code"] == FailureCode.ANSWER_TYPE_MISMATCH
+
+
+async def test_run_batch_job_per_target_error_summary_is_structural(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """1 件ごとの失敗の `error_summary` は、ドライバ風の文面（DETAIL・行の値）を含まない。"""
+    job_id = await _seed(db_session, patients=["p1"], plan_link_ids=["a"])
+    monkeypatch.setattr(batch_mod, "AsyncSessionLocal", TestSessionLocal)
+    monkeypatch.setattr(
+        batch_mod,
+        "DSLInterpreter",
+        _fake_interpreter(
+            raise_exc=RuntimeError("DETAIL:  Key (email)=(phi@example.org) already exists.")
+        ),
+    )
+
+    await batch_mod.run_batch_job(job_id)
+
+    async with TestSessionLocal() as v:
+        ex = (
+            await v.execute(select(InputExecution).where(InputExecution.batch_job_id == job_id))
+        ).scalar_one()
+    assert ex.status == ExecutionStatus.FAILED
+    assert ex.error_summary == "RuntimeError"
+    assert "phi@example.org" not in (ex.error_summary or "")

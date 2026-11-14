@@ -8,7 +8,7 @@
 - 例外の型名
 - SQLSTATE / ドライバのエラーコード（`23505` など）
 - ドライバが構造化して持つ**名前**（制約名・列名・表名・スキーマ名。値ではない）
-- HTTP クライアントの例外は、接続先の host（userinfo・クエリは落とす）
+- HTTP クライアントの例外は、接続先の scheme・host・port（userinfo・path・クエリは落とす）
 - **こちらで文面を書いた例外**（`kawasemi_authored = True` を持つ型）は、その文面
 
 第三者の例外（ドライバ・httpx・標準ライブラリ）の `str(e)` は出さない。分類（`classify_exception`）は
@@ -84,7 +84,11 @@ def _sqlite_name(chain: list[BaseException]) -> str | None:
 
 
 def _http_target(e: BaseException) -> str | None:
-    """httpx の例外から、接続先（scheme://host:port/path）を取る。無ければ None。"""
+    """httpx の例外から、接続先（scheme://host:port。path は含めない）を取る。無ければ None。
+
+    path は含めない: FHIR の読み取りの path には `/Patient/<id>` のように患者 ID が入り、
+    evidence・`error_summary`（管理者が読むバッチの要約）にまで残ってしまうため。
+    """
     try:
         request = getattr(e, "request", None)
     except RuntimeError:  # httpx: request が未設定の例外
@@ -93,7 +97,7 @@ def _http_target(e: BaseException) -> str | None:
     if url is None:
         return None
     try:
-        return display_url(f"{url.scheme}://{url.netloc.decode('ascii', 'replace')}{url.path}")
+        return display_url(f"{url.scheme}://{url.netloc.decode('ascii', 'replace')}")
     except Exception:
         return None
 
@@ -118,19 +122,34 @@ def safe_message(e: BaseException) -> str:
     こちらが書いた例外はその文面（URL の userinfo だけ落とす）、第三者の例外は `summarize_exception` の
     構造化した要約。
     """
-    if is_authored(e):
-        msg = strip_userinfo(str(e))
-        if len(msg) > _MAX_AUTHORED_LEN:
-            msg = msg[:_MAX_AUTHORED_LEN] + "…"
-        return msg or type(e).__name__
-    return summarize_exception(e)
+    try:
+        if is_authored(e):
+            msg = strip_userinfo(str(e))
+            if len(msg) > _MAX_AUTHORED_LEN:
+                msg = msg[:_MAX_AUTHORED_LEN] + "…"
+            return msg or type(e).__name__
+        return summarize_exception(e)
+    except Exception:  # noqa: BLE001  # 例外の文面を作る処理が、さらに例外を投げない
+        return type(e).__name__
 
 
 def summarize_exception(e: BaseException) -> str:
     """evidence・DB・API・SSE へ出す、例外の要約（型名＋構造化した安全な属性）。
 
-    ドライバの文面（DETAIL・行の値・束縛の値）は含めない。
+    ドライバの文面（DETAIL・行の値・束縛の値）は含めない。`except` 節の中から呼ばれるので、
+    属性の取得や `__str__` が例外を投げても（第三者の例外の `diag`・`orig`・`sqlstate` が
+    プロパティで投げる、など）、その例外は外へ出さず、型名だけを返す。
     """
+    try:
+        return _summarize(e)
+    except Exception:  # noqa: BLE001
+        try:
+            return type(e).__name__
+        except Exception:  # noqa: BLE001
+            return "Exception"
+
+
+def _summarize(e: BaseException) -> str:
     # 再試行の包み（`RetriesExhausted`）は、原因を要約する。
     cause = getattr(e, "__cause__", None)
     if type(e).__name__ == "RetriesExhausted" and isinstance(cause, BaseException):

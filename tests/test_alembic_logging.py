@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import io
 import logging
 from collections.abc import Iterator
 from pathlib import Path
@@ -51,8 +52,17 @@ def test_in_process_migration_keeps_the_apps_redaction_handler(
     command.current(_alembic_config())
 
     assert _has_redaction_handler(), "移行を走らせたあと、伏せ字フィルタ付きのハンドラが消えた"
-    # 伏せ字なしのハンドラへ入れ替わっていない
-    logging.getLogger("x").warning("db url https://svc:PWSECRET@h/x [parameters: ('PHI',)]")
+    # 伏せ字なしのハンドラへ入れ替わっていない: 実際にログを出して、伏せ字を確かめる
+    root = logging.getLogger()
+    sink = io.StringIO()
+    probe = logging.StreamHandler(sink)
+    probe.addFilter(PHIRedactionFilter())
+    root.addHandler(probe)
+    try:
+        logging.getLogger("x").warning("db url https://svc:PWSECRET@h/x [parameters: ('PHI',)]")
+    finally:
+        root.removeHandler(probe)
+    assert "PWSECRET" not in sink.getvalue() and "('PHI',)" not in sink.getvalue()
 
 
 def test_without_app_logging_the_alembic_ini_logging_is_still_applied(

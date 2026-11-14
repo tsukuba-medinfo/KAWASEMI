@@ -156,13 +156,15 @@ def test_retries_exhausted_is_summarised_through_its_cause() -> None:
     assert NEEDLE not in out and "sqlstate=40001" in out
 
 
-def test_http_errors_show_status_and_target_without_userinfo_or_query() -> None:
+def test_http_errors_show_status_and_target_without_userinfo_path_or_query() -> None:
     request = httpx.Request(
         "GET", f"https://svc:{NEEDLE}@fhir.example:8443/fhir/Patient?t={NEEDLE}"
     )
     out = summarize_exception(httpx.ConnectError(f"boom {NEEDLE}", request=request))
     assert NEEDLE not in out
-    assert "target=https://fhir.example:8443/fhir/Patient" in out
+    assert "target=https://fhir.example:8443" in out
+    # path（FHIR では `/Patient/<id>` のように患者 ID が入る）は含めない
+    assert "/fhir/Patient" not in out
     response = httpx.Response(503, request=request)
     out2 = summarize_exception(httpx.HTTPStatusError("bad", request=request, response=response))
     assert "status=503" in out2 and NEEDLE not in out2
