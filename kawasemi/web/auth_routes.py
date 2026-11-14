@@ -1,5 +1,6 @@
 """認証関連ルーター"""
 
+import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
@@ -25,7 +26,7 @@ from kawasemi.core.database import get_db
 from kawasemi.core.deps import get_current_user, get_current_user_optional
 from kawasemi.core.entry import current_entry
 from kawasemi.core.logging_config import get_logger
-from kawasemi.core.login_throttle import login_throttle
+from kawasemi.core.login_throttle import account_backoff, login_throttle
 from kawasemi.core.login_throttle import throttle_key as make_throttle_key
 from kawasemi.core.rate_limit import limiter, login_rate_limit
 from kawasemi.core.sessions import revoke_user_sessions
@@ -186,6 +187,25 @@ async def login(
     throttle_key = make_throttle_key(username, get_remote_address(request))
     blocked = login_throttle.is_blocked(throttle_key)
 
+    # アカウント単位の段階的な遅延（IP に依らない。ロックではない）。試行を受けた時点で枠を取り、
+    # 順番が来るまで待つ。待ち行列が長すぎるときは、パスワードを調べずに同じ失敗応答を返す。
+    # ユーザー名が実在するかに依らず同じに数えるので、応答から有効なユーザー名は分からない。
+    backoff_key = throttle_key[0]
+    wait = account_backoff.reserve(
+        backoff_key,
+        free=settings.login_backoff_free_attempts,
+        base=settings.login_backoff_base_seconds,
+        cap=settings.login_backoff_cap_seconds,
+        max_wait=settings.login_backoff_max_wait_seconds,
+    )
+    if wait is None:
+        logger.warning(
+            f"ログイン試行が多すぎるため待たせず失敗にしました: username={username[:64]!r}"
+        )
+        return _error_response(failed_msg)
+    if wait > 0:
+        await asyncio.sleep(wait)
+
     # ユーザーを検索（is_active では絞らず取得する）。NUL バイトを含む名前は PostgreSQL の
     # text に入らず、クエリが例外（500）になる。実在し得ない名前なので、クエリせず「不在」と
     # 同じに扱う（応答は他の失敗と同じ）
@@ -210,9 +230,11 @@ async def login(
     # ダミーハッシュで bcrypt を実行し、応答時間でも区別できないようにする。
     # ブロック中は正しいパスワードでもここで必ず失敗にする（試行は止まる）。
     if user is not None and user.is_active and not user.is_locked() and not blocked:
-        password_ok = verify_password(password, user.password_hash)
+        # bcrypt は CPU を使う同期処理。イベントループ上で走らせると、推測の連打で
+        # 全リクエストが止まるので、スレッドへ出す（ダミーのハッシュも同じ手間をかける）
+        password_ok = await asyncio.to_thread(verify_password, password, user.password_hash)
     else:
-        verify_password(password, _DUMMY_PASSWORD_HASH)
+        await asyncio.to_thread(verify_password, password, _DUMMY_PASSWORD_HASH)
         password_ok = False
 
     if not password_ok:
@@ -250,6 +272,7 @@ async def login(
 
     # 認証成功 → この (ユーザー名, IP) の失敗を忘れる。旧方式の失敗カウントも戻す
     login_throttle.reset(throttle_key)
+    account_backoff.reset(backoff_key)
     if user.failed_login_count or user.locked_until is not None:
         user.reset_lockout()
         await db.commit()

@@ -149,6 +149,29 @@ class Settings(BaseSettings):
         default=30, description="ブロックの継続時間と失敗を数える窓（分）。経過後は自動解除"
     )
 
+    # アカウント単位の**段階的な遅延**（`core/login_throttle.py::AccountBackoff`）。ロックではない。
+    # 同じユーザー名への試行を、送信元 IP に関わらず直列に並べる。最初の
+    # login_backoff_free_attempts 回は遅延なし、それ以降は試行の間隔が base 秒から倍々に伸び、
+    # cap 秒で頭打ちになる。待ち行列が max_wait 秒を超えるときだけ、パスワードを調べずに
+    # 同じ失敗応答を返す（正しいパスワードの利用者も、攻撃の最中は待たされる・弾かれる。
+    # 攻撃が止めば窓（15 分）で元に戻る）。ユーザー名が実在するかに依らず同じに数える。
+    # base を 0 にすると遅延を無効にする。
+    login_backoff_free_attempts: int = Field(
+        default=5, ge=0, description="遅延なしで試せる、同じユーザー名への連続試行の回数"
+    )
+    login_backoff_base_seconds: float = Field(
+        default=1.0, ge=0, description="遅延の最初の間隔（秒）。以降は倍々。0 で無効"
+    )
+    login_backoff_cap_seconds: float = Field(
+        default=8.0, ge=0, description="試行の間隔の上限（秒）"
+    )
+    login_backoff_max_wait_seconds: float = Field(
+        default=20.0, ge=0, description="これより長く待たせる試行は、調べずに失敗として返す（秒）"
+    )
+
+    # パスワードの方針（`core/password_policy.py`）。管理画面と CLI の入口で検査する。
+    password_min_length: int = Field(default=12, ge=8, description="パスワードの最小文字数")
+
     # ログ設定
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(
         default="INFO", description="ログレベル"

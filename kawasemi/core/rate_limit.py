@@ -12,14 +12,22 @@ IP 単位のカウンタが2つに割れていた。`app.state.limiter`（429 �
 
 from __future__ import annotations
 
+from fastapi import Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 from kawasemi.core.config import settings
+from kawasemi.core.login_throttle import aggregate_ip
+
+
+def client_key(request: Request) -> str:
+    """レート制限の単位。IPv6 は /64 にまとめる（アドレスを変えるだけで制限を回避させない）。"""
+    return aggregate_ip(get_remote_address(request))
+
 
 # アプリ全体で共有する唯一の Limiter。`api/main.py` が `app.state.limiter` に載せ、
 # 各ルータはここから import して使う（`web/auth_routes.py` など）。
-limiter = Limiter(key_func=get_remote_address)
+limiter = Limiter(key_func=client_key)
 
 
 def login_rate_limit() -> str:

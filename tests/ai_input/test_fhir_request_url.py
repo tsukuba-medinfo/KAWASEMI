@@ -170,7 +170,9 @@ async def test_the_executor_does_not_send_a_request_to_another_host(query: str) 
 async def test_a_host_suffix_query_is_sent_only_to_the_configured_host() -> None:
     _, _, seen = await _run(".evil.example/x?patient={{patient_id}}", "https://fhir.example")
 
-    assert [urlsplit(u).netloc for u in seen] == ["fhir.example"]
+    # 患者の絞りの検査が、リソース型でないパスをこの時点で拒否する（要求は出ない）。出るとしても
+    # 設定のサーバーだけで、ホスト名の後ろに文字列を足して別のホストへ送ることはできない。
+    assert {urlsplit(u).netloc for u in seen} <= {"fhir.example"}
 
 
 @pytest.mark.asyncio

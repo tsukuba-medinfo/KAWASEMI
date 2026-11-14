@@ -11,20 +11,25 @@ from __future__ import annotations
 
 from typing import Any
 
+from kawasemi.ai_input.physical_format import physical_format_errors
+
 
 def apply_physical_format(value: str, fmt: dict[str, Any] | None) -> str:
     """canonical 値に列固有の物理整形を適用する。
 
     対応キー: pad(総桁数・左詰め) / padchar(既定 '0') / prefix / suffix。
-    fmt が None/空ならそのまま返す。
+    fmt が None/空ならそのまま返す。範囲外・未知のキー・型違いは `ValueError`
+    （`physical_format_errors`）。
     """
     if not fmt:
         return value
+    errors = physical_format_errors(fmt)
+    if errors:
+        raise ValueError("; ".join(errors))
     out = value
     pad = fmt.get("pad")
     if pad:
-        padchar = (str(fmt.get("padchar", "0")) or "0")[:1]
-        out = out.rjust(int(pad), padchar)
+        out = out.rjust(pad, fmt.get("padchar") or "0")
     prefix = fmt.get("prefix")
     if prefix:
         out = f"{prefix}{out}"

@@ -416,6 +416,33 @@ def test_path_needs_the_patient_key_as_a_whole_segment(pattern: str, expected: b
         ("/Observation?patient={{patient_id}}&code=a\x00b", False),
         # 値の `%` は普通に使う（符号化したコード体系）
         ("/Observation?code=http%3A%2F%2Floinc.org%7C1234-5&patient={{patient_id}}", True),
+        # 再スキャン F9: 型レベルの操作は `patient` を無視して全患者を返しうる
+        ("/Patient/$everything?patient={{patient_id}}", False),
+        ("/$everything?patient={{patient_id}}", False),
+        ("/Observation/$lastn?patient={{patient_id}}", False),
+        ("/?patient={{patient_id}}", False),
+        ("/Observation/Condition?patient={{patient_id}}", False),
+        # 重複・別名の患者パラメータ（サーバーが最後の値を採る恐れ）
+        ("/Observation?patient={{patient_id}}&patient=OTHER", False),
+        ("/Observation?patient=OTHER&patient={{patient_id}}", False),
+        ("/Observation?patient={{patient_id}}&subject=OTHER", False),
+        ("/Observation?subject={{patient_id}}&patient={{patient_id}}", False),
+        ("/Observation?patient={{patient_id}}&patient:Patient=OTHER", False),
+        ("/Observation?patient={{patient_id}}&subject.identifier=OTHER", False),
+        ("/Observation?patient={{patient_id}}&Patient=OTHER", False),
+        ("/Observation?patient:Patient={{patient_id}}", False),
+        ("/Observation?_id=X&patient={{patient_id}}", False),
+        # 患者の下のパスは、型か $operation だけ（2 区間まで）
+        ("/Patient/{{patient_id}}/Observation?code=x", True),
+        ("/Patient/{{patient_id}}/$everything?_since=2020-01-01", True),
+        ("/Patient/{{patient_id}}/$everything?patient=OTHER", False),
+        ("/Patient/{{patient_id}}/Observation/x/y", False),
+        ("/Patient/{{patient_id}}//Observation", False),
+        ("/Patient/{{patient_id}}/obs", False),
+        # 先頭の `/` は、なくてもよい（索引の規約）
+        ("Observation?patient={{patient_id}}", True),
+        ("Patient/{{patient_id}}/$everything", True),
+        ("subject-less", False),
     ],
 )
 def test_fhir_query_needs_the_patient_param(query: str, expected: bool) -> None:

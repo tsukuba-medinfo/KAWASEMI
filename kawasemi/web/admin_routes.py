@@ -14,6 +14,7 @@ from kawasemi.core.auth import get_password_hash
 from kawasemi.core.database import get_db
 from kawasemi.core.deps import require_roles
 from kawasemi.core.logging_config import get_logger
+from kawasemi.core.password_policy import password_policy_error
 from kawasemi.core.sessions import revoke_user_sessions
 from kawasemi.models.auth_event import AuthEvent, AuthEventAction
 from kawasemi.models.case_assignment import CaseAssignment
@@ -97,6 +98,21 @@ async def create_user(
     # フォームからロールIDを取得
     form_data = await request.form()
     role_ids = [int(str(r)) for r in form_data.getlist("roles")]
+
+    # パスワードの方針（長さ・ありふれた値）。HTML の minlength はサーバーの検査ではない
+    policy_error = password_policy_error(password, username=username)
+    if policy_error:
+        return templates.TemplateResponse(
+            "admin/user_edit.html",
+            {
+                "request": request,
+                "current_user": current_user,
+                "user": None,
+                "roles": roles,
+                "user_role_ids": role_ids,
+                "error": policy_error,
+            },
+        )
 
     # 重複チェック
     result = await db.execute(select(User).where(User.username == username))
@@ -222,6 +238,21 @@ async def update_user(
     # フォームからロールIDを取得
     form_data = await request.form()
     role_ids = [int(str(r)) for r in form_data.getlist("roles")]
+
+    # パスワードを変えるときだけ、方針を検査する（空欄は「変更しない」）
+    policy_error = password_policy_error(password, username=username) if password else None
+    if policy_error:
+        return templates.TemplateResponse(
+            "admin/user_edit.html",
+            {
+                "request": request,
+                "current_user": current_user,
+                "user": user,
+                "roles": roles,
+                "user_role_ids": role_ids,
+                "error": policy_error,
+            },
+        )
 
     # 重複チェック（自分以外）
     result = await db.execute(select(User).where(User.username == username, User.id != user_id))

@@ -32,7 +32,12 @@ from kawasemi.ai_input.citation_metrics import citation_coverage
 from kawasemi.ai_input.clinical_drafter import AIClinicalDrafter
 from kawasemi.ai_input.compiler import AIPlanCompiler
 from kawasemi.ai_input.design_provenance import DesignLlmRecorder, save_design_llm_calls_safely
-from kawasemi.ai_input.dsl import has_needs_input, is_empty_program, validate_program
+from kawasemi.ai_input.dsl import (
+    MAX_STEPS,
+    has_needs_input,
+    is_empty_program,
+    validate_program,
+)
 from kawasemi.ai_input.executor import DSLInterpreter, program_snapshot, utc_isoformat
 from kawasemi.ai_input.labels import STAGES
 from kawasemi.ai_input.llm_provider import design_llm_model
@@ -3924,6 +3929,13 @@ async def plan_graph(
     通すのはロールと CSRF の関門である。
     """
     await csrf_protect.validate_csrf(request)
+    # 図の組み立ては同期処理なので、step 数に上限を置く（保存時の validate_program と同じ値）。
+    # 上限なしだと、巨大な program 1つの POST でワーカーのイベントループが止まる。
+    if len(payload.program.steps) > MAX_STEPS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"step 数が上限（{MAX_STEPS}）を超えています: {len(payload.program.steps)}",
+        )
     await _get_questionnaire_or_404(questionnaire_id, db)
     return JSONResponse({"mermaid": program_to_mermaid(_program_dump(payload.program))})
 

@@ -568,7 +568,7 @@ LLM op の入力が使えるかの判定（§8.4）は、これに加えて空�
 
 FHIR サーバから取得する。
 
-- **患者の範囲**: `fhir_query` の検索パラメータ `patient` / `subject`（名前は大文字小文字のとおり）の値がちょうど `{{patient_id}}`（組み込みのみ。前段 step の出力が値のパラメータは患者キーの代わりにならない）であるか、パスが `/Patient/{{patient_id}}` で始まること。`#`、空白、制御文字、パスの `%`、`..` の区間、検索パラメータ名の `%` や空白、`_include` / `_revinclude` / `_has` / `_filter` / `_query` を含むクエリは満たさない（名前・値の前後の空白は落とさない）。満たさなければ FHIR サーバへ出さず `path_not_permitted` にする。`unit_id` による免除はない。
+- **患者の範囲**: `fhir_query` は次の2つの形だけを認める。(1) パスがリソース型1つで、検索パラメータ `patient` / `subject`（名前は大文字小文字のとおり）が**ちょうど1つ**あり、値がちょうど `{{patient_id}}`（組み込みのみ。前段 step の出力が値のパラメータは患者キーの代わりにならない）。(2) パスが `/Patient/{{patient_id}}` で始まり、続くパスがリソース型か `$operation`（`/Patient/{{patient_id}}/$everything`）。型レベルの `$operation`（`/Patient/$everything?patient=...` は `patient` を無視して全患者を返しうる）、`patient` / `subject` 系のパラメータの重複や修飾付き（`patient:Patient=`、`subject.identifier=`）、`_id` は満たさない。`#`、空白、制御文字、パスの `%`、`..` の区間、検索パラメータ名の `%` や空白、`_include` / `_revinclude` / `_has` / `_filter` / `_query` を含むクエリは満たさない（名前・値の前後の空白は落とさない）。満たさなければ FHIR サーバへ出さず `path_not_permitted` にする。`unit_id` による免除はない。
 
 - **意味**: `fhir_query` の `{{name}}` を展開し（§6.3）、FHIR クライアントのベース URL に連結して GET する（先頭の `/` が無ければ補う。`//` で始まる・バックスラッシュ・スキームやユーザー情報に見える先頭・設定したサーバーと別のホストを指す URL、空白・制御文字、`.` / `..` の区間、符号化した `.` `/` `\` を含むパスは、要求を出さず `path_not_permitted` にする。ベース URL 自身の `user:pw@` は許し、クエリが持ち込んだものは拒否する）。応答が Bundle なら各 entry の resource を、そうでなければ応答そのものを1件として扱う。`fhir_path` があれば各 resource に当て、無ければ resource 全体を値とする。`multi` で先頭1件かリストかを選ぶ。
 - **キャッシュ**: 展開後のクエリ文字列が同じなら、1回の実行（1被験者分の全プラン）の中で応答を使い回す。
@@ -834,7 +834,7 @@ SQL を構文解析せず、2つの方言の字句の規則と語の一覧に頼
 - `key_type` が無い: 実行要求の登録番号（anchor。設定 `KEY_RESOLVER_ANCHOR`、既定 `trial_subject_no`）をそのまま使う。
 - `key_type` がある: 実行の前に、全プランの全 step が宣言した `key_type` を集めて resolver で一括解決しておく（§8.1）。その名前空間の値が見つかれば `physical_format` で整形してバインドする。見つからなければ、その step は外部にアクセスせず `key_resolution_failed` で失敗する。
 
-`physical_format` の鍵は `pad`（総桁数まで左を詰める）、`padchar`（既定 `0`）、`prefix`、`suffix` で、この順に適用する。
+`physical_format` の鍵は `pad`（総桁数まで左を詰める）、`padchar`（既定 `0`）、`prefix`、`suffix` で、この順に適用する。値の範囲は `pad` が 0〜64 の整数、`padchar` が1文字、`prefix` / `suffix` が64文字まで。これ以外の鍵・型・範囲は、保存時（`validate_program`）に拒否し、適用時にも拒否する（巨大な `pad` でワーカーのメモリを使い切らせないため）。
 
 `key_type` の値は `key_types.yaml` のカタログ ID（例 `mrn`、`fhir_patient_id`）である。
 詳細は [key_resolution_guide.md](key_resolution_guide.md)。
@@ -1036,6 +1036,7 @@ LLM サーバに到達できない、タイムアウトしたなど、呼び出�
   - `{{name}}`（と `sql` の `:name`）が組み込みでも宣言済み params でもなければエラー。
   - 宣言済み params の値が `"$id"` なら、その参照が自 step でも後方でもないこと。
   - `{{name}}` として差し込む params の値が `"$id"` で、`allowed` が無ければエラー（§6.2）。
+- **V-19** `physical_format` が書かれていて（`null` は書かれていないとみなす）、辞書でない、鍵が `pad` / `padchar` / `prefix` / `suffix` 以外、`pad` が 0〜64 の整数でない、`padchar` が1文字の文字列でない、`prefix` / `suffix` が64文字までの文字列でなければエラー（`needs_input` に関わらず。巨大な `pad` でワーカーのメモリを使い切らせないため。適用時にも同じ規則で拒否する）。
 
 検査の多くは `needs_input` に関わらず走る。
 `needs_input` が免除するのは V-08 と V-09 だけで、書きかけの内容が実行時に必ず拒否されるものであれば、下書きの保存も拒否される。
@@ -1112,8 +1113,11 @@ V-18 {}: SQLへの {{{}}} 展開はできません（組み込みパラメータ
 V-18 {}: SQLへの {{{}}} 展開は kind=identifier のパラメータのみ許可されます（値の差し込みは :name バインドを使う）
 V-18 {}: {} が未宣言のパラメータを参照しています: {}（program.params に宣言してください）
 V-18 {}: {} へ差し込む {} は前段 step 由来なので allowed（許可値の列挙）が必須です（実行時のデータが読み取り対象を選ぶのを防ぐため）
+V-19 {}: {}
 ```
 <!-- dsl-validation-messages:end -->
+
+`V-19` の2つ目の `{}` は、`physical_format_errors` の指摘（例: `physical_format.pad は 0〜64 の整数にしてください: 8000000000`）。
 
 ### 9.2 検証が呼ばれる場所
 

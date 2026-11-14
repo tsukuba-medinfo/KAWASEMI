@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from kawasemi.core.auth import get_password_hash
 from kawasemi.core.config import settings
+from kawasemi.core.password_policy import password_policy_error
 from kawasemi.models import Base, Role, RoleType, User, UserRole
 
 if TYPE_CHECKING:
@@ -57,6 +58,11 @@ async def create_admin_user(
     full_name: str,
 ) -> None:
     """管理者ユーザーを作成する"""
+    policy_error = password_policy_error(password, username=username)
+    if policy_error:
+        print(f"エラー: {policy_error}")
+        return
+
     session = await get_async_session()
 
     try:
