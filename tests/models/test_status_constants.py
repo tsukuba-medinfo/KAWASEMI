@@ -108,7 +108,7 @@ def test_judgment_and_data_op_vocabularies_are_exactly_these() -> None:
 
 
 def test_verification_action_values() -> None:
-    assert VerificationAction.ALL == ["verified", "rejected", "resubmitted"]
+    assert VerificationAction.ALL == ["verified", "rejected", "resubmitted", "edited"]
 
 
 def test_auth_event_action_values() -> None:

@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from fastapi_csrf_protect import CsrfProtect
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kawasemi.api.v100.questionnaire_responses import build_questionnaire_response_resource
@@ -843,12 +843,12 @@ async def show_response(
             )
 
     # 検証ワークフローの表示・操作可否。
-    # 検証者は、未検証/差戻しの回答を verify/reject できる。ただし自分が提出した回答は
-    # 検証できない（SoD）。検証済は施錠（編集不可）。
+    # 検証者は、未検証/差戻しの回答を verify/reject できる。ただし自分が提出または編集した
+    # 回答は検証できない（SoD。verify/reject と同じ判定）。検証済は施錠（編集不可）。
     can_verify = (
         current_user.active_role == "reviewer"
         and response.verification_status != VerificationStatus.VERIFIED
-        and response.submitted_by_id != current_user.id
+        and not await _touched_response(db, response, current_user.id)
     )
     can_edit = (
         current_user.active_role == "collector"
@@ -955,6 +955,28 @@ async def edit_response(
     )
 
 
+async def _touched_response(
+    db: AsyncSession, response_obj: QuestionnaireResponse, user_id: int
+) -> bool:
+    """職務分離: このユーザーが回答を提出した、または一度でも編集したか。
+
+    提出者だけを見ると、収集者と検証者の役割を兼ねるユーザーが他人の回答を編集してから
+    検証できてしまう。最後の編集者に加え、編集の監査ログに残る全ての編集者も対象にする。
+    """
+    if response_obj.submitted_by_id == user_id or response_obj.last_edited_by_id == user_id:
+        return True
+    edited = await db.execute(
+        select(ResponseVerificationLog.id)
+        .where(
+            ResponseVerificationLog.questionnaire_response_id == response_obj.id,
+            ResponseVerificationLog.actor_id == user_id,
+            ResponseVerificationLog.action == VerificationAction.EDITED,
+        )
+        .limit(1)
+    )
+    return edited.first() is not None
+
+
 @router.post("/responses/{response_id}/edit", response_class=HTMLResponse)
 async def update_response(
     request: Request,
@@ -965,8 +987,12 @@ async def update_response(
 ) -> Response:
     """QuestionnaireResponse更新処理"""
     await csrf_protect.validate_csrf(request)
+    # 行ロックで読む（PostgreSQL）。検証者の検証と編集が競合しても、施錠の確認と書き込みの間に
+    # 検証が割り込まない。ロックの効かない SQLite でも、書き込みは下の条件付き UPDATE が守る。
     result = await db.execute(
-        select(QuestionnaireResponse).where(QuestionnaireResponse.id == response_id)
+        select(QuestionnaireResponse)
+        .where(QuestionnaireResponse.id == response_id)
+        .with_for_update()
     )
     response_obj = result.scalar_one_or_none()
 
@@ -1027,19 +1053,53 @@ async def update_response(
 
         was_rejected = response_obj.verification_status == VerificationStatus.REJECTED
 
-        # データベース更新
-        response_obj.content = resource
-        response_obj.status = metadata.get("status")  # type: ignore[assignment]
-        response_obj.subject = metadata.get("subject")
-        response_obj.author = metadata.get("author")
-        response_obj.authored = metadata.get("authored")
-
+        loaded_status = response_obj.verification_status
+        loaded_version = response_obj.edit_version
+        values: dict[str, Any] = {
+            "edit_version": QuestionnaireResponse.edit_version + 1,
+            "content": resource,
+            "status": metadata.get("status"),
+            "subject": metadata.get("subject"),
+            "author": metadata.get("author"),
+            "authored": metadata.get("authored"),
+            "last_edited_by_id": current_user.id,
+        }
         # 差戻し後の再編集は「再提出」: 未検証へ戻し、FHIR status を amended にして
         # 検証サイクルをやり直す。監査ログに resubmitted を追記。
         if was_rejected:
-            response_obj.verification_status = VerificationStatus.UNVERIFIED
-            response_obj.rejection_reason = None
-            response_obj.status = "amended"
+            values["verification_status"] = VerificationStatus.UNVERIFIED
+            values["rejection_reason"] = None
+            values["status"] = "amended"
+
+        # 読んだ時点の状態・版のままであることを書き込みの条件にする（確認と書き込みを
+        # 原子的にする）。検証・差戻し・別の編集が割り込んでいれば 0 行になり、書き込まない。
+        # 状態が「検証済みでない」だけだと、差戻しの割り込み（was_rejected の判定がずれる）や
+        # 別の編集の上書きを許してしまう。
+        written = await db.execute(
+            update(QuestionnaireResponse)
+            .where(
+                QuestionnaireResponse.id == response_obj.id,
+                QuestionnaireResponse.verification_status == loaded_status,
+                QuestionnaireResponse.edit_version == loaded_version,
+            )
+            .values(**values)
+            .execution_options(synchronize_session=False)
+        )
+        if written.rowcount != 1:  # type: ignore[attr-defined]
+            await db.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail="回答が検証・差戻し・編集により変わりました。再読み込みしてください",
+            )
+        # 編集は全て監査ログに残す（誰が・いつ編集したか）。
+        db.add(
+            ResponseVerificationLog(
+                questionnaire_response_id=response_obj.id,
+                actor_id=current_user.id,
+                action=VerificationAction.EDITED,
+            )
+        )
+        if was_rejected:
             db.add(
                 ResponseVerificationLog(
                     questionnaire_response_id=response_obj.id,
@@ -1057,6 +1117,8 @@ async def update_response(
             status_code=303,
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"QuestionnaireResponse更新エラー: {e}")
 
@@ -1097,23 +1159,44 @@ async def verify_response(
     await csrf_protect.validate_csrf(request)
     response_obj = (
         await db.execute(
-            select(QuestionnaireResponse).where(QuestionnaireResponse.id == response_id)
+            select(QuestionnaireResponse)
+            .where(QuestionnaireResponse.id == response_id)
+            .with_for_update()
         )
     ).scalar_one_or_none()
     if not response_obj:
         raise QuestionnaireResponseNotFoundException(response_id)
 
-    if response_obj.submitted_by_id == current_user.id:
+    if await _touched_response(db, response_obj, current_user.id):
         raise HTTPException(
-            status_code=403, detail="自分が提出した回答は検証できません（職務分離）"
+            status_code=403,
+            detail="自分が提出または編集した回答は検証できません（職務分離）",
         )
     if response_obj.verification_status == VerificationStatus.VERIFIED:
         raise HTTPException(status_code=400, detail="既に検証済みです")
 
-    response_obj.verification_status = VerificationStatus.VERIFIED
-    response_obj.verified_by_id = current_user.id
-    response_obj.verified_at = datetime.now(UTC)
-    response_obj.rejection_reason = None
+    # 読んだ時点の状態・版のままであることを書き込みの条件にする（割り込む編集・検証を弾く）。
+    # 状態が変わらない編集（版だけ進む）も、版の条件で弾く。
+    written = await db.execute(
+        update(QuestionnaireResponse)
+        .where(
+            QuestionnaireResponse.id == response_obj.id,
+            QuestionnaireResponse.verification_status == response_obj.verification_status,
+            QuestionnaireResponse.edit_version == response_obj.edit_version,
+        )
+        .values(
+            verification_status=VerificationStatus.VERIFIED,
+            verified_by_id=current_user.id,
+            verified_at=datetime.now(UTC),
+            rejection_reason=None,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    if written.rowcount != 1:  # type: ignore[attr-defined]
+        await db.rollback()
+        raise HTTPException(
+            status_code=409, detail="回答の状態が変わりました。再読み込みしてください"
+        )
     db.add(
         ResponseVerificationLog(
             questionnaire_response_id=response_obj.id,
@@ -1141,15 +1224,18 @@ async def reject_response(
     await csrf_protect.validate_csrf(request)
     response_obj = (
         await db.execute(
-            select(QuestionnaireResponse).where(QuestionnaireResponse.id == response_id)
+            select(QuestionnaireResponse)
+            .where(QuestionnaireResponse.id == response_id)
+            .with_for_update()
         )
     ).scalar_one_or_none()
     if not response_obj:
         raise QuestionnaireResponseNotFoundException(response_id)
 
-    if response_obj.submitted_by_id == current_user.id:
+    if await _touched_response(db, response_obj, current_user.id):
         raise HTTPException(
-            status_code=403, detail="自分が提出した回答は検証できません（職務分離）"
+            status_code=403,
+            detail="自分が提出または編集した回答は検証できません（職務分離）",
         )
     if response_obj.verification_status == VerificationStatus.VERIFIED:
         raise HTTPException(status_code=400, detail="検証済みの回答は差戻しできません")
@@ -1159,10 +1245,26 @@ async def reject_response(
     if not reason:
         raise HTTPException(status_code=400, detail="差戻し理由を入力してください")
 
-    response_obj.verification_status = VerificationStatus.REJECTED
-    response_obj.rejection_reason = reason
-    response_obj.verified_by_id = None
-    response_obj.verified_at = None
+    written = await db.execute(
+        update(QuestionnaireResponse)
+        .where(
+            QuestionnaireResponse.id == response_obj.id,
+            QuestionnaireResponse.verification_status == response_obj.verification_status,
+            QuestionnaireResponse.edit_version == response_obj.edit_version,
+        )
+        .values(
+            verification_status=VerificationStatus.REJECTED,
+            rejection_reason=reason,
+            verified_by_id=None,
+            verified_at=None,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    if written.rowcount != 1:  # type: ignore[attr-defined]
+        await db.rollback()
+        raise HTTPException(
+            status_code=409, detail="回答の状態が変わりました。再読み込みしてください"
+        )
     db.add(
         ResponseVerificationLog(
             questionnaire_response_id=response_obj.id,
