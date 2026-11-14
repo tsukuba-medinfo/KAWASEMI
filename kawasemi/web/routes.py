@@ -29,7 +29,7 @@ from kawasemi.core.lease import (
     require_leased_target,
     valid_lease_clause,
 )
-from kawasemi.core.logging_config import get_logger
+from kawasemi.core.logging_config import get_logger, redact_exception_text
 from kawasemi.models.input_target import InputTarget
 from kawasemi.models.questionnaire import Questionnaire
 from kawasemi.models.questionnaire_response import (
@@ -300,7 +300,7 @@ async def create_questionnaire(
             {
                 "request": request,
                 "questionnaire": None,
-                "error": f"登録に失敗しました: {e}",
+                "error": redact_exception_text(f"登録に失敗しました: {e}"),
             },
         )
 
@@ -422,7 +422,7 @@ async def update_questionnaire(
             {
                 "request": request,
                 "questionnaire": questionnaire,
-                "error": f"更新に失敗しました: {e}",
+                "error": redact_exception_text(f"更新に失敗しました: {e}"),
             },
         )
 
@@ -1148,7 +1148,7 @@ async def update_response(
                 "response": response_obj,
                 "questionnaire": questionnaire,
                 "fields": fields,
-                "error": f"更新に失敗しました: {e}",
+                "error": redact_exception_text(f"更新に失敗しました: {e}"),
             },
         )
 

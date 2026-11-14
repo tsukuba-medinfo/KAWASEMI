@@ -1,6 +1,7 @@
 """Alembic マイグレーション環境設定（非同期対応）"""
 
 import asyncio
+import logging
 from logging.config import fileConfig
 
 from sqlalchemy import pool
@@ -13,7 +14,11 @@ from alembic import context
 config = context.config
 
 # ロギング設定
-if config.config_file_name is not None:
+# アプリが先にロギングを設定済み（ルートにハンドラがある）なら、設定しなおさない。fileConfig は
+# ルートのハンドラを入れ替えるので、プロセス内で移行を走らせると、アプリの伏せ字フィルタ
+# （PHIRedactionFilter）付きのハンドラが消え、以後のログが伏せ字なしで出てしまう。
+# alembic CLI の単独起動（ルートにハンドラが無い）では、従来どおり alembic.ini で設定する。
+if config.config_file_name is not None and not logging.getLogger().handlers:
     # アプリやテストが先に作ったロガーを無効化しない（既定の True だと、プロセス内で
     # 移行を走らせたあとにそれらのログが消える）
     fileConfig(config.config_file_name, disable_existing_loggers=False)
@@ -74,6 +79,8 @@ async def run_async_migrations() -> None:
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        # 例外の文字列に束縛値（PHI・資格情報）を入れない
+        hide_parameters=True,
     )
 
     async with connectable.connect() as connection:

@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 
 import httpx
 import pytest
@@ -20,6 +20,45 @@ from kawasemi.utils.fhir_client import FHIRClient, redact_url
 
 _SECRET = "svc:s3cr3t-pw"
 _BASE = f"https://{_SECRET}@fhir.example/fhir"
+
+
+class _Logs:
+    """PHIRedactionFilter 付きの専用ハンドラで集めたログ文面。
+
+    `caplog.text` は、ルートのハンドラの順序（アプリのコンソールハンドラのフィルタが先に
+    レコードを書き換えるか）やロギングの状態（プロセス内で動かした alembic の fileConfig が
+    ハンドラを入れ替える）に結果が左右される。ここでは、フィルタを自分で付けたハンドラだけを
+    見て、実際にフィルタを通ったあとの文面を確かめる。
+    """
+
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+
+    @property
+    def text(self) -> str:
+        return "\n".join(self.lines)
+
+
+@pytest.fixture
+def logs() -> Iterator[_Logs]:
+    sink = _Logs()
+
+    class _Handler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            sink.lines.append(self.format(record))
+
+    handler = _Handler(logging.DEBUG)
+    handler.setFormatter(logging.Formatter("%(name)s %(levelname)s %(message)s"))
+    handler.addFilter(PHIRedactionFilter())
+    root = logging.getLogger()
+    old_level = root.level
+    root.addHandler(handler)
+    root.setLevel(logging.DEBUG)
+    try:
+        yield sink
+    finally:
+        root.removeHandler(handler)
+        root.setLevel(old_level)
 
 
 def _client_with(handler: Callable[[httpx.Request], httpx.Response]) -> FHIRClient:
@@ -43,8 +82,8 @@ def patched_httpx(
     return install
 
 
-def _everything(caplog: pytest.LogCaptureFixture, exc: FHIRServerException) -> str:
-    return caplog.text + exc.message + repr(exc.details) + str(exc)
+def _everything(logs: _Logs, exc: FHIRServerException) -> str:
+    return logs.text + exc.message + repr(exc.details) + str(exc)
 
 
 async def _fail(client: FHIRClient) -> FHIRServerException:
@@ -66,54 +105,50 @@ def test_redact_url_helper() -> None:
 async def test_http_status_errors_do_not_leak_userinfo(
     status: int,
     patched_httpx: Callable[..., None],
-    caplog: pytest.LogCaptureFixture,
+    logs: _Logs,
 ) -> None:
     patched_httpx(lambda request: httpx.Response(status))
-    caplog.set_level(logging.DEBUG)
     exc = await _fail(_client_with(lambda r: httpx.Response(status)))
-    shown = _everything(caplog, exc)
+    shown = _everything(logs, exc)
     assert "s3cr3t-pw" not in shown and "svc:" not in shown
     assert "fhir.example" in str(exc.details["url"])  # 表示用の URL は残る
 
 
 @pytest.mark.asyncio
 async def test_connection_failure_does_not_leak_userinfo(
-    patched_httpx: Callable[..., None], caplog: pytest.LogCaptureFixture
+    patched_httpx: Callable[..., None], logs: _Logs
 ) -> None:
     def boom(request: httpx.Request) -> httpx.Response:
         # httpx の例外文字列に URL（userinfo つき）が入る場合を再現する
         raise httpx.ConnectError(f"connect failed for {_BASE}/Patient/P1", request=request)
 
     patched_httpx(boom)
-    caplog.set_level(logging.DEBUG)
     exc = await _fail(_client_with(boom))
-    assert "s3cr3t-pw" not in _everything(caplog, exc)
+    assert "s3cr3t-pw" not in _everything(logs, exc)
 
 
 @pytest.mark.asyncio
 async def test_timeout_does_not_leak_userinfo(
-    patched_httpx: Callable[..., None], caplog: pytest.LogCaptureFixture
+    patched_httpx: Callable[..., None], logs: _Logs
 ) -> None:
     def slow(request: httpx.Request) -> httpx.Response:
         raise httpx.ReadTimeout(f"timed out: {_BASE}/Patient/P1", request=request)
 
     patched_httpx(slow)
-    caplog.set_level(logging.DEBUG)
     exc = await _fail(_client_with(slow))
-    assert "s3cr3t-pw" not in _everything(caplog, exc)
+    assert "s3cr3t-pw" not in _everything(logs, exc)
 
 
 @pytest.mark.asyncio
 async def test_bad_json_does_not_leak_userinfo(
-    patched_httpx: Callable[..., None], caplog: pytest.LogCaptureFixture
+    patched_httpx: Callable[..., None], logs: _Logs
 ) -> None:
     def bad(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=b"<html>not json</html>")
 
     patched_httpx(bad)
-    caplog.set_level(logging.DEBUG)
     exc = await _fail(_client_with(bad))
-    assert "s3cr3t-pw" not in _everything(caplog, exc)
+    assert "s3cr3t-pw" not in _everything(logs, exc)
 
 
 def test_log_filter_masks_userinfo_in_any_log_message() -> None:
@@ -125,3 +160,26 @@ def test_log_filter_masks_userinfo_in_any_log_message() -> None:
     f.filter(record)
     assert "s3cr3t-pw" not in record.getMessage()
     assert "fhir.example/fhir/Patient/P1" in record.getMessage()
+
+
+def test_redact_url_masks_query_secrets_and_scheme_less_userinfo() -> None:
+    assert redact_url("https://h.example/fhir/Patient/1?access_token=TKN") == (
+        "https://h.example/fhir/Patient/1?access_token=***REDACTED***"
+    )
+    assert redact_url("Patient/1?api_key=K&_count=2") == "Patient/1?api_key=***REDACTED***&_count=2"
+    assert redact_url("user:pw@h.example/fhir") == "h.example/fhir"
+    assert redact_url("//user:pw@h.example/fhir") == "h.example/fhir"
+    url = "https://example.com:8080?email=a@b.com"
+    assert redact_url(url) == url  # userinfo の無い URL は崩さない
+
+
+@pytest.mark.asyncio
+async def test_query_token_in_the_base_url_does_not_reach_the_api_details(
+    patched_httpx: Callable[..., None], logs: _Logs
+) -> None:
+    """例外の details は API の応答に載る。クエリの秘匿値（`?access_token=`）も出さない。"""
+    patched_httpx(lambda request: httpx.Response(500))
+    client = FHIRClient(base_url="https://fhir.example/fhir?access_token=QTOKEN", auth_mode="none")
+    exc = await _fail(client)
+    assert "QTOKEN" not in repr(exc.details) + exc.message + logs.text
+    assert "fhir.example" in str(exc.details["url"])

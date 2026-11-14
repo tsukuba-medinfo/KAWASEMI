@@ -174,7 +174,7 @@ jobs:
           KAWASEMI_TEST_POSTGRES_URL: postgresql+asyncpg://kawasemi:kawasemi@localhost:5432/kawasemi
         run: |
           uv sync --extra dev
-          uv run pytest tests/ai_input/test_program_sql_readonly_postgres.py tests/ai_input/test_external_db_postgres.py -v --tb=short -rs
+          uv run pytest tests/ai_input/test_program_sql_readonly_postgres.py tests/ai_input/test_external_db_postgres.py tests/ai_input/test_exception_text_postgres.py -v --tb=short -rs
 
       # 取得プラン・手順書の保存の同時実行（行ロック・楽観的排他・同時の新規作成）と、
       # AI 生成（compile / recompile）の途中で確認された行を上書きしないこと。

@@ -1,7 +1,6 @@
 """FHIRサーバクライアント"""
 
 import base64
-import re
 import urllib.parse
 from typing import Any, cast
 
@@ -9,18 +8,19 @@ import httpx
 
 from kawasemi.core.config import settings
 from kawasemi.core.exceptions import FHIRServerException
-from kawasemi.core.logging_config import get_logger
+from kawasemi.core.logging_config import get_logger, redact_urls
 
 logger = get_logger(__name__)
 
-# `scheme://user:pw@host` の userinfo。httpx の例外文字列や、運用者が URL に直接埋め込んだ
-# 資格情報が、ログと例外の details に出ないように取り除く。
-_USERINFO = re.compile(r"(?i)\b([a-z][a-z0-9+.\-]*://)[^/\s]*@")
-
 
 def redact_url(text: str) -> str:
-    """URL（またはそれを含む文字列）から userinfo（`user:pw@`）を取り除く。"""
-    return _USERINFO.sub(r"\1", text)
+    """URL（またはそれを含む文字列）から資格情報を取り除く。
+
+    取り除くもの: `scheme://user:pw@host` の userinfo（スキームなしの `user:pw@host`、
+    `//user:pw@host` も）と、クエリ文字列の秘匿値（`access_token=` `api_key=` など）。
+    ログと、API の応答に返す例外の details に使う。
+    """
+    return redact_urls(text, whole_url=True)
 
 
 class FHIRClient:

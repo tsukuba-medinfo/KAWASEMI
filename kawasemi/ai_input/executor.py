@@ -61,7 +61,7 @@ from kawasemi.ai_input.models import FailureCode, InputPlan, OpType
 from kawasemi.ai_input.resource_index.connections import get_registry
 from kawasemi.core.config import settings
 from kawasemi.core.exceptions import FHIRServerException
-from kawasemi.core.logging_config import get_logger
+from kawasemi.core.logging_config import get_logger, redact_exception_text
 from kawasemi.core.readonly_db import (
     ProgramSqlDeniedError,
     ReadOnlySessionUnavailableError,
@@ -75,8 +75,8 @@ from kawasemi.utils.fhir_client import FHIRClient
 logger = get_logger(__name__)
 
 
-def _exc_msg(e: BaseException) -> str:
-    """例外を非空のメッセージへ整形する。
+def _raw_exc_msg(e: BaseException) -> str:
+    """例外を非空のメッセージへ整形する（伏せ処理なし。分類の照合専用で、外へ出さない）。
 
     httpx.ReadTimeout など一部の例外は ``str(e)`` が空文字列になり、evidence の
     error やログが無言になって原因究明が困難になる。メッセージが空な
@@ -86,6 +86,16 @@ def _exc_msg(e: BaseException) -> str:
     if msg:
         return f"{type(e).__name__}: {msg}"
     return type(e).__name__
+
+
+def _exc_msg(e: BaseException) -> str:
+    """evidence・trace・DB・API の応答・ログへ出す例外の文面（秘匿値・PHI を伏せたもの）。
+
+    ドライバの例外は、行や束縛の値（`DETAIL: Key (col)=(value)`、`invalid input for query
+    argument $1: 'value'` など）や URL の資格情報を文面に載せうる。ベストエフォートで伏せ、
+    エラーの種類・列名は残す。珍しい文面まで保証するものではなく、境界は DB ロールの権限である。
+    """
+    return redact_exception_text(_raw_exc_msg(e))
 
 
 # 例外メッセージから FailureCode を推定するパターン。
@@ -136,7 +146,7 @@ def classify_exception(e: BaseException, default: str = FailureCode.UNCLASSIFIED
         return FailureCode.TIMEOUT
     if isinstance(e, ConnectionError):
         return FailureCode.SOURCE_UNAVAILABLE
-    msg = _exc_msg(e).lower()
+    msg = _raw_exc_msg(e).lower()
     if any(p in msg for p in _TIMEOUT_PATTERNS):
         return FailureCode.TIMEOUT
     if any(p in msg for p in _SCHEMA_PATTERNS):
@@ -1795,7 +1805,7 @@ class DSLInterpreter:
             return None, {
                 **base,
                 "output": None,
-                "error": str(e),
+                "error": redact_exception_text(str(e)),
                 "failure_code": FailureCode.PATH_NOT_PERMITTED,
             }
 
@@ -2012,7 +2022,7 @@ class DSLInterpreter:
                 **base,
                 "inputs": {"connection_id": connection_id},
                 "output": None,
-                "error": str(e),
+                "error": redact_exception_text(str(e)),
                 "failure_code": FailureCode.PATH_NOT_PERMITTED,
             }
 
@@ -2044,7 +2054,7 @@ class DSLInterpreter:
                 **base,
                 "inputs": inputs,
                 "output": None,
-                "error": f"CSVデコード失敗（UTF-8として読めません）: {e}",
+                "error": redact_exception_text(f"CSVデコード失敗（UTF-8として読めません）: {e}"),
                 "failure_code": FailureCode.SCHEMA_MISMATCH,
             }
 

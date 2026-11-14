@@ -91,7 +91,7 @@ def sample_column(
 
     from kawasemi_indexer.ingestion.info_schema import to_sync_dsn
 
-    engine = create_engine(to_sync_dsn(dsn))
+    engine = create_engine(to_sync_dsn(dsn), hide_parameters=True)
     try:
         with engine.connect() as conn:
             col = _quote_ident(physical_name)

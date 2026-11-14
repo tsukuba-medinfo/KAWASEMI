@@ -419,6 +419,22 @@ docker-compose exec postgres pg_dump -U kawasemi kawasemi > backup-$(date +%Y%m%
 
 ### ログの管理
 
+アプリのログは、出力前に、秘匿値・PHI・資格情報をベストエフォートで伏せます
+（`kawasemi/core/logging_config.py` の `PHIRedactionFilter`・`redact_exception_text`）。
+
+- 伏せるもの: SQLAlchemy の `[parameters: ...]` の束縛値、ドライバが例外の文面に載せる行・束縛の値
+  （`DETAIL: Key (col)=(value)`、`invalid input for query argument $1: 'value'`、型変換エラーの
+  `"value"`、`Failing row contains (...)` など。エラーの種類・列名・制約名は残します）、URL の
+  userinfo（`user:pw@`）とクエリの秘匿値（`access_token=` `api_key=` など）、`password`・`token`・
+  `jti` などのキーの値。同じ処理を、evidence・trace・DB・API の応答に載せる例外の文面にも使います。
+- DB エンジンは `hide_parameters=True` で作ります（例外の文字列に束縛値を入れない）。
+- **これは多層防御の一つで、保証ではありません。** 珍しいドライバの文面に、行の値が残ることが
+  あります。`[SQL: ...]` の文は伏せません（文に直接書かれたリテラルは残ります）。ログ・evidence に
+  実患者の値を出さないための境界は、計画の SQL を流す DB ロールの権限と、ログの閲覧権限です。
+- フィルタは、アプリのコンソールハンドラに付きます。`uvicorn` 系は別のハンドラを持ち、この経路を
+  通りません（アクセスログは別に管理してください）。
+
+
 ```bash
 # ログの確認
 docker-compose logs -f kawasemi
