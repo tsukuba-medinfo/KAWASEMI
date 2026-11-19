@@ -386,7 +386,7 @@ server {
 }
 
 server {
-    listen 443 ssl http2;
+    listen 443 ssl;
     server_name your-domain.com;
 
     ssl_certificate /path/to/cert.pem;
@@ -401,6 +401,14 @@ server {
     }
 }
 ```
+
+リバースプロキシは KAWASEMI の外にある部品で、更新は運用者の責任である。
+KAWASEMI は HTTP/2 を必要としないため、上の例はクライアント側の HTTP/2 を有効にしていない。
+nginx の `ngx_http_v2_module` には、HTTP/2 のクライアント接続を受けるときに悪用される use-after-free
+（[CVE-2026-123633](https://nvd.nist.gov/vuln/detail/cve-2026-123633)）が報告されている。
+HTTP/2 を有効にしている場合は、修正版（NGINX Open Source の 1.30.7 または 1.31.9 以降）へ更新するか、
+更新までの間 `listen` から `http2` を外す。影響を受ける版と対策は、
+NGINX の公式情報（[F5 K000163928](https://my.f5.com/manage/s/article/K000163928)）で確かめること。
 
 ### データのバックアップ
 
